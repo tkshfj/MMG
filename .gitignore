@@ -5,6 +5,10 @@
 data/
 downloads/
 
+# Quarto files
+report/_output/
+report/site_libs/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
