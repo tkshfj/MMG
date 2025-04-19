@@ -1,8 +1,1 @@
-This document was authored using [Quarto](https://quarto.org), a literate programming framework supporting Markdown, LaTeX, and executable code. Tools used include:
-
-- **Quarto HTML/PDF output** with `toc` and `fig-cap` enabled.
-- **LaTeX** for equations like accuracy and F1-score definitions.
-- **Markdown** for narrative structure.
-- **Version control** using Git + GitHub for all project artifacts.
-
-For reproducibility, the `.qmd` source, `references.bib`, and code are archived in the project repository.
+The writing process for this report was conducted using **Quarto**, a modern scientific and technical publishing system that integrates **Markdown**, **LaTeX**, and executable code within a single framework. The project uses the `manuscript` type configuration to generate both **PDF (via XeLaTeX)** and **HTML outputs** with consistent styling, numbered sections, and title-cased tables of contents. The directory follows a modular structure (`_quarto.yml`, `report.qmd`), with customizations for fonts, TOC titles, and citation formatting via `.bib` and `.csl` files. **Version control** was managed using **Git and GitHub**, enabling reproducible and collaborative manuscript development. Integrated with **VSCode** and **Zotero (via Better BibTeX)**, this setup provides a complete academic writing workflow—featuring live previews, citation support, and source-controlled outputs—crucial for high-quality, reproducible scientific communication.
