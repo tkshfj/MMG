@@ -14,11 +14,11 @@ format:
     engine: xelatex
     toc: true
     toc-depth: 3
-    include-in-header:
-      text: |
-        \renewcommand{\contentsname}{Table of Contents}
+    # include-in-header:
+    #   text: |
+    #     \renewcommand{\contentsname}{Table of Contents}
     number-sections: false
-    fig-cap-location: top
+    # fig-cap-location: top
     keep-tex: true
     # mainfont: "Noto Serif"
     # mainfont: "Palatino"  # Beautiful for print
@@ -29,6 +29,22 @@ format:
     monofont: "Courier New"  # Default in many environments
     fontsize: 12pt
     linestretch: 1.5
+    # fig-env: figure
+    fig-align: center
+    fig-pos: "htbp"
+    fig-cap-location: bottom
+    fig-width: 5.5
+    fig-height: 3.5
+    fig-format: pdf
+    fig-dpi: 300
+    # fig-align: center
+    # fig-pos: "H"
+    # fig-cap-location: bottom
+    # fig-width: 5
+    # fig-height: 3
+    # fig-format: pdf
+    # fig-dpi: 300
+
   html: 
     toc: true
     toc-depth: 3

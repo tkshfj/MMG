@@ -1,8 +1,14 @@
 ### 1.1 Background & Motivation
 
-Describe the clinical and societal significance of early breast cancer detection. Mention the NHS 2025 initiative and how AI fits into screening.
+- Describe the clinical and societal significance of early breast cancer detection. 
+- Mention the NHS 2025 initiative and how AI fits into screening.
 
-![Figure](/figures/s300_mammogram-breast-cancer-screening-women-health.jpg)
+![Screening mammogram](figures/mammogram.jpg){width=50% .center}
+<!-- \begin{figure}[H]
+\centering
+\includegraphics[width=0.5\textwidth]{figures/mammogram.jpg}
+\caption{Breast cancer screening mammogram. AI enhances diagnostic accuracy.}
+\end{figure} -->
 
 According to recent research [@lee2017], neural networks outperform ...
 
