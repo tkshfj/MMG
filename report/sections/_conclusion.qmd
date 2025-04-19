@@ -1,0 +1,3 @@
+- Summary of findings
+- Implications for clinical use: Whether deep learning improves screening performance
+- Suggestions for future work: Recommendations for future research (ensemble models, multi-task learning)

@@ -1,0 +1,54 @@
+project:
+  type: manuscript
+  output-dir: _output
+  # https://quarto.org/docs/manuscripts/components.html
+
+manuscript:
+  article: report.qmd
+  resources:
+    - notebooks
+    - figures
+
+format:
+  pdf:
+    engine: xelatex
+    toc: true
+    toc-depth: 3
+    include-in-header:
+      text: |
+        \renewcommand{\contentsname}{Table of Contents}
+    number-sections: false
+    fig-cap-location: top
+    keep-tex: true
+    # mainfont: "Noto Serif"
+    # mainfont: "Palatino"  # Beautiful for print
+    # mainfont: "Georgia"  # Web-safe serif
+    # mainfont: "Charter"  # Clean look, nice for PDFs
+    mainfont: "Times New Roman"  # Academic default, widely used
+    # monofont: "Monaco"  # Good old-school style
+    monofont: "Courier New"  # Default in many environments
+    fontsize: 12pt
+    linestretch: 1.5
+  html: 
+    toc: true
+    toc-depth: 3
+    toc-title: "Table of Contents"
+    code-fold: false
+    number-sections: false
+    theme: cosmo  # Clean, minimal
+  #   theme: flatly  # Modern, flat look
+  #   theme: litera  # Elegant serif styling
+  #   theme: journal  # Academic feel
+  #   theme: minty  # Soft, mint-green look
+  #   theme: darkly  # Dark mode
+
+bibliography: references.bib
+csl: styles/nature.csl
+
+execute:
+  echo: false
+  warning: false
+  message: false
+  # error: false
+  # include: true
+  # cache: true

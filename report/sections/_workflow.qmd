@@ -1,0 +1,50 @@
+### 3.1 Problem Definition
+
+Define input/output:
+- Input: X-ray mammogram or ROI
+- Output: Binary label (benign or malignant)
+
+Define the supervised classification task:
+- Input: X-ray mammogram image (ROI or full view)
+- Output: Binary label (benign/malignant)
+
+### 3.2 Data Preparation
+
+- Preprocessing steps
+  - Denoising, rescaling, grayscale conversion
+  - Normalization [e.g., pixel range 0–1 or mean/std]
+- Label encoding
+- Data augmentation techniques: flips, rotations, zooms
+
+### 3.3 Model Building
+
+- Baseline model: custom CNN
+- Advanced models:
+  - Transfer learning (e.g., VGG16, ResNet50)
+  - Optional segmentation with U-Net
+
+### 3.4 Model Training
+
+- Loss function: Binary Crossentropy
+- Optimizer: Adam
+- Metrics: Accuracy, AUC, Sensitivity, Specificity, F1-score
+- Epochs, batch size, learning rate, early stopping, callbacks (e.g., early stopping, LR scheduler)
+
+### 3.5 Evaluation
+
+- Report performance on test set
+  - Confusion matrix
+  - ROC curve, AUC
+  - Precision, Recall, F1-score
+
+### 3.6 Model Improvement
+
+- Regularization techniques: dropout, L2
+- Data augmentation experiments
+- Architecture tuning: more layers, batch norm  
+- Transfer learning comparisons
+
+- Add dropout / L2 regularization
+- Increase network depth
+- Apply transfer learning
+- Tune hyperparameters

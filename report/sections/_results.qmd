@@ -1,0 +1,4 @@
+- Performance Tables: Accuracy, AUC, Sensitivity, Specificity per model
+- Visualizations: ROC curve, training/validation loss curves
+- Error Analysis: Misclassified cases, confusion matrix
+- Example visualizations of predictions (e.g., Grad-CAM)

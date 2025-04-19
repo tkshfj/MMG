@@ -1,0 +1,8 @@
+This document was authored using [Quarto](https://quarto.org), a literate programming framework supporting Markdown, LaTeX, and executable code. Tools used include:
+
+- **Quarto HTML/PDF output** with `toc` and `fig-cap` enabled.
+- **LaTeX** for equations like accuracy and F1-score definitions.
+- **Markdown** for narrative structure.
+- **Version control** using Git + GitHub for all project artifacts.
+
+For reproducibility, the `.qmd` source, `references.bib`, and code are archived in the project repository.

@@ -1,0 +1,32 @@
+### 1.1 Background & Motivation
+
+Describe the clinical and societal significance of early breast cancer detection. Mention the NHS 2025 initiative and how AI fits into screening.
+
+![Figure](/figures/s300_mammogram-breast-cancer-screening-women-health.jpg)
+
+According to recent research [@lee2017], neural networks outperform ...
+
+### 1.2 Objectives
+
+- Apply deep learning (CNNs) to mammography image classification.
+- Evaluate performance vs. traditional methods/radiologists.
+
+### 1.3 Scope
+
+Briefly note focus on classification (benign vs malignant), dataset used, and evaluation metrics.
+
+
+Background & Motivation
+
+- Significance of early breast cancer detection.
+- NHS 2025 initiative on DL for screening.
+
+Project Objectives
+
+- Build and evaluate CNN models using the DDSM/CBIS-DDSM dataset.
+- Assess whether CNNs can match or exceed radiologist performance.
+
+Scope
+
+- Focus on classification (benign vs. malignant), with optional segmentation.
+- Use curated public data for transparency and reproducibility.
