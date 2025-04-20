@@ -41,9 +41,8 @@ csl: styles/nature.csl
 
 {{< include /sections/_conclusion.qmd >}}
 
-## 7. References
-
-{{< include /sections/_references.qmd >}}
+<!-- ## 7. References
+{{< include /sections/_references.qmd >}} -->
 
 ## Appendix
 

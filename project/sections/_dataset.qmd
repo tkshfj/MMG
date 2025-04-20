@@ -16,7 +16,7 @@
 
 Dataset Description
 
-- Use of CBIS-DDSM (Lee et al., 2017) — curated version of DDSM.
+- Use of CBIS-DDSM[@lee2016; @lee2017] — curated version of DDSM.
 - Number of images, classes (benign/malignant), calcifications vs. masses.
 
 Preprocessing Steps
