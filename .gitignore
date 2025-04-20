@@ -8,6 +8,9 @@
 /project/_output/
 /project/site_libs/
 
+# working files
+/working/
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
