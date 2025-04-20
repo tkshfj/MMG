@@ -3,7 +3,6 @@
 
 # data files
 data/
-downloads/
 
 # Quarto files
 report/_output/
@@ -22,7 +21,7 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-downloads/
+# downloads/
 eggs/
 .eggs/
 lib/
