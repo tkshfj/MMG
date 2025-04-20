@@ -2,7 +2,6 @@
 .DS_Store
 
 # data files
-data/
 
 # Quarto files
 report/_output/
