@@ -2,6 +2,7 @@
 .DS_Store
 
 # data files
+downloads/
 
 # Quarto files
 report/_output/
@@ -20,7 +21,6 @@ __pycache__/
 build/
 develop-eggs/
 dist/
-downloads/
 eggs/
 .eggs/
 lib/
