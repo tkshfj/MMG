@@ -4,6 +4,9 @@
 # data files
 /downloads/
 
+# models
+models/
+
 # Quarto files
 /project/_output/
 /project/site_libs/
