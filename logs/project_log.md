@@ -7,6 +7,7 @@
 
 ## 2025/04/24
 
+- Installed an Intel AX210 Wi-Fi 6E adapter, replacing the onboard MediaTek MT7927 module.
 - Installed NVIDIA RTX 4080 Super as a second GPU.  
 - Installed NVIDIA proprietary driver version 550.144.03 and CUDA toolkit 12.4 for GPU acceleration.  
 - Set up Python virtual environments using `venv` for isolated package management.  
@@ -41,6 +42,8 @@
   - GPU: NVIDIA RTX 6000 Ada
   - RAM: 96 GB DDR5
   - Storage: 4 TB NVMe SSD
+  - CPU Cooler: Noctua NH-D15 G2
+  - PC Case: be quiet! Dark Base PRO 901 Black (BGW50 / DRK-BSE-PRO-901/BK)
 
 ## 2025/04/17
 
