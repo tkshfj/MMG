@@ -8,8 +8,8 @@ data/
 # models/
 
 # Quarto files
-/report/_output/
-/report/site_libs/
+report/_output/
+report/site_libs/
 
 # working files
 /working/
