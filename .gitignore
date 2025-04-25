@@ -2,11 +2,10 @@
 .DS_Store
 
 # data files
-/downloads/
-/data/
+# /data/
 
 # models
-models/
+# models/
 
 # Quarto files
 /project/_output/
