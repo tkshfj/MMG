@@ -1,5 +1,19 @@
 # Project Log
 
+## 2025-04-26
+
+- Installed Quarto on Ubuntu 22.04
+```sh
+sudo apt update
+sudo apt install -y wget gdebi-core
+cd ~/Downloads
+wget https://quarto.org/download/latest/quarto-linux-amd64.deb
+sudo gdebi quarto-linux-amd64.deb
+quarto --version
+sudo apt install -y texlive-full
+xelatex --version
+```
+
 ## 2025-04-25
 
 - Conducted a preliminary review of the U-Net architecture for image segmentation.
