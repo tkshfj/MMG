@@ -3,7 +3,7 @@
 - Describe the clinical and societal significance of early breast cancer detection. 
 - Mention the NHS 2025 initiative and how AI fits into screening.
 
-![Screening mammogram](figures/mammogram.jpg){width=50% .center}
+![Screening mammogram](figures/gov_uk2025.jpg){width=50% .center}
 <!-- \begin{figure}[H]
 \centering
 \includegraphics[width=0.5\textwidth]{figures/mammogram.jpg}
