@@ -1,0 +1,52 @@
+---
+title: "Project Proposal"
+author: Takeshi Fujii, MD
+format: pptx
+---
+
+## Deep Learning for Breast Cancer Detection
+
+- A Project Proposal based on the MLNN Project Idea, presented as part of the CM3070 Computer Science Final Project
+- by Takeshi Fujii, MD on 14 April 2025
+
+---
+
+Introduction
+Why is early detection of breast cancer important?
+
+Breast cancer is the most frequently diagnosed cancer and the leading cause of cancer-related death among women worldwide. According to the GLOBOCAN database, in 2020 it accounted for approximately 2.3 million new cases (representing 1 in 4 new cancer diagnoses) and 685,000 deaths (1 in 6 cancer deaths) among women globally. This substantial global burden highlights the critical need for early detection, effective treatment, and continued research to reduce mortality rates.
+
+Early detection of breast cancer is essential because it significantly improves five-year survival rates—exceeding 90% when identified at an early stage—while enabling less aggressive interventions, such as breast-conserving surgery instead of mastectomy. It also reduces healthcare costs, preserves quality of life by minimizing treatment side effects and psychological impact, and strengthens the case for screening programs by demonstrating their effectiveness in identifying cancer at treatable stages.
+
+In alignment with these goals, on 4 February 2025, the UK government launched a world-leading clinical trial involving nearly 700,000 women to evaluate the role of artificial intelligence in early breast cancer detection. Announced on World Cancer Day, this initiative is part of the NHS’s 10-Year Health Plan to transition from analogue to digital infrastructure. The trial aims to support radiologists, reduce cancer mortality, and enhance healthcare efficiency. It also includes a national call for evidence to inform future cancer care strategy.
+
+https://ascopubs.org/doi/10.1200/JCO.2023.41.16_suppl.10528
+https://pmc.ncbi.nlm.nih.gov/articles/PMC9465273/
+https://www.gov.uk/government/news/world-leading-ai-trial-to-tackle-breast-cancer-launched
+
+Note:
+This is a speaker note for this slide.
+
+---
+
+## Mammography
+
+---
+
+## Dataset
+
+Digital Database for Screening Mammography (DDSM)
+
+---
+
+## Models
+
+---
+
+## Previous Works
+
+---
+
+## Next Steps
+
+---
