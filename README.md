@@ -22,11 +22,8 @@ The aim is to establish if Deep Learning assisted X-ray mammography can improve 
 The UK national health service (NHS) launched, in early 2025, a major research project to address the above research question. If successful, a DL system could replace one of the two radiologists currently reporting on scans with the consequence of faster diagnostic turn-around and the liberation of specialists for other tasks. CNNs are deep learning neural networks that apply a succession of filters to the input layer. They are capable of impressive image recognition tasks.
 
 > Here are some recommended sources for you to begin your research.
-- Wang L. Mammography with deep learning for breast cancer detection. *Front Oncol.* 2024 Feb 12;14:1281922. doi: 10.3389  
-  [https://doi.org/10.3389/fonc.2024.1281922](https://doi.org/10.3389/fonc.2024.1281922)  
-  PMID: 38410114; PMCID: PMC10894909.
-- Lee, R., Gimenez, F., Hoogi, A., Miyake, K. K., Gorovoy, M. & Rubin, D. L. "A curated mammography data set for use in computer-aided detection and diagnosis research." *Sci Data* 4, 170177 (2017).  
-  [https://doi.org/10.1038/sdata.2017.177](https://doi.org/10.1038/sdata.2017.177)
+- Wang L. Mammography with deep learning for breast cancer detection. *Front Oncol.* 2024 Feb 12;14:1281922. doi: 10.3389 [https://doi.org/10.3389/fonc.2024.1281922](https://doi.org/10.3389/fonc.2024.1281922) PMID: 38410114; PMCID: PMC10894909.
+- Lee, R., Gimenez, F., Hoogi, A., Miyake, K. K., Gorovoy, M. & Rubin, D. L. "A curated mammography data set for use in computer-aided detection and diagnosis research." *Sci Data* 4, 170177 (2017). [https://doi.org/10.1038/sdata.2017.177](https://doi.org/10.1038/sdata.2017.177)
 - Francois Chollet (2018). *Deep Learning with Python.* Manning, Shelter Island
 - [https://www.tensorflow.org](https://www.tensorflow.org)
 
