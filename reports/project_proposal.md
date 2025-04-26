@@ -55,11 +55,46 @@ Digital Database for Screening Mammography (DDSM)
 | **Task Type** | Pixel-wise labeling (where exactly the lesion is) | Bounding box or region proposal (where tumors are located) | Labeling as benign or malignant (or subtype) |
 | **Model Examples** | U-Net variants (e.g., CRU-Net, RU-Net), Attention U-Nets, GANs, Mask R-CNN (for segmentation) | YOLO, Mask R-CNN, Faster R-CNN (for detection) | CNNs, Transfer Learning (VGG, ResNet), Ensemble classifiers (for diagnosis) |
 | **Typical Input/Output** | Input: Mammogram → Output: Segmentation map (lesion mask) | Input: Mammogram → Output: Tumor location (bounding box/mask) | Input: Cropped lesion or whole image → Output: Class label (benign or malignant) |
-| **Common Evaluation Metrics** | Dice coefficient (DSC), Jaccard index (IoU), pixel accuracy | Sensitivity, Specificity, Accuracy, AUC | Accuracy, Precision, Recall, F1-score, AUC |
+| **Common Evaluation Metrics** | Dice coefficient (DSC), Jaccard index (intersection over union; IoU), pixel accuracy | Sensitivity, Specificity, Accuracy, AUC | Accuracy, Precision, Recall, F1-score, AUC |
 | **Application in Workflow** | Helps localize and delineate tumors or abnormalities | Helps detect the presence and localization of tumors | Helps diagnose tumors (e.g., benign or malignant) |
+
+Note:
+Image segmentation and classification are the most ...
 
 ---
 
 ## Next Steps
+
+- Current Challenges
+  - Data Scarcity
+  - Annotation Quality
+  - Imbalanced Datasets
+  - Computational Resources
+  - 
+- Future Directions
+  - Transfer Learning (TL)
+    - Fine-tune pre-trained models (VGG16, ResNet50).
+    - Replace classification head for binary classification.
+  - Hyperparameter tuning (learning rate, batch size).
+  - Ablation studies (e.g., full image vs ROI)
+
+Note:
+Current Challenges include: 
+  - Data Scarcity: Deep learning needs large, high-quality datasets, but medical imaging datasets are limited, especially for rare conditions.
+  - Annotation Quality: Annotating medical images is expensive, subjective, and time-consuming. Poor or inconsistent annotations hurt model performance.
+  - Imbalanced Datasets: Cancer-positive cases are much fewer than negatives, leading to biased models.
+  - Model Interpretability: DL models are often "black boxes." Lack of explainability reduces clinician trust.
+  - Data Privacy & Security: Medical images contain sensitive information, and privacy laws restrict data sharing for training.
+  - Computational Resources: Training deep models on large medical images (like mammograms) requires high-end GPUs and TPUs, which are costly.
+  - Adversarial Vulnerability: Small, imperceptible changes in images can trick models — dangerous in critical diagnosis settings.
+
+- Future Directions
+  - Transfer Learning (TL): Use models pre-trained on other tasks to reduce the need for large labeled datasets.
+  - Better Annotation Tools: Develop frameworks to speed up and standardize high-quality annotation.
+  - Cross-institutional Data Sharing: Encourage collaboration across hospitals and countries to create larger, more diverse datasets.
+  - Explainable AI (XAI): Build models that show "why" they make certain predictions (e.g., Grad-CAM, saliency maps).
+  - Robust Model Training: Use techniques like adversarial training and ensemble learning to make models more resilient and reliable.
+  - Privacy-preserving DL: Explore federated learning and encryption techniques to train on private data without moving it.
+  - Resource-efficient Models: Optimize models (e.g., pruning, quantization) to make them faster and cheaper to deploy clinically.
 
 ---
