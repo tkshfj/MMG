@@ -1,6 +1,6 @@
 # Final Project: Deep Learning for Breast Cancer Detection
 
-## Time Table
+## Timeline
 
 | Date        | Week   | Deliverable                       | Weight                         | Status   |
 |-------------|--------|-----------------------------------|--------------------------------|----------|
@@ -11,7 +11,7 @@
 | 15 Sep      | 24     | Final Report (CW2)                | Report/Code: 60%<br>Video: 5%  | |
 | -           | 1–20   | Quizzes                           | 5%                             | Ongoing |
 
-## Original Project Idea: 3.2 MLNN: Deep Learning Breast Cancer Detection
+## Project Idea: 3.2 MLNN: Deep Learning Breast Cancer Detection
 
 > What problem is this project solving, or what is the project idea?
 

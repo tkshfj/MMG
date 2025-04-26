@@ -1,5 +1,13 @@
 # Project Log
 
+## 2025-04-27
+
+- Revised project proposal slides
+  - Add descriptions on Models and Previous Works
+
+- Reviewed image segmentation, detection and classification techniques
+  - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
+
 ## 2025-04-26
 
 - Installed Quarto on Ubuntu 22.04

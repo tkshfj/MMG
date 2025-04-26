@@ -37,9 +37,26 @@ Digital Database for Screening Mammography (DDSM)
 
 ## Models
 
+- Segmentation: Where the tumor is exactly.
+- Detection: Finding tumors (often less precise than segmentation).
+- Classification: Diagnoses (deciding whether the tumor is benign or malignant).
+
+![](../working/models_1.png)
+
+![](../working/models_2.png)
+
 ---
 
 ## Previous Works
+
+| **Main Focus** | **Segmentation** of breast lesions | **Detection** of breast tumors | **Classification** of breast tumors |
+|:--|:--|:--|:--|
+| Wang 2024 | Table 3 | Table 4 | Table 5 |
+| **Task Type** | Pixel-wise labeling (where exactly the lesion is) | Bounding box or region proposal (where tumors are located) | Labeling as benign or malignant (or subtype) |
+| **Model Examples** | U-Net variants (e.g., CRU-Net, RU-Net), Attention U-Nets, GANs, Mask R-CNN (for segmentation) | YOLO, Mask R-CNN, Faster R-CNN (for detection) | CNNs, Transfer Learning (VGG, ResNet), Ensemble classifiers (for diagnosis) |
+| **Typical Input/Output** | Input: Mammogram → Output: Segmentation map (lesion mask) | Input: Mammogram → Output: Tumor location (bounding box/mask) | Input: Cropped lesion or whole image → Output: Class label (benign or malignant) |
+| **Common Evaluation Metrics** | Dice coefficient (DSC), Jaccard index (IoU), pixel accuracy | Sensitivity, Specificity, Accuracy, AUC | Accuracy, Precision, Recall, F1-score, AUC |
+| **Application in Workflow** | Helps localize and delineate tumors or abnormalities | Helps detect the presence and localization of tumors | Helps diagnose tumors (e.g., benign or malignant) |
 
 ---
 
