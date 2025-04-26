@@ -1,18 +1,14 @@
 ---
-title: "Project Proposal"
+title: "Deep Learning for Breast Cancer Detection"
+subtitle: "A Project Proposal based on the MLNN Project Idea, presented as part of the CM3070 Computer Science Final Project"
 author: Takeshi Fujii, MD
+date: 26 April 2025
 format: pptx
 ---
 
-## Deep Learning for Breast Cancer Detection
+## Introduction
 
-- A Project Proposal based on the MLNN Project Idea, presented as part of the CM3070 Computer Science Final Project
-- by Takeshi Fujii, MD on 14 April 2025
-
----
-
-Introduction
-Why is early detection of breast cancer important?
+### Why is early detection of breast cancer important?
 
 Breast cancer is the most frequently diagnosed cancer and the leading cause of cancer-related death among women worldwide. According to the GLOBOCAN database, in 2020 it accounted for approximately 2.3 million new cases (representing 1 in 4 new cancer diagnoses) and 685,000 deaths (1 in 6 cancer deaths) among women globally. This substantial global burden highlights the critical need for early detection, effective treatment, and continued research to reduce mortality rates.
 
