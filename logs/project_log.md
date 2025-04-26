@@ -15,6 +15,10 @@ xelatex --version
 sudo apt install -y ttf-mscorefonts-installer
 ```
 
+- Started data pipeline development for the CBIS-DDSM dataset.
+  - Described an overview of the data pipeline architecture and its components.
+  - Implemented functions to read and parse the clinical metadata CSV files.
+
 ## 2025-04-25
 
 - Conducted a preliminary review of the U-Net architecture for image segmentation.
