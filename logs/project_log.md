@@ -10,8 +10,9 @@ cd ~/Downloads
 wget https://quarto.org/download/latest/quarto-linux-amd64.deb
 sudo gdebi quarto-linux-amd64.deb
 quarto --version
-sudo apt install -y texlive-full
+sudo apt install -y texlive-xetex texlive-fonts-recommended texlive-latex-extra
 xelatex --version
+sudo apt install -y ttf-mscorefonts-installer
 ```
 
 ## 2025-04-25
