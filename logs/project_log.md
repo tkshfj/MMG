@@ -54,7 +54,7 @@ sudo apt install -y ttf-mscorefonts-installer
 ## 2025/04/19
 
 - Assembled and configured a workstation for AI workloads.
-- - Installed Ubuntu 22.04 LTS on a workstation with the following specifications:
+  - Installed Ubuntu 22.04 LTS on a workstation with the following specifications:
   - Motherboard: ASUS ProArt X870E Creator Wifi
   - PSU: Corsair RM1000e
   - CPU: AMD Ryzen 9 7950X
