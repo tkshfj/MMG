@@ -7,7 +7,9 @@
 
 ## 2025-04-28
 
-- Output /data/ directory structure
+- Output the directory structure of /data/ into a tree.txt file.
+  - An ordinary "tree . > tree.txt" doesn't work on Ubuntu.
+  - Solution: 
 ```sh
 script -q -c "tree -n data/" tree.txt
 ```
@@ -16,13 +18,6 @@ script -q -c "tree -n data/" tree.txt
 
 - Revised project proposal slides
   - Add descriptions on Models and Previous Works
-
-- Completed data pipeline code for the CBIS-DDSM dataset.
-  - Scan DICOM Files
-  - Extract Metadata from File Paths
-  - Pair Images and Masks
-  - Merge Image–Mask Metadata and Clinical Metadata
-  - Build TensorFlow Dataset
 
 - Installed TensorFlow 2.15.0 with GPU support (CUDA 12.2, cuDNN 8.9).
 - Installed PyTorch 2.2.0 with CUDA 12.1 support.
@@ -33,6 +28,13 @@ source .venv/bin/activate
 pip install tensorflow==2.15.0
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 ```
+
+- Completed data pipeline code for the CBIS-DDSM dataset.
+  - Scan DICOM Files
+  - Extract Metadata from File Paths
+  - Pair Images and Masks
+  - Merge Image–Mask Metadata and Clinical Metadata
+  - Build TensorFlow Dataset
 
 ## 2025-04-26
 
