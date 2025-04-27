@@ -2,7 +2,7 @@
 .DS_Store
 
 # data files
-data/
+# data/
 downloads/
 
 # models
