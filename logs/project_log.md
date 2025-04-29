@@ -7,8 +7,10 @@
 
 ## 2025-04-29
 
-- Searched for vision transformers and their applications in medical imaging.
-- - [Segmentation for mammography classification utilizing deep convolutional neural network](https://bmcmedimaging.biomedcentral.com/articles/10.1186/s12880-024-01510-2)
+- Searched for multi-task learing (MTL) in medical imaging.
+- [Cross-Task Attention Network: Improving Multi-Task Learning for Medical Imaging Applications](https://dl.acm.org/doi/10.1007/978-3-031-47401-9_12)
+- Searched for vision transformers (ViT) and their applications in medical imaging.
+  - [Segmentation for mammography classification utilizing deep convolutional neural network](https://bmcmedimaging.biomedcentral.com/articles/10.1186/s12880-024-01510-2)
   - [Transformer-based deep learning models for breast cancer diagnosis using mammograms: a systematic review](https://bmcmedimaging.biomedcentral.com/articles/10.1186/s12880-024-01510-2)
 
 ## 2025-04-28
