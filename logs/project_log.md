@@ -5,6 +5,12 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-04-29
+
+- Searched for vision transformers and their applications in medical imaging.
+- - [Segmentation for mammography classification utilizing deep convolutional neural network](https://bmcmedimaging.biomedcentral.com/articles/10.1186/s12880-024-01510-2)
+  - [Transformer-based deep learning models for breast cancer diagnosis using mammograms: a systematic review](https://bmcmedimaging.biomedcentral.com/articles/10.1186/s12880-024-01510-2)
+
 ## 2025-04-28
 
 - Output the directory structure of /data/ into a tree.txt file.
