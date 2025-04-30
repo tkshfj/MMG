@@ -5,6 +5,11 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-04-30
+
+- Refined and updated the project proposal slides, focusing on content structure.
+  - Visual design enhancements are still pending.
+
 ## 2025-04-29
 
 - Searched for multi-task learing (MTL) in medical imaging.
