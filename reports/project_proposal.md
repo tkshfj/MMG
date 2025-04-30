@@ -97,7 +97,7 @@ It reduces healthcare costs, minimizes treatment-related side effects, and suppo
 - **Histopathology confirms**:
 - *Benign*: Fibroadenoma, cysts
 - *Premalignant*: Atypical hyperplasia
-- *Malignant*: DCIS, invasive ductal carcinoma (IDC)
+- *Malignant*: duct carcinoma in situ (DCIS), invasive ductal carcinoma (IDC)
 
 - **Determines treatment strategy** (e.g., surgery, oncology referral)
 
