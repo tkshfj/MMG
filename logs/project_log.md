@@ -5,10 +5,23 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-05-04
+
+- Updated the project proposal slides.
+- Reorganized the directory structure for the project proposal.
+
+## 2025-05-03
+
+- Updated the project proposal slides.
+  - Created a table for the Previous Works section.
+
+## 2025-05-01
+
+- Updated the project proposal slides.
+
 ## 2025-04-30
 
-- Refined and updated the project proposal slides, focusing on content structure.
-  - Visual design enhancements are still pending.
+- Updated the project proposal slides, focusing on content structure.
 
 ## 2025-04-29
 

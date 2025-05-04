@@ -1,0 +1,63 @@
+---
+title: "Evaluation Metrics"
+---
+
+## Evaluation Metrics
+
+To evaluate performance across **segmentation**, **detection**, and **classification**, the following metrics will be employed:
+
+### Common Metrics
+
+- **Accuracy** – Overall correctness of predictions
+
+  $$
+  \text{Accuracy} = \frac{TP + TN}{TP + TN + FP + FN}
+  $$
+
+- **Precision** – Proportion of predicted positives that are truly positive
+
+  $$
+  \text{Precision} = \frac{TP}{TP + FP}
+  $$
+
+- **Sensitivity (Recall)** – True positive rate
+
+  $$
+  \text{Sensitivity} = \frac{TP}{TP + FN}
+  $$
+
+- **Specificity** – True negative rate
+
+  $$
+  \text{Specificity} = \frac{TN}{TN + FP}
+  $$
+
+- **F1 Score** – Harmonic mean of precision and recall
+
+  $$
+  \text{F1} = 2 \cdot \frac{\text{Precision} \cdot \text{Recall}}{\text{Precision} + \text{Recall}}
+  $$
+
+### Specialized Metrics
+
+- **AUC (Area Under ROC Curve)** – Measures **classification** performance
+
+  - Range: `0.5` (random) to `1.0` (perfect)
+  - Threshold-independent; robust to class imbalance
+
+- **Dice Coefficient** – Measures **segmentation** overlap accuracy
+
+  $$
+  \text{Dice} = \frac{2 \cdot TP}{2 \cdot TP + FP + FN}
+  $$
+
+  - `1.0` = perfect overlap, `0.0` = no overlap
+  - Especially effective for imbalanced lesion masks
+
+### Task-Specific Metric Summary
+
+| **Task**           | **Primary Metrics**                                             |
+| ------------------ | --------------------------------------------------------------- |
+| **Segmentation**   | Dice Coefficient, also: Intersection over Union (IoU), Pixel Accuracy |
+| **Detection**      | Sensitivity, Specificity, Accuracy                              |
+| **Classification** | Accuracy, F1 Score, AUC, also: Precision, Recall, Confusion Matrix    |

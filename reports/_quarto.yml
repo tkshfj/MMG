@@ -9,6 +9,11 @@ manuscript:
     - notebooks
     - figures
 
+# bibliography: references.bib
+# csl: styles/nature.csl
+bibliography: ../references/references.bib
+csl: ../references/styles/nature.csl
+
 format:
   pdf:
     engine: xelatex
@@ -57,9 +62,6 @@ format:
   #   theme: journal  # Academic feel
   #   theme: minty  # Soft, mint-green look
   #   theme: darkly  # Dark mode
-
-bibliography: references.bib
-csl: styles/nature.csl
 
 execute:
   echo: false

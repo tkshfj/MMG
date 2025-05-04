@@ -1,0 +1,10 @@
+---
+title: "Deep Learning for Breast Cancer Detection"
+subtitle: "A Project Proposal based on the MLNN Project Idea, presented as part of the CM3070 Computer Science Final Project"
+author: "Takeshi Fujii, MD"
+authors:
+  - name: "Takeshi Fujii, MD"
+  - affiliation: "BSc Computer Science, The University of London"
+date: 2025-05-05
+date-format: "D MMMM YYYY"
+---

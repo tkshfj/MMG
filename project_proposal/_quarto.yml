@@ -1,0 +1,71 @@
+project:
+  type: book
+  output-dir: _output
+
+book:
+  chapters:
+    - index.qmd
+    - sections/introduction.qmd
+    - sections/medical_imaging.qmd
+    - sections/mammography.qmd
+    - sections/dataset.qmd
+    - sections/workflow_tasks.qmd
+    - sections/previous_works.qmd
+    - sections/model_architecture.qmd
+    - sections/evaluation_metrics.qmd
+    - sections/project_goals.qmd
+    - sections/references.qmd
+
+bibliography: ../references/references.bib
+csl: ../references/styles/nature.csl
+
+format:
+  pdf:
+    engine: xelatex
+    keep-tex: false
+    toc: true
+    toc-depth: 3
+    # include-in-header:
+    #   text: |
+    #     \renewcommand{\contentsname}{Table of Contents}
+    number-sections: false
+    # fig-cap-location: top
+    # mainfont: "DejaVu Serif"
+    # mainfont: "Noto Serif"
+    # mainfont: "Noto Serif Regular"
+    # mainfont: "NotoSerif-Regular"
+    # mainfont: "Palatino"  # Beautiful for print
+    # mainfont: "Georgia"  # Web-safe serif
+    # mainfont: "Charter"  # Clean look, nice for PDFs
+    # mainfont: "Times New Roman"  # Academic default, widely used
+    # sansfont: "Noto Sans Regular"
+    # monofont: "Courier New"
+    # monofont: "Monaco"  # Good old-school style
+    # mainfont: "texgyrepagella-regular.otf"
+    # sansfont: "texgyreheros-regular.otf"
+    # monofont: "texgyrecursor-regular.otf"
+    # fontoptions:
+    #   - Path = /usr/local/texlive/2025/texmf-dist/fonts/opentype/public/tex-gyre/
+    fontsize: 12pt
+    linestretch: 1.5
+    # fig-env: figure
+    fig-align: center
+    fig-pos: "htbp"
+    fig-cap-location: bottom
+    fig-width: 5.5
+    fig-height: 3.5
+    fig-format: pdf
+    fig-dpi: 300
+
+  html: 
+    toc: true
+    toc-depth: 3
+    toc-title: "Table of Contents"
+    code-fold: false
+    number-sections: false
+    theme: cosmo  # Clean, minimal
+  #   theme: flatly  # Modern, flat look
+  #   theme: litera  # Elegant serif styling
+  #   theme: journal  # Academic feel
+  #   theme: minty  # Soft, mint-green look
+  #   theme: darkly  # Dark mode

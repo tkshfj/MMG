@@ -1,0 +1,8 @@
+---
+title: "Project Goal"
+---
+
+## Project Goal
+
+- The initial prototype will aim to achieve **measurable statistical power**, establishing a robust baseline for model evaluation and iterative refinement.  
+- The overall goal is to **design, implement, and evaluate** a **multi-task deep learning pipeline** using the **CBIS-DDSM dataset** to perform **simultaneous segmentation, detection, and classification** of breast tumors in mammographic images.

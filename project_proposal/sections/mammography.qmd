@@ -1,0 +1,73 @@
+---
+title: "Mammography"
+---
+
+## Mammography Essentials
+
+### 1. Breast Density (BI-RADS A–D)
+
+* A: Fatty  B: Scattered densities
+* C: Heterogeneously dense  D: Extremely dense
+  Dense (C/D) breasts may obscure tumors, reducing sensitivity.
+
+### 2. Standard Views
+
+* CC (Cranio-Caudal), MLO (Mediolateral Oblique)
+  Assess symmetry, positioning, and full tissue coverage.
+
+### 3. Lesion Evaluation
+
+* Masses: Shape (round, oval, irregular); margin (circumscribed, spiculated)
+* Calcifications: Morphology (coarse, micro); distribution (clustered, linear)
+* Architectural Distortion: Disrupted breast structure
+* Asymmetry: New or unilateral density differences
+
+### 4. Breast Imaging-Reporting and Data System (BI-RADS) Categories
+
+* 0: Incomplete – further imaging needed
+* 1–2: Negative or benign
+* 3: Probably benign – short-interval follow-up
+* 4–5: Suspicious or likely malignant – biopsy recommended
+* 6: Biopsy-proven malignancy
+
+
+<!-- ## Mammography
+
+### 1. Breast Density Evaluation
+- BI-RADS A to D:
+- A: Almost entirely fatty
+- B: Scattered fibroglandular densities
+- C: Heterogeneously dense
+- D: Extremely dense
+- Dense breasts (C/D) may obscure tumors and lower sensitivity
+
+### 2. View Orientation
+- Standard views: Cranio-Caudal (CC),  Mediolateral Oblique (MLO)
+- Evaluate: Symmetry, Positioning, Complete tissue coverage
+
+### 3. Lesion Assessment
+- Masses: Shape (round, oval, irregular); margin (circumscribed, spiculated)
+- Calcifications: Size, morphology (coarse vs. micro), distribution (clustered, linear)
+- Architectural distortion: Disruption of normal breast structure
+- Asymmetry: One-sided density differences, especially if new or increasing
+
+### 4. BI-RADS Classification
+- Category 0: Incomplete – needs further imaging
+- Category 1–2: Negative or benign findings
+- Category 3: Probably benign – short-term follow-up
+- Category 4–5: Suspicious or highly suggestive of malignancy → biopsy recommended
+- Category 6: Known biopsy-proven malignancy
+- Biopsy recommended if BI-RADS 4 or 5 -->
+
+<!-- ### 5. Biopsy (If BI-RADS 4 or 5)
+- Techniques:
+- Stereotactic biopsy: Targets calcified or subtle lesions
+- Ultrasound-guided biopsy: Real-time guidance for solid masses
+- MRI-guided biopsy: Reserved for MRI-only visible abnormalities
+
+- Histopathology confirms:
+- *Benign*: Fibroadenoma, cysts
+- *Premalignant*: Atypical hyperplasia
+- *Malignant*: duct carcinoma in situ (DCIS), invasive ductal carcinoma (IDC)
+
+- Determines treatment strategy (e.g., surgery, oncology referral) -->
