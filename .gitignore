@@ -9,9 +9,9 @@ downloads/
 # models/
 
 # Quarto files
-reports/_output/
-reports/site_libs/
-reports/not_used/
+_output/
+site_libs/
+not_used/
 
 # working files
 /working/
