@@ -7,21 +7,21 @@
 
 ## 2025-05-04
 
-- Updated the project proposal slides.
+- Revised the project proposal slides.
 - Reorganized the directory structure for the project proposal.
 
 ## 2025-05-03
 
-- Updated the project proposal slides.
+- Revised the project proposal slides.
   - Created a table for the Previous Works section.
 
 ## 2025-05-01
 
-- Updated the project proposal slides.
+- Revised the project proposal slides.
 
 ## 2025-04-30
 
-- Updated the project proposal slides, focusing on content structure.
+- Revised the project proposal slides, focusing on content structure.
 
 ## 2025-04-29
 
@@ -29,7 +29,7 @@
 - [Cross-Task Attention Network: Improving Multi-Task Learning for Medical Imaging Applications](https://dl.acm.org/doi/10.1007/978-3-031-47401-9_12)
 - Searched for vision transformers (ViT) and their applications in medical imaging.
   - [Segmentation for mammography classification utilizing deep convolutional neural network](https://bmcmedimaging.biomedcentral.com/articles/10.1186/s12880-024-01510-2)
-  - [Transformer-based deep learning models for breast cancer diagnosis using mammograms: a systematic review](https://bmcmedimaging.biomedcentral.com/articles/10.1186/s12880-024-01510-2)
+  - Transformer-based deep learning models for breast cancer diagnosis
 
 ## 2025-04-28
 
