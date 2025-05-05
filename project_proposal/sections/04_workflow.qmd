@@ -1,0 +1,66 @@
+---
+title: "Universal Deep Learning Workflow"
+---
+
+## Universal Deep Learning Workflow
+
+This project follows Chollet’s deep learning workflow using TensorFlow/Keras:
+
+1. Define the Problem – Specify task type, inputs/outputs, and evaluation metrics.
+2. Prepare the Data – Collect, clean, split (train/val/test), and augment as needed.
+3. Design the Model – Select architecture, layers, activations, and loss.
+4. Configure Training – Set optimizer, learning rate, batch size, epochs, callbacks.
+5. Train the Model – Fit to data, monitor metrics, mitigate overfitting.
+6. Evaluate – Test on unseen data with relevant metrics.
+7. Tune and Iterate – Refine hyperparameters or model; retrain.
+8. Deploy – Export and integrate into target application. 
+
+
+
+<!-- ### Core Mammography Tasks
+
+- Segmentation – Outline tumors and lesions
+- Detection – Locate suspicious regions
+- Classification – Predict benign vs. malignant
+- *Risk Prediction – Estimate malignancy likelihood* -->
+
+
+<!-- ## Universal Deep Learning Workflow
+
+This project will follow the deep learning workflow outlined by Chollet (2021)[@chollet2021], encompassing:
+
+1. Define the Problem
+   Task type (e.g., classification), inputs/outputs, evaluation metrics.
+
+2. Prepare the Data
+   Collect, clean, preprocess, split (train/val/test), and augment if needed.
+
+3. Design the Model
+   Choose architecture, layers, activations, and loss function.
+
+4. Configure Training
+   Set optimizer, learning rate, batch size, epochs, callbacks.
+
+5. Train the Model
+   Fit to data, monitor metrics, handle overfitting.
+
+6. Evaluate Performance
+   Test on unseen data using appropriate metrics.
+
+7. Tune and Iterate
+   Refine hyperparameters or architecture; retrain.
+
+8. Deploy the Model
+   Export and integrate into production or application.
+
+The implementation will use TensorFlow/Keras,[@tensorflowteam2015] following best practices for medical image analysis.
+
+![Deep Learning Tasks](/figures/models_1.png) -->
+
+<!-- ### Core Tasks in Breast Imaging -->
+<!-- The model will address three key tasks commonly encountered in mammography-based diagnosis: -->
+
+<!-- - Segmentation: Delineate tumor boundaries and lesion shapes  
+- Detection: Identify and localize suspicious regions (bounding boxes or masks)  
+- Classification: Determine tumor type (e.g., benign vs. malignant)
+- Risk Prediction: Estimate likelihood of malignancy based on imaging features -->

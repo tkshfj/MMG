@@ -1,0 +1,40 @@
+---
+title: "Model Architecture Roadmap: Stage 2"
+---
+
+## Stage 2 — Enhanced CNNs and U-Net with Transfer Learning
+
+This stage improves classification accuracy and introduces segmentation to localize lesions on mammograms.
+
+#### 2A. Enhanced CNNs for Classification
+
+* Regularization: Dropout, L2 weight decay
+* Augmentation: Random flip, rotation, zoom, shift
+* Training Strategies: Early stopping, model checkpointing
+* Validation: Hold-out or stratified K-fold cross-validation
+* Evaluation: Accuracy, ROC-AUC, precision–recall curves, confusion matrix
+
+#### 2B. U-Net for Lesion Segmentation
+
+U-Net enables pixel-wise lesion localization, improving interpretability and model trust.[@ronneberger2015;@el-banby2024]
+
+Architecture:
+
+* Encoder–decoder structure with skip connections
+* Input: Grayscale or RGB mammogram
+* Output: Binary lesion mask
+
+Variants:
+
+* Vanilla U-Net: Trained from scratch using CBIS-DDSM segmentation masks
+* Transfer Learning U-Net:
+
+  * Pretrained encoder (e.g., ResNet34, VGG16)
+  * Decoder randomly initialized
+
+Loss Functions:
+
+* Dice coefficient
+* Combined binary crossentropy + IoU loss
+
+![U-Net Architecture](/figures/elbandy2024_fig09.png)

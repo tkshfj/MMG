@@ -6,6 +6,15 @@ title: "Previous Works"
 
 Comparison of CNN, Transformer, hybrid, and GAN models across **segmentation**, **detection**, **classification**, and **multi-task learning (MTL)** capabilities. Based on Wang (2024) and recent literature.
 
+**Legend:**
+✓ = Native | ✓+ = Enhanced | \~ = Add-ons needed | × = Not supported
+◇ = MTL via extensions | ✓✓ = Joint-native MTL
+
+**Footnotes:**
+¹ FC layer | ² Region head | ³ MLP head | ⁴ Decoder needed | ⁵ Dual heads
+⁶ Mask R-CNN variants | ⁷ Multi-branch fine-tune | ⁸ ViT multi-heads
+⁹ Task-specific Swin heads | ¹⁰ CTAN shared attention
+
 | **Model**                          | **Seg** | **Detect** | **Classify** | **MTL** | **Wang (2024)** |
 | ---------------------------------- | ------- | ---------- | ------------ | ------- | --------------- |
 | **CNN-based**                      |         |            |              |         |                 |
@@ -24,12 +33,3 @@ Comparison of CNN, Transformer, hybrid, and GAN models across **segmentation**, 
 | TransUNet (ViT + CNN)              | ✓       | ×          | \~¹          | ◇⁸      | —               |
 | Swin-Unet                          | ✓+      | ×          | \~³          | ◇⁹      | —               |
 | **GAN-based**                      | ✓ (gen) | ×          | \~ (disc)    | ◇       | —               |
-
-**Legend:**
-✓ = Native | ✓+ = Enhanced | \~ = Add-ons needed | × = Not supported
-◇ = MTL via extensions | ✓✓ = Joint-native MTL
-
-**Footnotes:**
-¹ FC layer | ² Region head | ³ MLP head | ⁴ Decoder needed | ⁵ Dual heads
-⁶ Mask R-CNN variants | ⁷ Multi-branch fine-tune | ⁸ ViT multi-heads
-⁹ Task-specific Swin heads | ¹⁰ CTAN shared attention

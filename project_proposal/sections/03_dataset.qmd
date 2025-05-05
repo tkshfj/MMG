@@ -1,0 +1,25 @@
+---
+title: "Dataset"
+---
+
+## Dataset
+
+### Dataset: DDSM and CBIS-DDSM
+
+The Digital Database for Screening Mammography (DDSM) is a legacy dataset developed for early breast cancer CAD research.
+
+The Curated Breast Imaging Subset (CBIS-DDSM) \[@lee2017], hosted by the Cancer Imaging Archive (TCIA), is a modern, standardized version.
+
+To support model development, this project uses CBIS-DDSM, which includes over 3,000 expert-annotated mammograms with Breast Imaging Reporting and Data System (BI-RADS) scores, pathology-confirmed labels, and lesion contours—supporting classification, detection, and segmentation tasks.
+
+### Ethical Considerations
+
+The dataset is de-identified and publicly available, with no new human subjects involved. It is handled in accordance with ethical standards, though limitations such as outdated imaging and demographic bias exist. Results require clinical validation, and open-access publication is encouraged.
+
+<!-- ### Digital Database for Screening Mammography (DDSM)
+
+A publicly available legacy dataset of over 2,500 scanned film mammography studies (\~10,480 high-resolution grayscale images, typically \~4,000 × 5,000 pixels), developed to support early research in computer-aided detection (CAD) for breast cancer. It includes detailed annotations of abnormalities (masses, calcifications, asymmetries), BI-RADS assessments, pathology-confirmed labels (benign or malignant), and ROI contours.
+
+### Curated Breast Imaging Subset of DDSM (CBIS-DDSM)[@lee2017]
+
+A curated, modern subset of the DDSM hosted on The Cancer Imaging Archive (TCIA), comprising 3,102 mammography cases (\~3,000 high-resolution grayscale images). Each case includes expert-annotated lesions (masses, calcifications, architectural distortions) with pathology-confirmed labels (benign or malignant), as well as metadata such as patient age, breast laterality, and view type (CC or MLO). The dataset is divided into training, validation, and test sets, and supports segmentation, detection, and classification tasks—making it ideal for multi-task learning and widely used in breast cancer AI research. -->

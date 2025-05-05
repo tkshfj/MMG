@@ -1,0 +1,27 @@
+---
+title: "Deep Learning for Breast Cancer Detection"
+subtitle: "A Project Proposal based on the MLNN Project Idea, presented as part of the CM3070 Computer Science Final Project"
+author: "Takeshi Fujii, MD"
+authors:
+  - name: "Takeshi Fujii, MD"
+  - affiliation: "BSc Computer Science, The University of London"
+date: 2025-05-05
+date-format: "D MMMM YYYY"
+bibliography: ../references/references.bib
+csl: ../references/styles/nature.csl
+format: pptx
+---
+
+{{< include sections/01_introduction.qmd >}}
+{{< include sections/02_mammography.qmd >}}
+{{< include sections/03_dataset.qmd >}}
+{{< include sections/04_workflow.qmd >}}
+{{< include sections/05_previous_works.qmd >}}
+{{< include sections/06_model_architecture.qmd >}}
+{{< include sections/07_model_architecture.qmd >}}
+{{< include sections/08_model_architecture.qmd >}}
+{{< include sections/09_evaluation.qmd >}}
+{{< include sections/10_project_goals.qmd >}}
+{{< include sections/11_title.qmd >}}
+
+# Deep Learning for Breast Cancer Detection

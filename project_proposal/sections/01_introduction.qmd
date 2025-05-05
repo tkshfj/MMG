@@ -2,9 +2,7 @@
 title: "Introduction"
 ---
 
-## Introduction
-
-### Why Is Early Detection of Breast Cancer Important?
+## Why Is Early Detection of Breast Cancer Important?
 
 - High Global Burden:
 Breast cancer is the most commonly diagnosed cancer and the leading cause of cancer-related death among women worldwide. In 2020, it accounted for **2.3 million new cases** (1 in 4 cancer diagnoses) and **685,000 deaths** (1 in 6 cancer deaths) globally (GLOBOCAN 2020).[@arnold2022;@sedeta2023]

@@ -5,16 +5,17 @@ project:
 book:
   chapters:
     - index.qmd
-    - sections/introduction.qmd
-    - sections/medical_imaging.qmd
-    - sections/mammography.qmd
-    - sections/dataset.qmd
-    - sections/workflow_tasks.qmd
-    - sections/previous_works.qmd
-    - sections/model_architecture.qmd
-    - sections/evaluation_metrics.qmd
-    - sections/project_goals.qmd
-    - sections/references.qmd
+    - sections/01_introduction.qmd
+    - sections/02_mammography.qmd
+    - sections/03_dataset.qmd
+    - sections/04_workflow.qmd
+    - sections/05_previous_works.qmd
+    - sections/06_model_architecture.qmd
+    - sections/07_model_architecture.qmd
+    - sections/08_model_architecture.qmd
+    - sections/09_evaluation.qmd
+    - sections/10_project_goals.qmd
+    - sections/11_title.qmd
 
 bibliography: ../references/references.bib
 csl: ../references/styles/nature.csl
