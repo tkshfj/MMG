@@ -6,7 +6,7 @@ author:
 date: today
 date-format: "D MMMM YYYY"
 bibliography: ../references/references.bib
-csl: ../references/styles/harvard.csl
+csl: ../references/styles/association-for-computing-machinery.csl
 link-citations: true
 format:
   pdf:

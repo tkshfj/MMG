@@ -9,9 +9,10 @@
 
 - Completed watching the lectures for Weeks 5 and 6.
 - Created templates and Quarto settings for the literature review.
-- Downloaded Harvard reference style from Zotero.
+- Downloaded ACM reference style from Zotero.
   - Referencing Styles https://onlinelibrary.london.ac.uk/support/referencing/referencing-styles
   - Zotero Style Repository https://www.zotero.org/styles
+  - Association for Computing Machinery (ACM)
   - Cite Them Right 12th edition - Harvard (no "et al.")
 
 ## 2025-05-05
