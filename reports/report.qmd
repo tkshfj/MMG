@@ -9,8 +9,8 @@ date-format: "D MMMM YYYY"
 format:
   pdf: default
   html: default
-bibliography: references.bib
-csl: styles/nature.csl
+bibliography: ../references/references.bib
+csl: ../references/styles/nature.csl
 ---
 
 ## Abstract

@@ -1,0 +1,56 @@
+project:
+  type: manuscript
+  output-dir: _output
+
+manuscript:
+  article: index.qmd
+
+format:
+  pdf:
+    engine: xelatex
+    keep-tex: false
+    toc: true
+    toc-depth: 3
+    number-sections: true
+    fontsize: 11pt
+    linestretch: 1.5
+
+    mainfont: "Times New Roman"
+    monofont: "Courier New"
+    # monofont: "Monaco"  # Good old-school style
+    # mainfont: "Noto Serif"
+    # mainfont: "Palatino"  # Beautiful for print
+    # mainfont: "Georgia"  # Web-safe serif
+    # mainfont: "Charter"  # Clean look, nice for PDFs
+    
+    geometry: margin=2cm
+
+    fig-env: figure
+    fig-cap-location: top  # bottom
+    fig-format: pdf
+    fig-dpi: 300
+    fig-align: center
+    fig-pos: "htbp"
+    fig-width: 5.5
+    fig-height: 3.5
+
+  html:
+    toc: true
+    toc-depth: 3
+    toc-title: "Table of Contents"
+    code-fold: false
+    number-sections: false
+    theme: cosmo  # Clean, minimal
+    # theme: flatly  # Modern, flat look
+    # theme: litera  # Elegant serif styling
+    # theme: journal  # Academic feel
+    # theme: minty  # Soft, mint-green look
+    # theme: darkly  # Dark mode
+
+execute:
+  echo: false
+  warning: false
+  message: false
+  # error: false
+  # include: true
+  # cache: true

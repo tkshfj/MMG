@@ -5,7 +5,17 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-05-06
+
+- Completed watching the lectures for Weeks 5 and 6.
+- Created templates and Quarto settings for the literature review.
+- Downloaded Harvard reference style from Zotero.
+  - Referencing Styles https://onlinelibrary.london.ac.uk/support/referencing/referencing-styles
+  - Zotero Style Repository https://www.zotero.org/styles
+  - Cite Them Right 12th edition - Harvard (no "et al.")
+
 ## 2025-05-05
+
 - Submitted the project proposal presentation.
 
 ## 2025-05-04
