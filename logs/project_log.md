@@ -9,6 +9,13 @@
 
 - Continued reviewing relevant literature.
 - Consulted the tutor regarding recommended referencing style.
+- Downloaded INbreast dataset
+  - Kaggle: https://www.kaggle.com/datasets/ramanathansp20/inbreast-dataset
+  - DOI: 10.1016/j.acra.2011.09.014
+  - The INbreast dataset contains 115 cases and 410 full-field digital mammograms.
+  - 90 cases have 4 images each (both breasts), and 25 cases have 2 images each (post-mastectomy).
+  - Images are in DICOM format with resolutions of 3328×4084 or 2560×3328 pixels.
+  - Each image includes annotations for masses, calcifications, asymmetries, and architectural distortions, along with BI-RADS breast density labels and CC/MLO views.
 
 ## 2025-05-06
 
