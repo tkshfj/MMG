@@ -5,6 +5,11 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-05-07
+
+- Continued reviewing relevant literature.
+- Consulted the tutor regarding recommended referencing style.
+
 ## 2025-05-06
 
 - Completed watching the lectures for Weeks 5 and 6.
