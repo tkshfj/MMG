@@ -15,7 +15,7 @@
   - The INbreast dataset contains 115 cases and 410 full-field digital mammograms.
   - 90 cases have 4 images each (both breasts), and 25 cases have 2 images each (post-mastectomy).
   - Images are in DICOM format with resolutions of 3328×4084 or 2560×3328 pixels.
-  - Each image includes annotations for masses, calcifications, asymmetries, and architectural distortions, along with BI-RADS breast density labels and CC/MLO views.
+  - Each image includes annotations for masses, calcification, asymmetries, and architectural distortions, along with BI-RADS breast density labels and CC/MLO views.
 
 ## 2025-05-06
 
@@ -51,7 +51,7 @@
 
 ## 2025-04-29
 
-- Searched for multi-task learing (MTL) in medical imaging.
+- Searched for multi-task learning (MTL) in medical imaging.
 - [Cross-Task Attention Network: Improving Multi-Task Learning for Medical Imaging Applications](https://dl.acm.org/doi/10.1007/978-3-031-47401-9_12)
 - Searched for vision transformers (ViT) and their applications in medical imaging.
   - [Segmentation for mammography classification utilizing deep convolutional neural network](https://bmcmedimaging.biomedcentral.com/articles/10.1186/s12880-024-01510-2)
