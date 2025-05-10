@@ -5,6 +5,11 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-05-10
+
+- Revised the data pipeline code to support multi-task learning by outputting tuples in the format: 
+  - (image, {"segmentation": mask, "classification": label})
+
 ## 2025-05-07
 
 - Continued reviewing relevant literature.
