@@ -21,3 +21,4 @@ format:
 {{< include sections/architectures.md >}}
 {{< include sections/multi_task_learning.md >}}
 {{< include sections/conclusions.md >}}
+{{< include sections/references.md >}}
