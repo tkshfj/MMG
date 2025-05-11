@@ -31,11 +31,13 @@ zotero &
 ```
 
 - Installed Better BibTeX on Ubuntu
-1. Open Zotero > Tools > Plugins → Gear → Install Add-on From File
+1. Open Zotero > Tools > Plugins > Gear > Install Add-on From File
 2. Select the downloaded `.xpi`, then restart Zotero.
    [https://github.com/retorquere/zotero-better-bibtex/releases](https://github.com/retorquere/zotero-better-bibtex/releases)
+  - https://retorque.re/zotero-better-bibtex/
 
 - Installed Obsidian
+  - https://snapcraft.io/obsidian
 ```sh
 sudo snap install obsidian --classic
 ```
