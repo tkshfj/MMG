@@ -5,6 +5,41 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-05-12
+
+- Installed Zotero on Ubuntu
+
+```bash
+wget "https://www.zotero.org/download/client/dl?channel=release&platform=linux-x86_64" -O zotero.tar.bz2
+tar -xjf zotero.tar.bz2
+sudo mv Zotero_linux-x86_64 /opt/zotero
+sudo ln -s /opt/zotero/zotero /usr/local/bin/zotero
+nano ~/.local/share/applications/zotero.desktop
+```
+
+```ini
+[Desktop Entry]
+Name=Zotero
+Exec=/opt/zotero/zotero
+Icon=/opt/zotero/chrome/icons/default/default256.png
+Type=Application
+Categories=Education;Office;
+```
+
+```bash
+zotero &
+```
+
+- Installed Better BibTeX on Ubuntu
+1. Open Zotero > Tools > Plugins → Gear → Install Add-on From File
+2. Select the downloaded `.xpi`, then restart Zotero.
+   [https://github.com/retorquere/zotero-better-bibtex/releases](https://github.com/retorquere/zotero-better-bibtex/releases)
+
+- Installed Obsidian
+```sh
+sudo snap install obsidian --classic
+```
+
 ## 2025-05-10
 
 - Revised the data pipeline code to support multi-task learning by outputting tuples in the format: (image, {"segmentation": mask, "classification": label})
