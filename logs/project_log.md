@@ -5,7 +5,7 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
-## 2025-05-12
+## 2025-05-11
 
 - Installed Zotero on Ubuntu
 
@@ -36,11 +36,14 @@ zotero &
    [https://github.com/retorquere/zotero-better-bibtex/releases](https://github.com/retorquere/zotero-better-bibtex/releases)
   - https://retorque.re/zotero-better-bibtex/
 
-- Installed Obsidian
+- Installed [Obsidian](https://obsidian.md/) on Ubuntu and MacOS
   - https://snapcraft.io/obsidian
+
 ```sh
 sudo snap install obsidian --classic
 ```
+
+- Revised the literature review template to be compatible with Obsidian
 
 ## 2025-05-10
 
