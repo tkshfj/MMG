@@ -5,6 +5,10 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-05-12
+- Installed Obsidian on macOS and created a vault.
+- Moved section drafts to the Obsidian vault on iCloud Drive.
+
 ## 2025-05-11
 
 - Installed Zotero on Ubuntu
