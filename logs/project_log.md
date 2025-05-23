@@ -5,12 +5,29 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-05-23
+- Removed quarto/pandoc templates from the repository.
+
+## 2025-05-22
+- Submitted the literature review.
+
+## 2025-05-21
+- Revised the literature review draft.
+
+## 2025-05-19
+- Revised the literature review draft.
+
+## 2025-05-17
+- Moved section drafts to the Obsidian vault on DropBox.
+
+## 2025-05-13
+- Revised the literature review draft.
+
 ## 2025-05-12
 - Installed Obsidian on macOS and created a vault.
-- Moved section drafts to the Obsidian vault on iCloud Drive.
+- Moved section drafts to the Obsidian MyVault on iCloud Drive.
 
 ## 2025-05-11
-
 - Installed Zotero on Ubuntu
 
 ```bash

@@ -1,4 +1,0 @@
-- Wang L. (2024). *Frontiers in Oncology*
-- Lee et al. (2017). *Scientific Data*
-- Chollet, F. (2018). *Deep Learning with Python*
-- TensorFlow/Keras documentation

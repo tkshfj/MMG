@@ -1,5 +1,0 @@
-- Compare results with literature benchmarks
-  - Comparison with Radiologists (Wang 2024)
-- Strengths and limitations of the model/approach
-- Interpretability & practical deployment considerations
-  - Grad-CAM (optional)
