@@ -16,6 +16,7 @@ not_used/
 
 # working files
 /working/
+/temporary/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
