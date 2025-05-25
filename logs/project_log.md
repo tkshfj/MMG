@@ -5,16 +5,20 @@
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
 
+## 2025-05-25
+- Started drafting the project design, work plan nd evaluation plan.
+
+## 2025-05-24
+- Completed watching the lectures for Weeks 7 and 8.
+
 ## 2025-05-23
 - Removed quarto/pandoc templates from the repository.
+- Set up templates in the Obsidian vault on Dropbox.
 
 ## 2025-05-22
 - Submitted the literature review.
 
-## 2025-05-21
-- Revised the literature review draft.
-
-## 2025-05-19
+## 2025-05-19, 2025-05-21, 
 - Revised the literature review draft.
 
 ## 2025-05-17
