@@ -20,7 +20,7 @@
 - Collaborated with peers to share insights and gather feedback on the model design.
 
 ## 2025-05-30
-- Started implementing the baseline model for the CBIS-DDSM dataset.
+- Started developing the baseline CNN model for the CBIS-DDSM dataset.
   - Develop and evaluate baseline CNN classifier Acc ≥ 80%, AUC ≥ 0.85
 
 ## 2025-05-25, 2025-05-26
