@@ -4,9 +4,27 @@
 
 - Review image segmentation, detection and classification techniques
   - Chapters 1-9 of *Deep Learning with Python, 2nd Edition* by François Chollet.
+- Implemented a simple U-Net architecture for image segmentation.
+- Configured the model to output both segmentation masks and classification labels.
+- Set up the training pipeline using TensorFlow and Keras.
+- Prepared the dataset for training, including image normalization and augmentation.
+- Conducted initial tests to ensure the model can process the dataset correctly.
+- Documented the model architecture and training process in the project repository.
+- Reviewed the initial results and identified areas for improvement in the model's performance.
+- Planned next steps for further model refinement and evaluation.
+- Scheduled a meeting with the tutor to discuss progress and receive feedback on the initial implementation.
+- Updated the project timeline to reflect the current status and next steps.
+- Ensured all code is version-controlled and pushed to the GitHub repository.
+- Reviewed the literature on U-Net and its applications in medical imaging to inform further model enhancements.
+- Explored additional techniques for improving segmentation accuracy, such as data augmentation and transfer learning.
+- Collaborated with peers to share insights and gather feedback on the model design.
 
-## 2025-05-25
-- Started drafting the project design, work plan nd evaluation plan.
+## 2025-05-30
+- Started implementing the baseline model for the CBIS-DDSM dataset.
+  - Develop and evaluate baseline CNN classifier Acc ≥ 80%, AUC ≥ 0.85
+
+## 2025-05-25, 2025-05-26
+- Drafted the project design, work plan nd evaluation plan.
 
 ## 2025-05-24
 - Completed watching the lectures for Weeks 7 and 8.
