@@ -1,0 +1,43 @@
+{
+  "os": "macOS-15.5-arm64-arm-64bit",
+  "python": "CPython 3.11.8",
+  "startedAt": "2025-05-31T02:53:39.323051Z",
+  "program": "/Users/tkshfj/Dropbox/repository/MMG/notebooks/baseline.ipynb",
+  "codePath": "notebooks/baseline.ipynb",
+  "git": {
+    "remote": "git@github.com:tkshfj/mammography.git",
+    "commit": "a6e4af9506387aaa90016efa0c522a2925e4e348"
+  },
+  "email": "tkshfj@gmail.com",
+  "root": "/Users/tkshfj/Dropbox/repository/MMG/notebooks",
+  "host": "mac.lan",
+  "executable": "/Users/tkshfj/Dropbox/repository/MMG/.venv/bin/python",
+  "codePathLocal": "baseline.ipynb",
+  "cpu_count": 14,
+  "cpu_count_logical": 14,
+  "disk": {
+    "/": {
+      "total": "7998551654400",
+      "used": "888014721024"
+    },
+    "/System/Volumes/Data": {
+      "total": "7998551654400",
+      "used": "888014721024"
+    }
+  },
+  "memory": {
+    "total": "68719476736"
+  },
+  "cpu": {
+    "count": 14,
+    "countLogical": 14
+  },
+  "apple": {
+    "name": "Apple M4 Pro",
+    "ecpuCores": 4,
+    "pcpuCores": 10,
+    "gpuCores": 20,
+    "memoryGb": 64,
+    "ramTotalBytes": "68719476736"
+  }
+}

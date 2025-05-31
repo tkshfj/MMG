@@ -1,9 +1,13 @@
 # Project Log
 
+# 2025-05-31
+- Revised the baseline CNN classifier for the CBIS-DDSM dataset.
+  - Accuracy ~0.60 and AUC ~0.62 (training and validation)
+
 ## 2025-05-30
 - Revised the data pipeline code to properly handle pathology results in the clinical metadata.
-- Started developing the baseline CNN model for the CBIS-DDSM dataset.
-  - Develop and evaluate baseline CNN classifier Acc ≥ 80%, AUC ≥ 0.85
+- Started developing the baseline CNN classifier for the CBIS-DDSM dataset.
+  - Accuracy ~0.60 (train/val) and AUC: ~0.61 (val), still far below the clinical threshold 77.4% accuracy, 78.8% precision, and 77.8% recall (AUC ≥ 0.80).
 
 ## 2025-05-25, 2025-05-26
 - Drafted the project design, work plan nd evaluation plan.
