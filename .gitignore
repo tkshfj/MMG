@@ -2,11 +2,12 @@
 .DS_Store
 
 # data files
+*.h5
 .vscode/
 data/
 downloads/
 models/
-wandb/
+notebooks/wandb/
 
 # models
 # models/
