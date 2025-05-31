@@ -2,7 +2,8 @@
 
 # 2025-05-31
 - Revised the baseline CNN classifier for the CBIS-DDSM dataset.
-  - Accuracy ~0.60 and AUC ~0.62 (training and validation)
+  - Accuracy rises from approximately 0.54 to just above 0.60 (both training and validation). This is only slightly better than random chance (0.5 for binary classification), indicating that the model functions as a weak classifier.
+  - AUC improves from around 0.55 to just above 0.62 (training and validation). The model demonstrates limited ability to distinguish between classes. For medical imaging tasks, an AUC above 0.80 is generally considered necessary for clinical relevance.
 
 ## 2025-05-30
 - Revised the data pipeline code to properly handle pathology results in the clinical metadata.
