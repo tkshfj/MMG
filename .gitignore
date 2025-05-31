@@ -6,6 +6,7 @@
 data/
 downloads/
 models/
+wandb/
 
 # models
 # models/
