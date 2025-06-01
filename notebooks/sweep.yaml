@@ -1,0 +1,21 @@
+# sweep.yaml
+program: train.py
+method: bayes
+metric:
+  name: val_auc
+  goal: maximize
+parameters:
+  learning_rate:
+    min: 0.00001
+    max: 0.001
+  batch_size:
+    values: [8, 16, 32]
+  filters:
+    values: [16, 32, 64]
+  kernel_size:
+    values: [3, 5]
+  dropout:
+    min: 0.0
+    max: 0.5
+  epochs:
+    value: 20
