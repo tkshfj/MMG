@@ -1,8 +1,13 @@
 # Project Log
 
+# 2025/06/01
+- Revised the baseline CNN classifier for the CBIS-DDSM dataset.
+  - Set up Weights & Biases (wandb) on Ubuntu for experiment tracking.
+  - Modularize dataset loading logic into data_utils.py; update train.py and sweep.yaml for command-line training and sweep workflow.
+
 # 2025-05-31
 - Revised the baseline CNN classifier for the CBIS-DDSM dataset.
-  - Accuracy rises from approximately 0.54 to just above 0.60 (both training and validation). This is only slightly better than random chance (0.5 for binary classification), indicating that the model functions as a weak classifier.
+  - Accuracy rises from approximately 0.54 to just above 0.60 (both training and validation), which is only slightly better than random chance (0.5 for binary classification), indicating that the model functions as a weak classifier.
   - AUC improves from around 0.55 to just above 0.62 (training and validation). The model demonstrates limited ability to distinguish between classes. For medical imaging tasks, an AUC above 0.80 is generally considered necessary for clinical relevance.
 
 ## 2025-05-30
