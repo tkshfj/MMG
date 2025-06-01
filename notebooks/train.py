@@ -2,7 +2,6 @@
 # Set TensorFlow logging level to suppress warnings
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
-
 import wandb
 import tensorflow as tf
 from tensorflow.keras import layers, models
@@ -14,18 +13,20 @@ from data_utils import build_tf_dataset
 # Global configuration
 INPUT_SHAPE = (224, 224, 1)  # (512, 512, 1)
 
+
 # Build a simple CNN model with 2 convolutional layers and dropout
 def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3):
     model = models.Sequential([
         layers.Conv2D(filters, kernel_size, activation='relu', input_shape=input_shape),
         layers.MaxPooling2D(2),
-        layers.Conv2D(filters*2, kernel_size, activation='relu'),
+        layers.Conv2D(filters * 2, kernel_size, activation='relu'),
         layers.MaxPooling2D(2),
         layers.Flatten(),
         layers.Dropout(dropout),
         layers.Dense(1, activation='sigmoid')
     ])
     return model
+
 
 def main():
     # Initialize wandb
@@ -75,6 +76,7 @@ def main():
         ]
         # verbose=2
     )
+
 
 if __name__ == "__main__":
     main()

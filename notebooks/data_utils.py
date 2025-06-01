@@ -10,6 +10,7 @@ from tensorflow.data import AUTOTUNE
 INPUT_SHAPE = (224, 224, 1)  # (512, 512, 1)
 TARGET_SIZE = INPUT_SHAPE[:2]
 
+
 # Load and normalize a DICOM image from a byte string path
 def load_dicom_image(path_tensor):
     path = path_tensor.decode('utf-8')  # Decode byte string to UTF-8
@@ -23,7 +24,7 @@ def load_dicom_image(path_tensor):
         img = np.zeros(TARGET_SIZE, dtype=np.float32)
     return img
 
-# TensorFlow Wrappers
+
 # Load and preprocess a single full mammogram image
 def tf_load_dicom(path):
     # img = tf.numpy_function(load_dicom_image, [path], tf.float32)
@@ -33,6 +34,7 @@ def tf_load_dicom(path):
     img.set_shape([None, None, 1])
     img = tf.image.resize(img, TARGET_SIZE)
     return img
+
 
 def tf_load_multiple_dicom(paths):
     # paths: tf.Tensor of shape [N] (string paths)
@@ -51,6 +53,7 @@ def tf_load_multiple_dicom(paths):
     )
     return tf.reduce_max(masks, axis=0)  # union of all masks
 
+
 # Unified MTL Preprocessor
 # Load and preprocess multiple ROI masks and combine into a single mask tensor
 def load_and_preprocess(image_path, mask_paths, label):
@@ -59,14 +62,15 @@ def load_and_preprocess(image_path, mask_paths, label):
     label = tf.cast(label, tf.float32)
     return image, {"segmentation": mask, "classification": label}
 
+
 # Parse a dictionary record into image + MTL target dict
 def parse_record(record):
     image_path = record['image_path']
     mask_paths = record['mask_paths']
     label = record['label']
-
     image, target = load_and_preprocess(image_path, mask_paths, label)
     return image, target
+
 
 # Build tf.data.Dataset from metadata CSV
 def build_tf_dataset(
