@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025/06/03
+- Revised the code to handle augumentation in the data pipeline.
+- Run a sweep to find optimal hyperparameters for the baseline CNN model with augumentation.
+
 # 2025/06/02
 - Run a sweep to find optimal hyperparameters for the baseline CNN model.
 
