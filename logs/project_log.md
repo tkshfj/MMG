@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025/06/02
+- Run a sweep to find optimal hyperparameters for the baseline CNN model.
+
 # 2025/06/01
 - Revised the baseline CNN classifier for the CBIS-DDSM dataset.
   - Set up Weights & Biases (wandb) on Ubuntu for experiment tracking.
