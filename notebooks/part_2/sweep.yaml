@@ -19,12 +19,3 @@ parameters:
     max: 0.5
   epochs:
     value: 20
-  rotation:
-    min: 0.0
-    max: 0.2
-  zoom:
-    min: 0.0
-    max: 0.2
-  translation:
-    min: 0.0
-    max: 0.2

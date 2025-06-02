@@ -14,22 +14,9 @@ from data_utils import build_tf_dataset
 INPUT_SHAPE = (224, 224, 1)  # (512, 512, 1)
 
 
-# Build data augmentation pipeline
-def build_data_augmentation(rotation=0.1, zoom=0.1, translation=0.1):
-    return tf.keras.Sequential([
-        layers.RandomFlip("horizontal"),
-        layers.RandomRotation(rotation),
-        layers.RandomZoom(zoom),
-        layers.RandomTranslation(translation, translation)
-    ], name="data_augmentation")
-
-
-# Build a simple CNN model with 2 convolutional layers, dropout and augmentation
-def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.1, zoom=0.1, translation=0.1):
-    data_augmentation = build_data_augmentation(rotation, zoom, translation)
+# Build a simple CNN model with 2 convolutional layers and dropout
+def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3):
     model = models.Sequential([
-        layers.Input(shape=input_shape),
-        data_augmentation,
         layers.Conv2D(filters, kernel_size, activation='relu', input_shape=input_shape),
         layers.MaxPooling2D(2),
         layers.Conv2D(filters * 2, kernel_size, activation='relu'),
@@ -39,18 +26,6 @@ def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.
         layers.Dense(1, activation='sigmoid')
     ])
     return model
-
-# def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3):
-#     model = models.Sequential([
-#         layers.Conv2D(filters, kernel_size, activation='relu', input_shape=input_shape),
-#         layers.MaxPooling2D(2),
-#         layers.Conv2D(filters * 2, kernel_size, activation='relu'),
-#         layers.MaxPooling2D(2),
-#         layers.Flatten(),
-#         layers.Dropout(dropout),
-#         layers.Dense(1, activation='sigmoid')
-#     ])
-#     return model
 
 
 def main():
@@ -75,10 +50,7 @@ def main():
         input_shape=INPUT_SHAPE,
         filters=config.filters,
         kernel_size=config.kernel_size,
-        dropout=config.dropout,
-        rotation=config.rotation,
-        zoom=config.zoom,
-        translation=config.translation
+        dropout=config.dropout
     )
 
     # Compile
