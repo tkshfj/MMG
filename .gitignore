@@ -9,6 +9,7 @@ data/
 downloads/
 models/
 notebooks/wandb/
+not_used/
 
 # models
 # models/
@@ -16,7 +17,6 @@ notebooks/wandb/
 # Quarto files
 _output/
 site_libs/
-not_used/
 
 # working files
 /working/

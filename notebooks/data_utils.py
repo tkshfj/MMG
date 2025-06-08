@@ -4,15 +4,18 @@ import numpy as np
 import pandas as pd
 import ast
 import pydicom
-from tensorflow.data import AUTOTUNE
 
 # Global configuration
 INPUT_SHAPE = (224, 224, 1)  # (512, 512, 1)
 TARGET_SIZE = INPUT_SHAPE[:2]
 
 
-# Load and normalize a DICOM image from a byte string path
+# DICOM Loader
 def load_dicom_image(path_tensor):
+    """
+    Loads and normalizes a DICOM image from a byte string path
+    Converts image pixel values to float32, scales them to [0, 1], and handles exceptions by returning a zero image.
+    """
     path = path_tensor.decode('utf-8')  # Decode byte string to UTF-8
     try:
         ds = pydicom.dcmread(path)
@@ -25,9 +28,12 @@ def load_dicom_image(path_tensor):
     return img
 
 
-# Load and preprocess a single full mammogram image
+# TensorFlow Wrappers
 def tf_load_dicom(path):
-    # img = tf.numpy_function(load_dicom_image, [path], tf.float32)
+    """
+    loads a single full mammogram DICOM image using load_dicom_image.
+    Ensures the image has shape (H, W, 1), resizes it to the target size, and returns it as a TensorFlow tensor.
+    """
     img = tf.numpy_function(func=load_dicom_image, inp=[path], Tout=tf.float32)
     img.set_shape([None, None])  # initially 2D
     img = tf.expand_dims(img, axis=-1)  # [H, W, 1]
@@ -37,7 +43,10 @@ def tf_load_dicom(path):
 
 
 def tf_load_multiple_dicom(paths):
-    # paths: tf.Tensor of shape [N] (string paths)
+    """
+    Loads and combines multiple DICOM mask images (e.g., for multiple ROIs).
+    Loads each mask, stacks them, and returns the pixel-wise union using tf.reduce_max.
+    """
     def load_single(path):
         img = tf.numpy_function(load_dicom_image, [path], tf.float32)
         img.set_shape([None, None])
@@ -54,17 +63,22 @@ def tf_load_multiple_dicom(paths):
     return tf.reduce_max(masks, axis=0)  # union of all masks
 
 
-# Unified MTL Preprocessor
-# Load and preprocess multiple ROI masks and combine into a single mask tensor
+# Unified MTL Preprocessor for multitask learning (MTL)
 def load_and_preprocess(image_path, mask_paths, label):
-    image = tf_load_dicom(image_path)  # (512, 512, 1)
-    mask = tf_load_multiple_dicom(mask_paths)  # (512, 512, 1)
+    """
+    loads a single image, multiple mask images, and casts the label.
+    Returns a tuple: (image, {"segmentation": mask, "classification": label}).
+    """
+    image = tf_load_dicom(image_path)
+    mask = tf_load_multiple_dicom(mask_paths)
     label = tf.cast(label, tf.float32)
     return image, {"segmentation": mask, "classification": label}
 
 
-# Parse a dictionary record into image + MTL target dict
 def parse_record(record):
+    """
+    parses a dictionary record (with keys image_path, mask_paths, label) using load_and_preprocess.
+    """
     image_path = record['image_path']
     mask_paths = record['mask_paths']
     label = record['label']
@@ -72,12 +86,16 @@ def parse_record(record):
     return image, target
 
 
-# Build tf.data.Dataset from metadata CSV
+# Builds a tf.data.Dataset from a metadata CSV file
 def build_tf_dataset(
     metadata_csv: str,
     batch_size: int = 8,
     shuffle: bool = True
 ) -> tf.data.Dataset:
+    """
+    Reads and parses the CSV, converts mask path strings to lists, ensures correct label type, and creates a TensorFlow dataset of records.
+    Applies the multitask mapping (parse_record), shuffles, batches, and prefetches.
+    """
 
     # Load metadata CSV
     df = pd.read_csv(metadata_csv)
@@ -97,8 +115,8 @@ def build_tf_dataset(
         }
     )
     # Apply MTL-compatible mapping function
-    ds = ds.map(lambda r: parse_record(r), num_parallel_calls=AUTOTUNE)
+    ds = ds.map(lambda r: parse_record(r), num_parallel_calls=tf.data.AUTOTUNE)
     if shuffle:
         ds = ds.shuffle(buffer_size=len(records))
-    ds = ds.batch(batch_size).prefetch(AUTOTUNE)
+    ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
     return ds
