@@ -4,6 +4,7 @@ method: bayes
 metric:
   name: val_auc
   goal: maximize
+run_cap: 50
 parameters:
   learning_rate:
     min: 0.00001

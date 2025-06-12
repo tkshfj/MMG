@@ -43,7 +43,7 @@ def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.
 
 def main():
     # Initialize wandb
-    wandb.init(project="baseline_part_2_cnn_2_conv_layers_dropout")
+    wandb.init(project="baseline_cnn_dropout_augmentation")
     config = wandb.config
 
     # Data loading
@@ -78,17 +78,7 @@ def main():
             tf.keras.metrics.AUC(name="auc"),
             tf.keras.metrics.Precision(name="precision"),
             tf.keras.metrics.Recall(name="recall"),
-        ]# def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3):
-#     model = models.Sequential([
-#         layers.Conv2D(filters, kernel_size, activation='relu', input_shape=input_shape),
-#         layers.MaxPooling2D(2),
-#         layers.Conv2D(filters * 2, kernel_size, activation='relu'),
-#         layers.MaxPooling2D(2),
-#         layers.Flatten(),
-#         layers.Dropout(dropout),
-#         layers.Dense(1, activation='sigmoid')
-#     ])
-#     return model
+        ]
     )
 
     # Train

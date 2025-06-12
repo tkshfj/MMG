@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025/06/11-13
+
+- Run a Weights & Biases sweep to optimize hyperparameters for the baseline CNN model with dropout and augmentation
+- Run a sweep to find optimal hyperparameters for the baseline CNN model.
 
 # 2025/06/03-05
 - Revised the code to handle augumentation in the pipeline.

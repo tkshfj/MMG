@@ -10,6 +10,7 @@ downloads/
 models/
 notebooks/wandb/
 not_used/
+results/history/
 
 # models
 # models/
