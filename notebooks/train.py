@@ -39,7 +39,7 @@ def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.
         layers.MaxPooling2D(2),
         # Classification head
         layers.Flatten(),
-        layers.Dense(filters * 4, activation='relu'),
+        layers.Dense(filters * 2, activation='relu'),  # filters * 4
         layers.Dropout(dropout),
         layers.Dense(1, activation='sigmoid')
     ])
