@@ -1,20 +1,22 @@
 # train.py
-# Set TensorFlow logging level to suppress warnings
 import os
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import wandb
 import tensorflow as tf
 from tensorflow.keras import layers, models
 from tensorflow.keras.callbacks import EarlyStopping
 import pandas as pd
+import numpy as np
 from sklearn.model_selection import train_test_split
 from data_utils import build_tf_dataset
+from sklearn.metrics import confusion_matrix
+import seaborn as sns
+import matplotlib.pyplot as plt
 
-# Global configuration
-INPUT_SHAPE = (224, 224, 1)  # (512, 512, 1)
+INPUT_SHAPE = (224, 224, 1)
 
-
-# Build data augmentation pipeline
+# Augmentation
 def build_data_augmentation(rotation=0.1, zoom=0.1, translation=0.1):
     return tf.keras.Sequential([
         layers.RandomFlip("horizontal"),
@@ -23,14 +25,13 @@ def build_data_augmentation(rotation=0.1, zoom=0.1, translation=0.1):
         layers.RandomTranslation(translation, translation)
     ], name="data_augmentation")
 
-
-# Build a simple CNN model with 2 convolutional layers, dropout and augmentation
+# Model
 def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.1, zoom=0.1, translation=0.1):
     data_augmentation = build_data_augmentation(rotation, zoom, translation)
-    model = models.Sequential([
+    return models.Sequential([
         layers.Input(shape=input_shape),
         data_augmentation,
-        layers.Conv2D(filters, kernel_size, activation='relu', input_shape=input_shape),
+        layers.Conv2D(filters, kernel_size, activation='relu'),
         layers.MaxPooling2D(2),
         layers.Conv2D(filters * 2, kernel_size, activation='relu'),
         layers.MaxPooling2D(2),
@@ -38,23 +39,39 @@ def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.
         layers.Dropout(dropout),
         layers.Dense(1, activation='sigmoid')
     ])
-    return model
 
+def get_optimizer(name, learning_rate):
+    if name == "Adam":
+        return tf.keras.optimizers.Adam(learning_rate)
+    elif name == "SGD":
+        return tf.keras.optimizers.SGD(learning_rate)
+    else:
+        raise ValueError(f"Unsupported optimizer: {name}")
+
+def plot_confusion_matrix(y_true, y_pred, labels, title="Confusion Matrix"):
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(6, 5))
+    sns.heatmap(cm, annot=True, fmt="d", cmap="Blues", xticklabels=labels, yticklabels=labels)
+    plt.xlabel("Predicted Label")
+    plt.ylabel("True Label")
+    plt.title(title)
+    plt.tight_layout()
+    return cm, plt
 
 def main():
     # Initialize wandb
     wandb.init(project="baseline_cnn_dropout_augmentation")
+    wandb.config.update({"optimizer": "Adam"}, allow_val_change=True)
     config = wandb.config
 
-    # Data loading
+    # Data
     metadata = pd.read_csv("../data/processed/cbis_ddsm_metadata_full.csv")
     train_meta, val_meta = train_test_split(metadata, test_size=0.2, stratify=metadata['label'], random_state=42)
     train_meta.to_csv("../temporary/train_split.csv", index=False)
     val_meta.to_csv("../temporary/val_split.csv", index=False)
 
-    # Datasets
-    train_ds = build_tf_dataset(metadata_csv="../temporary/train_split.csv", batch_size=config.batch_size)
-    val_ds = build_tf_dataset(metadata_csv="../temporary/val_split.csv", batch_size=config.batch_size)
+    train_ds = build_tf_dataset("../temporary/train_split.csv", batch_size=config.batch_size)
+    val_ds = build_tf_dataset("../temporary/val_split.csv", batch_size=config.batch_size)
     train_ds = train_ds.map(lambda x, y: (x, y["classification"])).prefetch(tf.data.AUTOTUNE)
     val_ds = val_ds.map(lambda x, y: (x, y["classification"])).prefetch(tf.data.AUTOTUNE)
 
@@ -69,9 +86,10 @@ def main():
         translation=config.translation
     )
 
-    # Compile
+    optimizer = get_optimizer(config.optimizer, config.learning_rate)
+
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=config.learning_rate),
+        optimizer=optimizer,
         loss="binary_crossentropy",
         metrics=[
             "accuracy",
@@ -82,7 +100,7 @@ def main():
     )
 
     # Train
-    model.fit(
+    history = model.fit(
         train_ds,
         validation_data=val_ds,
         epochs=config.epochs,
@@ -90,9 +108,40 @@ def main():
             wandb.keras.WandbMetricsLogger(),
             EarlyStopping(patience=5, monitor="val_loss", restore_best_weights=True)
         ]
-        # verbose=2
     )
 
+    # Save model
+    os.makedirs("../models", exist_ok=True)
+    model_path = "../models/model_final.keras"
+    model.save(model_path)
+    wandb.save(model_path)
+
+    # Final evaluation
+    val_images, val_labels = [], []
+    for x, y in val_ds:
+        val_images.append(x.numpy())
+        val_labels.append(y.numpy())
+
+    val_images = np.concatenate(val_images, axis=0)
+    val_labels = np.concatenate(val_labels, axis=0).flatten()
+
+    y_probs = model.predict(val_images)
+    y_pred = (y_probs > 0.5).astype(int).flatten()
+
+    val_loss, val_acc, val_auc, val_prec, val_rec = model.evaluate(val_ds, verbose=0)
+    wandb.log({
+        "val_final_loss": val_loss,
+        "val_final_accuracy": val_acc,
+        "val_final_auc": val_auc,
+        "val_final_precision": val_prec,
+        "val_final_recall": val_rec
+    })
+
+    # Confusion matrix
+    cm, fig = plot_confusion_matrix(val_labels, y_pred, labels=["BENIGN", "MALIGNANT"])
+    wandb.log({"confusion_matrix": wandb.Image(fig)})
+
+    wandb.finish()
 
 if __name__ == "__main__":
     main()
