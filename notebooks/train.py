@@ -30,12 +30,16 @@ def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.
     data_augmentation = build_data_augmentation(rotation, zoom, translation)
     return models.Sequential([
         layers.Input(shape=input_shape),
+        # Augmentation
         data_augmentation,
+        # Feature extraction
         layers.Conv2D(filters, kernel_size, activation='relu'),
         layers.MaxPooling2D(2),
         layers.Conv2D(filters * 2, kernel_size, activation='relu'),
         layers.MaxPooling2D(2),
+        # Classification head
         layers.Flatten(),
+        layers.Dense(filters * 4, activation='relu'),
         layers.Dropout(dropout),
         layers.Dense(1, activation='sigmoid')
     ])
@@ -60,7 +64,8 @@ def plot_confusion_matrix(y_true, y_pred, labels, title="Confusion Matrix"):
 
 def main():
     # Initialize wandb
-    wandb.init(project="baseline_cnn_dropout_augmentation")
+    # wandb.init(project="baseline_cnn_dropout_augmentation")
+    wandb.init()
     wandb.config.update({"optimizer": "Adam"}, allow_val_change=True)
     config = wandb.config
 

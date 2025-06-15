@@ -1,5 +1,13 @@
 # Project Log
 
+# 2025-06-15
+
+- Run a sweep to find optimal hyperparameters for the baseline CNN model.
+```sh
+$ wandb sweep --project baseline_cnn_dropout_aug_rev sweep.yaml
+$ wandb agent tkshfj-bsc-computer-science-university-of-london/baseline_cnn_dropout_aug_rev/p6smuds6
+```
+
 # 2025/06/11-13
 
 - Run a Weights & Biases sweep to optimize hyperparameters for the baseline CNN model with dropout and augmentation
