@@ -116,8 +116,8 @@ def main():
     )
 
     # Save model
-    os.makedirs("../models", exist_ok=True)
-    model_path = "../models/model_final.keras"
+    os.makedirs("./models", exist_ok=True)
+    model_path = "./models/model_final.keras"
     model.save(model_path)
     wandb.save(model_path)
 
