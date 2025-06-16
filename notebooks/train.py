@@ -16,6 +16,7 @@ import matplotlib.pyplot as plt
 
 INPUT_SHAPE = (224, 224, 1)
 
+
 # Augmentation
 def build_data_augmentation(rotation=0.1, zoom=0.1, translation=0.1):
     return tf.keras.Sequential([
@@ -24,6 +25,7 @@ def build_data_augmentation(rotation=0.1, zoom=0.1, translation=0.1):
         layers.RandomZoom(zoom),
         layers.RandomTranslation(translation, translation)
     ], name="data_augmentation")
+
 
 # Model
 def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.1, zoom=0.1, translation=0.1):
@@ -44,6 +46,7 @@ def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.
         layers.Dense(1, activation='sigmoid')
     ])
 
+
 def get_optimizer(name, learning_rate):
     if name == "Adam":
         return tf.keras.optimizers.Adam(learning_rate)
@@ -51,6 +54,7 @@ def get_optimizer(name, learning_rate):
         return tf.keras.optimizers.SGD(learning_rate)
     else:
         raise ValueError(f"Unsupported optimizer: {name}")
+
 
 def plot_confusion_matrix(y_true, y_pred, labels, title="Confusion Matrix"):
     cm = confusion_matrix(y_true, y_pred)
@@ -61,6 +65,7 @@ def plot_confusion_matrix(y_true, y_pred, labels, title="Confusion Matrix"):
     plt.title(title)
     plt.tight_layout()
     return cm, plt
+
 
 def main():
     # Initialize wandb
@@ -105,7 +110,7 @@ def main():
     )
 
     # Train
-    history = model.fit(
+    model.fit(
         train_ds,
         validation_data=val_ds,
         epochs=config.epochs,
@@ -147,6 +152,7 @@ def main():
     wandb.log({"confusion_matrix": wandb.Image(fig)})
 
     wandb.finish()
+
 
 if __name__ == "__main__":
     main()
