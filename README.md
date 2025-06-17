@@ -53,6 +53,28 @@ gantt
     Final Report                            :milestone, m5, 2025-09-15, 0d
 ```
 
+| Weeks | Dates         | Task / Milestone                        | Description                                               | Deliverables / Thresholds              |
+| ----- | ------------- | --------------------------------------- | --------------------------------------------------------- | -------------------------------------- |
+| 2–4   | Apr 14–May 5  | Project Proposal                        | Develop and submit project proposal                       | Project proposal                       |
+| 2     | Apr 15–17     | Data Acquisition & Exploration          | Obtain and explore CBIS-DDSM dataset                      | Data downloaded, project proposal      |
+| 3     | Apr 19–24     | Set up Workstation                      | Assemble and configure workstation for AI tasks           | Workstation ready for deep learning    |
+| 4–5   | Apr 26–May 10 | Data Preprocessing                      | Clean, standardize, and split data                        | Scripted data processing               |
+| 5–7   | May 6–22      | Literature Review                       | Conduct background research                               | Literature review report               |
+| 7–8   | May 23–27     | Project Design                          | Draft project design                                      | Project design report                  |
+| 8–10  | May 30–Jun 15 | Baseline CNN Implementation             | Develop and evaluate baseline CNN classifier              | Acc ≥ 70%, AUC ≥ 0.75                  |
+| 11–12 | Jun 16–Jun 29 | Enhanced CNN/U-Net Implementation       | Implement and validate U-Net for segmentation             | Dice ≥ 0.75, IoU ≥ 0.65, Acc ≥ 85%     |
+| 13–14 | Jun 30–Jul 13 | Multi-task CNN Development              | Develop and test joint classification/segmentation models | Dice ≥ 0.80, IoU ≥ 0.70, Acc ≥ 88%     |
+| 15–16 | Jul 14–27     | Transformer-based Model Implementation  | Implement and test ViT/Swin/TransUNet models              | Acc ≥ 90%, Dice ≥ 0.82, Loc. Acc ≥ 80% |
+| 17–18 | Jul 28–Aug 10 | Validation & Interpretability Review    | Perform cross-validation and expert review                | Cross-validated results, expert review |
+| 19–20 | Aug 11–24     | Final Documentation & Inclusivity Audit | Compile final report and conduct inclusivity audit        | Final report, inclusivity checklist    |
+| 21–22 | Aug 25–Sep 14 | Contingency / Revisions                 | Model tuning and revisions if necessary                   | Improved metrics or revised models     |
+| —     | Apr 16        | Welcome Webinar (Milestone)             | CM3070 FP Welcome Webinar by Dr Sarah Rauchas             | Welcome Webinar                        |
+| —     | Jun 4         | Midterm Webinar (Milestone)             | CM3070 Final Project Mid Term Webinar by Dr Sarah Rauchas | Midterm Webinar                        |
+| —     | Jun 17        | Preliminary Report (Milestone)          | Complete and submit preliminary report                    | Preliminary report                     |
+| —     | Aug 5         | Draft Report (Milestone)                | Complete and submit draft report                          | Draft report                           |
+| —     | Sep 15        | Final Report (Milestone)                | Complete and submit final report                          | Final report                           |
+
+
 ## Project Idea: 3.2 MLNN: Deep Learning Breast Cancer Detection
 
 > What problem is this project solving, or what is the project idea?
