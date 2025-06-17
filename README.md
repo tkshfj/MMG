@@ -5,11 +5,53 @@
 | Date        | Week   | Deliverable                       | Weight                         | Status   |
 |-------------|--------|-----------------------------------|--------------------------------|----------|
 | 5 May       | 4      | Project Proposal (Video 3–5 mins) | -                              | Submitted |
-| 17 June     | 11     | Preliminary Report (CW1)          | 10%                            | In progress|
+| 17 June     | 11     | Preliminary Report (CW1)          | 10%                            | Submitted |
 | 4 Aug       | 18     | Draft Report                      | -                              | |
 | 8 Sep       | 22–23  | Exam                              | 20%                            | |
 | 15 Sep      | 24     | Final Report (CW2)                | Report/Code: 60%<br>Video: 5%  | |
 | -           | 1–20   | Quizzes                           | 5%                             | Ongoing |
+
+## Work Plan
+
+```mermaid
+gantt
+    title Deep Learning for Breast Cancer Detection – Project Timeline
+    dateFormat  YYYY-MM-DD
+
+    section Planning
+    Project Proposal                        :a1, 2025-04-14, 3w
+
+    section Data Preparation
+    Data Acquisition & Exploration          :a2, 2025-04-15, 3d
+    Set up Workstation                      :a3, 2025-04-19, 6d
+    Data Preprocessing                      :b1, 2025-04-26, 15d
+
+    section Background Research
+    Literature Review                       :b2, 2025-05-06, 17d
+
+    section Design
+    Project Design                          :b3, 2025-05-23, 5d
+
+    section Model Development
+    Baseline CNN Implementation             :c1, 2025-05-30, 16d
+    Enhanced CNN/U-Net Implementation       :c2, 2025-06-16, 2w
+    Multi-task CNN Development              :c3, 2025-06-30, 2w
+    Transformer-based Model Implementation  :c4, 2025-07-14, 2w
+
+    section Validation & Reporting
+    Validation & Interpretability Review    :d1, 2025-07-28, 2w
+    Final Documentation & Inclusivity Audit :d2, 2025-08-11, 2w
+
+    section Contingency
+    Contingency / Revisions                 :e1, 2025-08-25, 3w
+
+    section Milestones
+    Welcome Webinar                         :milestone, m1, 2025-04-16, 0d
+    Midterm Webinar                         :milestone, m2, 2025-06-04, 0d
+    Preliminary Report                      :milestone, m3, 2025-06-17, 0d
+    Draft Report                            :milestone, m4, 2025-08-05, 0d
+    Final Report                            :milestone, m5, 2025-09-15, 0d
+```
 
 ## Project Idea: 3.2 MLNN: Deep Learning Breast Cancer Detection
 
