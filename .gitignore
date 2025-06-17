@@ -8,7 +8,7 @@
 data/
 downloads/
 models/
-notebooks/wandb/
+wandb/
 not_used/
 results/history/
 html/
