@@ -1,4 +1,4 @@
-program: unet_train.py
+program: train.py
 method: bayes
 metric:
   name: val_dice_coefficient

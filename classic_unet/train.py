@@ -14,11 +14,6 @@ from data_utils import build_dataset
 
 # Configuration
 INPUT_SHAPE = (256, 256, 1)  # (512, 512, 1)
-# BATCH_SIZE = 8
-# EPOCHS = 40
-# LEARNING_RATE = 1e-4
-# DROPOUT = 0.3
-# L2_REG = 1e-4
 
 
 # Build the U-Net model
@@ -100,16 +95,8 @@ def bce_dice_loss(y_true, y_pred):
 
 # Train
 def main():
-    # wandb.init(project="unet_segmentation", config={
-    #     "input_shape": INPUT_SHAPE,
-    #     "batch_size": BATCH_SIZE,
-    #     "epochs": EPOCHS,
-    #     "learning_rate": LEARNING_RATE,
-    #     "dropout": DROPOUT,
-    #     "l2_reg": L2_REG,
-    # })
-
-    wandb.init(project="unet-sweep")
+    # Initialize W&B
+    wandb.init(project="classic_unet_segmentation")
     config = wandb.config
     input_shape = tuple(config.input_shape) if isinstance(config.input_shape, (list, tuple)) else INPUT_SHAPE
 
@@ -123,14 +110,19 @@ def main():
         augment=True,
         split=(0.7, 0.15, 0.15)
     )
-    # model = build_unet(INPUT_SHAPE, dropout=DROPOUT, l2_reg=L2_REG)
+    print(f"Training dataset size: {len(train_ds)}, Validation dataset size: {len(val_ds)}, Test dataset size: {len(test_ds)}")
+    # Compile the model
     model = build_unet(input_shape=input_shape, dropout=config.dropout, l2_reg=config.l2_reg)
     model.compile(
         optimizer=tf.keras.optimizers.Adam(learning_rate=config.learning_rate),
         loss=bce_dice_loss,
         metrics=[dice_coefficient, iou_metric]
     )
+    print(f"Training on {input_shape} images with batch size {config.batch_size} for {config.epochs} epochs.")
+    print(f"Using dropout: {config.dropout}, L2 regularization: {config.l2_reg}, learning rate: {config.learning_rate}")
+    print("Model summary:")
     model.summary()
+    wandb.log({"model_summary": model.summary()})
 
     callbacks = [
         EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
@@ -145,7 +137,10 @@ def main():
             validation_data=val_ds
         ),
     ]
+    print("Callbacks:", callbacks)
 
+    # Train the model
+    print("Starting model training...")
     history = model.fit(
         train_ds,
         validation_data=val_ds,
@@ -154,7 +149,7 @@ def main():
     )
 
     # Save final model
-    model.save("unet_final.h5")
+    model.save("./models/unet_final.h5")
     wandb.save("unet_final.h5")
 
     # Plot loss/metrics
@@ -165,6 +160,7 @@ def main():
     wandb.finish()
 
 
+# Plot training curves
 def plot_training_curves(history):
     plt.figure(figsize=(12, 4))
     plt.subplot(1, 2, 1)
@@ -181,6 +177,7 @@ def plot_training_curves(history):
     plt.show()
 
 
+# Evaluate and log predictions
 def evaluate_and_log_predictions(model, test_ds):
     for batch in test_ds.take(1):
         imgs, masks = batch
