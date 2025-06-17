@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-06-17
+- Implemented a classic U-Net segmentation model for the CBIS-DDSM dataset.
+
 # 2025-06-16
 - Compiled and submitted the preliminary project report.
 - Screen recorded the demonstration for the submission.
