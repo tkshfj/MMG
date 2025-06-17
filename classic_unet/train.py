@@ -1,7 +1,9 @@
 # unet_train.py
 # To run sweeps:
-# wandb sweep sweep.yaml
+# wandb sweep --project classic_unet_segmentation sweep.yaml
 # wandb agent <entity/project/sweep-id>
+# wandb agent tkshfj-bsc-computer-science-university-of-london/classic_unet_segmentation/sweep_id
+
 
 # Import necessary libraries
 import wandb
