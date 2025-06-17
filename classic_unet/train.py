@@ -112,7 +112,7 @@ def main():
         augment=True,
         split=(0.7, 0.15, 0.15)
     )
-    print(f"Training dataset size: {len(train_ds)}, Validation dataset size: {len(val_ds)}, Test dataset size: {len(test_ds)}")
+    # print(f"Training dataset size: {len(train_ds)}, Validation dataset size: {len(val_ds)}, Test dataset size: {len(test_ds)}")
     # Compile the model
     model = build_unet(input_shape=input_shape, dropout=config.dropout, l2_reg=config.l2_reg)
     model.compile(
