@@ -1,0 +1,23 @@
+program: unet_train.py
+method: bayes
+metric:
+  name: val_dice_coefficient
+  goal: maximize
+parameters:
+  batch_size:
+    values: [8, 16]
+  learning_rate:
+    min: 0.0001
+    max: 0.01
+  dropout:
+    min: 0.1
+    max: 0.5
+  l2_reg:
+    min: 1e-5
+    max: 1e-3
+  epochs:
+    value: 40
+  input_shape:
+    value: [256, 256, 1]
+  task:
+    value: segmentation
