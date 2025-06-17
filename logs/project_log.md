@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-06-18
+- Refactored the train.py and sweep.yaml code and stated running sweeps
+
 # 2025-06-17
 - Implemented a classic U-Net segmentation model for the CBIS-DDSM dataset.
 
