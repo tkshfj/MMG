@@ -35,7 +35,7 @@ def load_and_merge_masks(mask_paths, shape):
         if m.shape != mask.shape:
             m = cv2.resize(m, (shape[1], shape[0]), interpolation=cv2.INTER_NEAREST)
         mask = np.maximum(mask, m)
-    mask = (mask > 0.5).astype(np.float32)
+    mask = (mask > 0.5).astype(np.float32)  # ensures masks are binarized (only 0 or 1 values)
     return mask
 
 
@@ -187,8 +187,9 @@ def build_dataset(
             lambda: generator(indices),
             output_signature=output_signature
         )
+        ds = ds.cache()
         if shuffle_ds:
-            ds = ds.shuffle(buffer_size=64)
+            ds = ds.shuffle(buffer_size=256)
         ds = ds.map(tf_preprocess, num_parallel_calls=tf.data.AUTOTUNE)
         ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
         return ds
