@@ -187,11 +187,12 @@ def build_dataset(
             lambda: generator(indices),
             output_signature=output_signature
         )
-        ds = ds.cache()
+        ds = ds.map(tf_preprocess, num_parallel_calls=tf.data.AUTOTUNE)
+        ds = ds.cache()  # Only if RAM is sufficient
         if shuffle_ds:
             ds = ds.shuffle(buffer_size=256)
-        ds = ds.map(tf_preprocess, num_parallel_calls=tf.data.AUTOTUNE)
-        ds = ds.batch(batch_size).prefetch(tf.data.AUTOTUNE)
+        ds = ds.batch(batch_size)
+        ds = ds.prefetch(tf.data.AUTOTUNE)
         return ds
 
     train_ds = make_ds(train_idx, shuffle_ds=True)

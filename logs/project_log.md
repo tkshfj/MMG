@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-06-20
+- Fix classic U-Net segmentation model and test training on a smaller sample size
+
 # 2025-06-18
 - Refactored the train.py and sweep.yaml code and stated running sweeps
 

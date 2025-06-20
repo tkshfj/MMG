@@ -1,6 +1,6 @@
 import matplotlib.pyplot as plt
 import wandb
-import numpy as np
+# import numpy as np
 
 
 # Plotting utilities for training curves

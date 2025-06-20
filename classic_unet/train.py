@@ -11,7 +11,7 @@ import wandb
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers, backend as K
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
-import matplotlib.pyplot as plt
+# import matplotlib.pyplot as plt
 from data_utils import build_dataset
 from plot_utils import plot_training_curves, plot_example_predictions
 import datetime
@@ -79,6 +79,7 @@ def build_unet(input_shape, dropout=0.3, l2_reg=1e-4):
     model = models.Model(inputs=[inputs], outputs=[outputs])
     return model
 
+
 # Dice and IOU metric/loss
 def dice_coefficient(y_true, y_pred, smooth=1):
     y_true_f = K.flatten(y_true)
@@ -86,15 +87,25 @@ def dice_coefficient(y_true, y_pred, smooth=1):
     intersection = K.sum(y_true_f * y_pred_f)
     return (2. * intersection + smooth) / (K.sum(y_true_f) + K.sum(y_pred_f) + smooth)
 
-def dice_loss(y_true, y_pred): return 1 - dice_coefficient(y_true, y_pred)
+
+def dice_loss(y_true, y_pred):
+    return 1 - dice_coefficient(y_true, y_pred)
+
+
 def iou_metric(y_true, y_pred, smooth=1):
     y_true_f = K.flatten(y_true)
     y_pred_f = K.flatten(y_pred)
     intersection = K.sum(y_true_f * y_pred_f)
     union = K.sum(y_true_f) + K.sum(y_pred_f) - intersection
     return (intersection + smooth) / (union + smooth)
-def iou_loss(y_true, y_pred): return 1 - iou_metric(y_true, y_pred)
-def bce_dice_loss(y_true, y_pred): return tf.keras.losses.binary_crossentropy(y_true, y_pred) + dice_loss(y_true, y_pred)
+
+
+def iou_loss(y_true, y_pred):
+    return 1 - iou_metric(y_true, y_pred)
+
+
+def bce_dice_loss(y_true, y_pred):
+    return tf.keras.losses.binary_crossentropy(y_true, y_pred) + dice_loss(y_true, y_pred)
 
 
 def main():
@@ -136,7 +147,8 @@ def main():
         print("[DEBUG] Measuring data pipeline speeds (one epoch)...")
         t0 = time.time()
         for i, batch in enumerate(train_ds):
-            if i >= 5: break
+            if i >= 5:
+                break
         print(f"[DEBUG] Time for 5 batches: {time.time() - t0:.2f}s")
 
     # Build and compile model
@@ -193,6 +205,7 @@ def main():
     wandb.save("./models/unet_final.keras")
 
     wandb.finish()
+
 
 if __name__ == "__main__":
     main()
