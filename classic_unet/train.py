@@ -11,7 +11,7 @@ import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers, backend as K
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
 from data_utils import build_dataset
-from plot_utils import plot_training_curves, plot_example_predictions
+# from plot_utils import plot_training_curves, plot_example_predictions
 
 INPUT_SHAPE = (256, 256, 1)
 
@@ -140,14 +140,14 @@ def main():
         callbacks=callbacks
     )
 
-    # Plot loss/metrics (log to both W&B and local file)
-    plot_training_curves(history, save_path="training_curves.png", log_to_wandb=True)
+    # # Plot loss/metrics (log to both W&B and local file)
+    # plot_training_curves(history, save_path="training_curves.png", log_to_wandb=True)
 
-    # Evaluate and plot predictions
-    for batch in test_ds.take(1):
-        imgs, masks = batch
-        preds = model.predict(imgs)
-        plot_example_predictions(imgs, masks, preds, max_examples=4, save_path="prediction", log_to_wandb=True)
+    # # Evaluate and plot predictions
+    # for batch in test_ds.take(1):
+    #     imgs, masks = batch
+    #     preds = model.predict(imgs)
+    #     plot_example_predictions(imgs, masks, preds, max_examples=4, save_path="prediction", log_to_wandb=True)
 
     # Save final model
     model.save("./models/unet_final.h5")

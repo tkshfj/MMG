@@ -7,14 +7,13 @@
 .vscode/
 data/
 downloads/
+html/
+images/
+logs/fit/
 models/
-wandb/
 not_used/
 results/history/
-html/
-
-# models
-# models/
+wandb/
 
 # Quarto files
 _output/
