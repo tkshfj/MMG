@@ -7,6 +7,7 @@
 
 # Import necessary libraries
 import wandb
+# from wandb.keras import WandbMetricsLogger, WandbModelCheckpoint, WandbEvalCallback
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers, backend as K
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
@@ -121,7 +122,7 @@ def main():
 
     callbacks = [
         EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
-        ModelCheckpoint("unet_best.h5", save_best_only=True),
+        ModelCheckpoint("unet_best.keras", save_best_only=True),
         wandb.keras.WandbCallback(
             monitor="val_loss",
             save_model=True,
@@ -131,6 +132,17 @@ def main():
             validation_data=val_ds
         ),
     ]
+
+    # callbacks = [
+    #     EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
+    #     # You can keep ModelCheckpoint or replace with WandbModelCheckpoint for artifact tracking
+    #     ModelCheckpoint("unet_best.keras", monitor="val_loss", save_best_only=True),
+    #     WandbMetricsLogger(),
+    #     # Optionally log model checkpoints to wandb artifacts as well:
+    #     # WandbModelCheckpoint(filepath="unet_best.h5", monitor="val_loss", save_best_only=True),
+    #     # Optionally log sample predictions (like log_evaluation/predictions before)
+    #     WandbEvalCallback(val_ds, labels=None, num_examples=16)
+    # ]
 
     # Train
     history = model.fit(
@@ -150,8 +162,8 @@ def main():
     #     plot_example_predictions(imgs, masks, preds, max_examples=4, save_path="prediction", log_to_wandb=True)
 
     # Save final model
-    model.save("./models/unet_final.h5")
-    wandb.save("./models/unet_final.h5")
+    model.save("./models/unet_final.keras")
+    wandb.save("./models/unet_final.keras")
 
     # Evaluate
     results = model.evaluate(test_ds)
