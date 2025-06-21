@@ -6,17 +6,33 @@
 # wandb agent tkshfj-bsc-computer-science-university-of-london/classic_unet_segmentation/sweep_id
 
 # Import necessary libraries
+import os
 import wandb
 import tensorflow as tf
 from tensorflow.keras import layers, models, regularizers, backend as K
 from tensorflow.keras.callbacks import EarlyStopping, ModelCheckpoint
+# import matplotlib.pyplot as plt
 from data_utils import build_dataset
 from plot_utils import plot_training_curves, plot_example_predictions
+import datetime
+
+# Optional: enable pipeline timing for bottleneck diagnosis
+DEBUG_TIMING = False
+
+# Enable dynamic GPU memory growth (prevents OOM/fragmentation)
+gpus = tf.config.list_physical_devices('GPU')
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+        print("[INFO] Enabled GPU memory growth.")
+    except RuntimeError as e:
+        print(e)
 
 INPUT_SHAPE = (256, 256, 1)
 
 
-# Loss and metric definitions
+# Dice and IOU metric/loss
 def dice_coefficient(y_true, y_pred, smooth=1):
     y_true_f = K.flatten(y_true)
     y_pred_f = K.flatten(y_pred)
@@ -36,11 +52,15 @@ def iou_metric(y_true, y_pred, smooth=1):
     return (intersection + smooth) / (union + smooth)
 
 
+def iou_loss(y_true, y_pred):
+    return 1 - iou_metric(y_true, y_pred)
+
+
 def bce_dice_loss(y_true, y_pred):
     return tf.keras.losses.binary_crossentropy(y_true, y_pred) + dice_loss(y_true, y_pred)
 
 
-# U-Net Model Builder
+# Build U-Net (same as your current version)
 def build_unet(input_shape, dropout=0.3, l2_reg=1e-4):
     inputs = layers.Input(shape=input_shape)
     # Encoder
@@ -87,56 +107,86 @@ def build_unet(input_shape, dropout=0.3, l2_reg=1e-4):
     return model
 
 
-# Training and evaluation
 def main():
+    # Initialize W&B
     wandb.init(project="classic_unet_segmentation")
     config = wandb.config
-    # input_shape = tuple(config.input_shape) if isinstance(config.input_shape, (list, tuple)) else INPUT_SHAPE
-    input_shape = tuple(config.input_shape) if hasattr(config, "input_shape") else INPUT_SHAPE  # (256, 256, 1)
-    batch_size = config.batch_size if hasattr(config, "batch_size") else 8
-    epochs = config.epochs if hasattr(config, "epochs") else 40
-    learning_rate = config.learning_rate if hasattr(config, "learning_rate") else 1e-4
-    dropout = config.dropout if hasattr(config, "dropout") else 0.3
-    l2_reg = config.l2_reg if hasattr(config, "l2_reg") else 1e-4
+    input_shape = tuple(config.input_shape) if isinstance(config.input_shape, (list, tuple)) else INPUT_SHAPE
 
-    # Data loading
+    # Build datasets
     train_ds, val_ds, test_ds = build_dataset(
         metadata_csv='../data/processed/cbis_ddsm_metadata_full.csv',
         input_shape=input_shape,
-        batch_size=batch_size,
-        task='segmentation',
+        batch_size=config.batch_size,
+        task=config.get("task", "segmentation"),
         shuffle=True,
         augment=True,
         split=(0.7, 0.15, 0.15)
     )
 
-    # Model build/compile
-    model = build_unet(input_shape=input_shape, dropout=dropout, l2_reg=l2_reg)
+    # Check data bugs
+    # for imgs, masks in train_ds.take(1):
+    #     import matplotlib.pyplot as plt
+    #     for i in range(min(4, imgs.shape[0])):
+    #         plt.figure(figsize=(6,3))
+    #         plt.subplot(1,2,1)
+    #         plt.imshow(imgs[i,...,0], cmap="gray")
+    #         plt.title("Image")
+    #         plt.axis('off')
+    #         plt.subplot(1,2,2)
+    #         plt.imshow(masks[i,...,0], cmap="gray")
+    #         plt.title("Mask")
+    #         plt.axis('off')
+    #         plt.show()
+    #         print("Unique values in mask:", tf.unique(tf.reshape(masks[i], [-1]))[0].numpy())
+
+    # (Optional) Pipeline bottleneck diagnosis
+    if DEBUG_TIMING:
+        import time
+        print("[DEBUG] Measuring data pipeline speeds (one epoch)...")
+        t0 = time.time()
+        for i, batch in enumerate(train_ds):
+            if i >= 5:
+                break
+        print(f"[DEBUG] Time for 5 batches: {time.time() - t0:.2f}s")
+
+    # Build and compile model
+    model = build_unet(input_shape=input_shape, dropout=config.dropout, l2_reg=config.l2_reg)
     model.compile(
-        optimizer=tf.keras.optimizers.Adam(learning_rate=learning_rate),
+        optimizer=tf.keras.optimizers.Adam(learning_rate=config.learning_rate),
         loss=bce_dice_loss,
         metrics=[dice_coefficient, iou_metric]
     )
-    model.summary(print_fn=wandb.termlog)
+    print(f"Training on {input_shape} images with batch size {config.batch_size} for {config.epochs} epochs.")
+    print(f"Using dropout: {config.dropout}, L2 regularization: {config.l2_reg}, learning rate: {config.learning_rate}")
+    model.summary()
 
+    # Setup TensorBoard logging
+    log_dir = os.path.join("logs", "fit", datetime.datetime.now().strftime("%Y%m%d-%H%M%S"))
+    tensorboard_cb = tf.keras.callbacks.TensorBoard(
+        log_dir=log_dir,
+        histogram_freq=1,
+        profile_batch='10,20',  # Profile the 10th to 20th batches
+        write_graph=True
+    )
+
+    # Callbacks: WandB logging, clean checkpointing
     callbacks = [
         EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
-        ModelCheckpoint("unet_best.h5", save_best_only=True),
-        wandb.keras.WandbCallback(
-            monitor="val_loss",
-            save_model=True,
-            log_weights=False,
-            log_evaluation=True,
-            predictions=16,
-            validation_data=val_ds
-        ),
+        ModelCheckpoint("unet_best.keras", save_best_only=True, monitor="val_loss"),
+        # Modern WandB logging
+        wandb.keras.WandbMetricsLogger(),
+        wandb.keras.WandbModelCheckpoint("unet_best_wandb.keras", monitor="val_loss", save_best_only=True),
+        tensorboard_cb
     ]
+    print("Callbacks:", callbacks)
 
-    # Train
+    # Train the model
+    print("Starting model training...")
     history = model.fit(
         train_ds,
         validation_data=val_ds,
-        epochs=epochs,
+        epochs=config.epochs,
         callbacks=callbacks
     )
 
@@ -149,14 +199,9 @@ def main():
         preds = model.predict(imgs)
         plot_example_predictions(imgs, masks, preds, max_examples=4, save_path="prediction", log_to_wandb=True)
 
-    # Save final model
-    model.save("./models/unet_final.h5")
-    wandb.save("./models/unet_final.h5")
-
-    # Evaluate
-    results = model.evaluate(test_ds)
-    print(f"Test loss: {results[0]:.4f}, Dice: {results[1]:.4f}, IoU: {results[2]:.4f}")
-    wandb.log({"test_loss": results[0], "test_dice": results[1], "test_iou": results[2]})
+    # Save final model (in modern Keras format)
+    model.save("./models/unet_final.keras")
+    wandb.save("./models/unet_final.keras")
 
     wandb.finish()
 
