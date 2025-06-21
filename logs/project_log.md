@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-06-21
+- Revise classic U-Net segmentation model and run sweeps on full sample size
+
 # 2025-06-20
 - Fix classic U-Net segmentation model and test training on a smaller sample size
 
