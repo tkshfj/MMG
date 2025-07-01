@@ -5,22 +5,49 @@ metric:
   goal: maximize
 parameters:
   batch_size:
-    values: [4, 8, 16]
+    values: [16, 32, 64, 128]
   learning_rate:
     distribution: uniform
-    min: 0.0001
-    max: 0.01
+    min: 0.00008
+    max: 0.0015         # Slightly expanded upper bound for possible LR scaling
   dropout:
     distribution: uniform
-    min: 0.1
-    max: 0.5
+    min: 0.15
+    max: 0.25
   l2_reg:
     distribution: uniform
     min: 0.00001
-    max: 0.001
+    max: 0.00015
   epochs:
     value: 40
   input_shape:
     value: [256, 256, 1]
   task:
     value: segmentation
+
+# program: train.py
+# method: bayes
+# metric:
+#   name: val_dice_coefficient
+#   goal: maximize
+# parameters:
+#   batch_size:
+#     values: [4, 8, 16]
+#   learning_rate:
+#     distribution: uniform
+#     min: 0.0001
+#     max: 0.01
+#   dropout:
+#     distribution: uniform
+#     min: 0.1
+#     max: 0.5
+#   l2_reg:
+#     distribution: uniform
+#     min: 0.00001
+#     max: 0.001
+#   epochs:
+#     value: 40
+#   input_shape:
+#     value: [256, 256, 1]
+#   task:
+#     value: segmentation
