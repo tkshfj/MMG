@@ -1,7 +1,16 @@
 # Project Log
 
+# 2025-07-02
+- Refactor and launch adaptive sweep: classic U-Net segmentation
+
+# 2025-07-01
+- Analyze results from the classic U-Net segmentation sweep
+
+# 2025-06-25
+- Launch sweep: classic U-Net segmentation (480 runs)
+
 # 2025-06-21
-- Revise classic U-Net segmentation model and run sweeps on full sample size
+- Refactor classic U-Net segmentation model and run sweeps on full sample size
 
 # 2025-06-20
 - Fix classic U-Net segmentation model and test training on a smaller sample size
