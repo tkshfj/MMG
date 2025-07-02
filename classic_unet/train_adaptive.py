@@ -97,8 +97,8 @@ def main():
     # input_shape = tuple(config.input_shape) if isinstance(config.input_shape, (list, tuple)) else INPUT_SHAPE
     input_shape = tuple(config.input_shape) if hasattr(config, "input_shape") else INPUT_SHAPE  # (256, 256, 1)
     batch_size = config.batch_size if hasattr(config, "batch_size") else 8
-    # learning_rate = config.base_learning_rate * (config.batch_size / 16) * config.lr_multiplier
-    learning_rate = config.learning_rate if hasattr(config, "learning_rate") else 1e-4
+    learning_rate = config.base_learning_rate * (config.batch_size / 16) * config.lr_multiplier
+    # learning_rate = config.learning_rate if hasattr(config, "learning_rate") else 1e-4
     epochs = config.epochs if hasattr(config, "epochs") else 40
     dropout = config.dropout if hasattr(config, "dropout") else 0.3
     l2_reg = config.l2_reg if hasattr(config, "l2_reg") else 1e-4
