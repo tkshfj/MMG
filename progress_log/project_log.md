@@ -6,11 +6,9 @@
 # 2025-07-01
 - Analyze results from the classic U-Net segmentation sweep
 
-# 2025-06-25
-- Launch sweep: classic U-Net segmentation (480 runs)
-
 # 2025-06-21
-- Refactor classic U-Net segmentation model and run sweeps on full sample size
+- Refactor U-Net segmentation code
+- Launch a large-scale sweep (480 runs, June 21–26) for systematic hyperparameter optimization
 
 # 2025-06-20
 - Fix classic U-Net segmentation model and test training on a smaller sample size
