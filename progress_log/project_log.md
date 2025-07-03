@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-07-03
+- Refactor to integrate the core components of MONAI
+  - including native DICOM support, MetaTensor integration, ready-to-use medical imaging networks such as the built-in U-Net and related architectures, as well as MONAI’s specialized losses and metrics. 
+
 # 2025-07-02
 - Refactor and launch adaptive sweep: classic U-Net segmentation
 
