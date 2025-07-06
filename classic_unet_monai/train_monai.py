@@ -94,7 +94,7 @@ for epoch in range(config.epochs):
             masks = batch["mask"].to(device)
             outputs = model(images)
             dice = dice_metric(outputs, masks)
-            dice_vals.append(dice.item())
+            dice_vals.append(dice.item().item())
     val_dice = sum(dice_vals) / len(dice_vals)
     wandb.log({"val_dice_coefficient": val_dice, "epoch": epoch})
 
