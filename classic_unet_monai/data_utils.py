@@ -1,6 +1,6 @@
 # data_utils_monai.py
 
-import os
+# import os
 import numpy as np
 import pandas as pd
 import pydicom
@@ -96,8 +96,8 @@ def build_dataloaders(
     n = len(df)
     train_n = int(n * split[0])
     val_n = int(n * split[1])
-    # Shuffle for randomness
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+
     train_df = df.iloc[:train_n]
     val_df = df.iloc[train_n:train_n+val_n]
     test_df = df.iloc[train_n+val_n:]
@@ -105,11 +105,40 @@ def build_dataloaders(
     train_tf, val_tf = get_monai_transforms(task, input_shape)
 
     train_ds = MammoSegmentationDataset(train_df, input_shape, task, transform=train_tf)
-    val_ds = MammoSegmentationDataset(val_df, input_shape, task, transform=val_tf)
-    test_ds = MammoSegmentationDataset(test_df, input_shape, task, transform=val_tf)
+    val_ds   = MammoSegmentationDataset(val_df, input_shape, task, transform=val_tf)
+    test_ds  = MammoSegmentationDataset(test_df, input_shape, task, transform=val_tf)
 
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_loader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    val_loader   = torch.utils.data.DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    test_loader  = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader, test_loader
+
+# def build_dataloaders(
+#     metadata_csv,
+#     input_shape=(256,256),
+#     batch_size=8,
+#     task="segmentation",
+#     split=(0.7, 0.15, 0.15)
+# ):
+#     df = pd.read_csv(metadata_csv)
+#     n = len(df)
+#     train_n = int(n * split[0])
+#     val_n = int(n * split[1])
+#     # Shuffle for randomness
+#     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
+#     train_df = df.iloc[:train_n]
+#     val_df = df.iloc[train_n:train_n+val_n]
+#     test_df = df.iloc[train_n+val_n:]
+
+#     train_tf, val_tf = get_monai_transforms(task, input_shape)
+
+#     train_ds = MammoSegmentationDataset(train_df, input_shape, task, transform=train_tf)
+#     val_ds = MammoSegmentationDataset(val_df, input_shape, task, transform=val_tf)
+#     test_ds = MammoSegmentationDataset(test_df, input_shape, task, transform=val_tf)
+
+#     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
+#     val_loader = torch.utils.data.DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+#     test_loader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+
+#     return train_loader, val_loader, test_loader
