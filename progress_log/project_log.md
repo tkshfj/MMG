@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-07-07
+- Refactor data_utils_monai.py to fix monai dataloader collate error
+- Launch adaptive sweep with monai integration: classic U-Net seg monai
+
 # 2025-07-06
 - Refactor data_utils_monai.py to integrate MONAI core components for transforms and data loading.
 - Known issue: MONAI DataLoader collate error persists due to inconsistent sample shapes entering batching. Further investigation is needed—particularly into force_2d_slice logic and upstream mask/image preprocessing—to ensure uniform output shape before batching.
