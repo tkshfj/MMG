@@ -1,11 +1,15 @@
 # Project Log
 
+# 2025-07-06
+- Refactor data_utils_monai.py to integrate MONAI core components for transforms and data loading.
+- Known issue: MONAI DataLoader collate error persists due to inconsistent sample shapes entering batching. Further investigation is needed—particularly into force_2d_slice logic and upstream mask/image preprocessing—to ensure uniform output shape before batching.
+
 # 2025-07-03
 - Refactor to integrate the core components of MONAI
   - including native DICOM support, MetaTensor integration, ready-to-use medical imaging networks such as the built-in U-Net and related architectures, as well as MONAI’s specialized losses and metrics. 
 
 # 2025-07-02
-- Refactor and launch adaptive sweep: classic U-Net segmentation
+- Refactor and launch adaptive sweep: classic U-Net segmentation (261 runs, July 2-6)
 
 # 2025-07-01
 - Analyze results from the classic U-Net segmentation sweep
