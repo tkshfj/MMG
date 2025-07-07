@@ -1,6 +1,7 @@
 # Project-specific Outputs
 *.h5
 *.keras
+*.pth
 data/
 downloads/
 html/
