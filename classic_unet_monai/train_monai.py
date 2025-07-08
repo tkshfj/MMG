@@ -81,7 +81,8 @@ for epoch in range(config.epochs):
 
     # Validation
     model.eval()
-    dice_metric.reset()
+    all_outputs = []
+    all_masks = []
     manual_dice_vals = []
     with torch.no_grad():
         try:
@@ -93,26 +94,32 @@ for epoch in range(config.epochs):
                 outputs = model(images)
                 outputs = torch.sigmoid(outputs)
 
-                if val_batches == 1:
-                    print(f"[DEBUG] outputs shape: {outputs.shape}, masks shape: {masks.shape}")
-                    print("outputs stats:", outputs.min().item(), outputs.max().item(), outputs.mean().item())
-                    print("masks stats:", masks.min().item(), masks.max().item(), masks.mean().item())
-
-                # Accumulate in DiceMetric
-                dice_metric(outputs.squeeze(1), masks.squeeze(1))
+                # Collect for epoch-level metric computation
+                all_outputs.append(outputs)
+                all_masks.append(masks)
 
                 # Manual Dice for each batch
                 outputs_bin = (outputs > 0.5).float()
                 intersection = (outputs_bin * masks).sum()
                 dice_manual = 2. * intersection / (outputs_bin.sum() + masks.sum() + 1e-8)
                 manual_dice_vals.append(dice_manual.item())
+
                 if val_batches == 1:
+                    print(f"[DEBUG] outputs shape: {outputs.shape}, masks shape: {masks.shape}")
+                    print("outputs stats:", outputs.min().item(), outputs.max().item(), outputs.mean().item())
+                    print("masks stats:", masks.min().item(), masks.max().item(), masks.mean().item())
                     print("[DEBUG] Manual Dice (thresholded):", dice_manual.item())
 
             print(f"Epoch {epoch}: {val_batches} validation batches processed.")
 
-            val_dice = dice_metric.aggregate().item()
+            # Concatenate all for epoch-level DiceMetric
+            all_outputs = torch.cat(all_outputs, dim=0)
+            all_masks = torch.cat(all_masks, dim=0)
+
+            # Squeeze channel dimension for DiceMetric if needed
+            val_dice = dice_metric(all_outputs.squeeze(1), all_masks.squeeze(1)).item()
             manual_val_dice = sum(manual_dice_vals) / len(manual_dice_vals) if manual_dice_vals else 0.0
+
             print(f"Epoch {epoch}: Logging val_dice_coefficient = {val_dice}")
             print(f"Epoch {epoch}: Logging manual_val_dice_coefficient = {manual_val_dice}")
 
@@ -125,6 +132,52 @@ for epoch in range(config.epochs):
             print(f"Exception during validation at epoch {epoch}: {e}")
             import traceback; traceback.print_exc()
             wandb.log({"val_dice_exception": str(e), "epoch": epoch})
+
+    # model.eval()
+    # dice_metric.reset()
+    # manual_dice_vals = []
+    # with torch.no_grad():
+    #     try:
+    #         val_batches = 0
+    #         for batch in val_loader:
+    #             val_batches += 1
+    #             images = batch["image"].to(device)
+    #             masks = batch["mask"].to(device)
+    #             outputs = model(images)
+    #             outputs = torch.sigmoid(outputs)
+
+    #             if val_batches == 1:
+    #                 print(f"[DEBUG] outputs shape: {outputs.shape}, masks shape: {masks.shape}")
+    #                 print("outputs stats:", outputs.min().item(), outputs.max().item(), outputs.mean().item())
+    #                 print("masks stats:", masks.min().item(), masks.max().item(), masks.mean().item())
+
+    #             # Accumulate in DiceMetric
+    #             dice_metric(outputs.squeeze(1), masks.squeeze(1))
+
+    #             # Manual Dice for each batch
+    #             outputs_bin = (outputs > 0.5).float()
+    #             intersection = (outputs_bin * masks).sum()
+    #             dice_manual = 2. * intersection / (outputs_bin.sum() + masks.sum() + 1e-8)
+    #             manual_dice_vals.append(dice_manual.item())
+    #             if val_batches == 1:
+    #                 print("[DEBUG] Manual Dice (thresholded):", dice_manual.item())
+
+    #         print(f"Epoch {epoch}: {val_batches} validation batches processed.")
+
+    #         val_dice = dice_metric.aggregate().item()
+    #         manual_val_dice = sum(manual_dice_vals) / len(manual_dice_vals) if manual_dice_vals else 0.0
+    #         print(f"Epoch {epoch}: Logging val_dice_coefficient = {val_dice}")
+    #         print(f"Epoch {epoch}: Logging manual_val_dice_coefficient = {manual_val_dice}")
+
+    #         wandb.log({
+    #             "val_dice_coefficient": val_dice,
+    #             "manual_val_dice_coefficient": manual_val_dice,
+    #             "epoch": epoch
+    #         })
+    #     except Exception as e:
+    #         print(f"Exception during validation at epoch {epoch}: {e}")
+    #         import traceback; traceback.print_exc()
+    #         wandb.log({"val_dice_exception": str(e), "epoch": epoch})
 
 # Save model with unique name, finish W&B
 model_path = f"unet_monai_{wandb.run.id}.pth"
