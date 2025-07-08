@@ -117,7 +117,8 @@ for epoch in range(config.epochs):
             all_masks = torch.cat(all_masks, dim=0)
 
             # Squeeze channel dimension for DiceMetric if needed
-            val_dice = dice_metric(all_outputs.squeeze(1), all_masks.squeeze(1)).item()
+            # val_dice = dice_metric(all_outputs.squeeze(1), all_masks.squeeze(1)).item()
+            val_dice = dice_metric(all_outputs.squeeze(1), all_masks.squeeze(1)).mean().item()
             manual_val_dice = sum(manual_dice_vals) / len(manual_dice_vals) if manual_dice_vals else 0.0
 
             print(f"Epoch {epoch}: Logging val_dice_coefficient = {val_dice}")

@@ -2,6 +2,7 @@
 
 # 2025-07-08
 - Refactor validation to aggregate DiceMetric over full validation set, log both per-epoch val_dice_coefficient and manual Dice, add output/mask shape and stats debug, and improve exception handling for robust MONAI segmentation analysis.
+- Refactor validation to compute val_dice_coefficient on full validation set per epoch for accurate MONAI metric logging.
 
 # 2025-07-07
 - Refactor data_utils_monai.py to fix monai dataloader collate error
