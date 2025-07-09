@@ -152,7 +152,7 @@ for epoch in range(config.epochs):
             wandb.log({"val_dice_exception": str(e), "epoch": epoch})
 
 # Save model with unique name, finish W&B
-model_path = f"unet_monai_{wandb.run.id}.pth"
+model_path = f"models/unet_monai_{wandb.run.id}.pth"
 torch.save(model.state_dict(), model_path)
 wandb.save(model_path)
 wandb.finish()
