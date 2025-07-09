@@ -87,8 +87,8 @@ def main():
 
         val_auc = roc_auc_score(y_true, y_probs)
         val_acc = accuracy_score(y_true, y_pred)
-        val_prec = precision_score(y_true, y_pred)
-        val_rec = recall_score(y_true, y_pred)
+        val_prec = precision_score(y_true, y_pred, zero_division=0)
+        val_rec = recall_score(y_true, y_pred, zero_division=0)
 
         wandb.log({
             "train_loss": avg_train_loss,
@@ -114,7 +114,10 @@ def main():
                 break
 
     # Final evaluation and confusion matrix
-    model.load_state_dict(torch.load("./models/model_final.pth", map_location=DEVICE))
+    # model.load_state_dict(torch.load("./models/model_final.pth", map_location=DEVICE))
+    state_dict = torch.load("./models/model_final.pth", map_location=DEVICE, weights_only=True)
+    model.load_state_dict(state_dict)
+
     model.eval()
     y_true, y_probs = [], []
     with torch.no_grad():
