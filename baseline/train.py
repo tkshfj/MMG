@@ -47,15 +47,6 @@ def build_model(input_shape, filters=32, kernel_size=3, dropout=0.3, rotation=0.
     ])
 
 
-def get_optimizer(name, learning_rate):
-    if name == "Adam":
-        return tf.keras.optimizers.Adam(learning_rate)
-    elif name == "SGD":
-        return tf.keras.optimizers.SGD(learning_rate)
-    else:
-        raise ValueError(f"Unsupported optimizer: {name}")
-
-
 def plot_confusion_matrix(y_true, y_pred, labels, title="Confusion Matrix"):
     cm = confusion_matrix(y_true, y_pred)
     plt.figure(figsize=(6, 5))
@@ -69,7 +60,6 @@ def plot_confusion_matrix(y_true, y_pred, labels, title="Confusion Matrix"):
 
 def main():
     # Initialize wandb
-    # wandb.init(project="baseline_cnn_dropout_augmentation")
     wandb.init()
     wandb.config.update({"optimizer": "Adam"}, allow_val_change=True)
     config = wandb.config
@@ -96,7 +86,7 @@ def main():
         translation=config.translation
     )
 
-    optimizer = get_optimizer(config.optimizer, config.learning_rate)
+    optimizer = tf.keras.optimizers.Adam(config.learning_rate)
 
     model.compile(
         optimizer=optimizer,

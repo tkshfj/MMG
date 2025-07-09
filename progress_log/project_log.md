@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-07-10
+- Refactor baseline code: add MONAI DataLoader and wandb sweep support for flexible hyperparameter tuning and standardized metric logging.
+
 # 2025-07-09
 - Add robust per-epoch validation logging for Dice and IoU metrics (both MONAI and manual)
 - Lauch adaptive sweep with monai integration: classic U-Net seg monai  (* runs, July 9-)
