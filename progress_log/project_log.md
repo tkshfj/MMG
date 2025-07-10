@@ -3,6 +3,8 @@
 # 2025-07-10
 - Refactor baseline code: add MONAI DataLoader and wandb sweep support for flexible hyperparameter tuning and standardized metric logging.
 - Add dropout, threshold tuning, and class-weighted loss to MONAI DenseNet; update sweep.yaml for improved recall and AUC.
+- Add Focal Loss, stronger data augmentation, weight decay sweep, and class-balanced sampling for improved model recall and precision.
+- Lauch adaptive sweep with monai integration: baseline CNN model for classification task (* runs, July 10-)
 
 # 2025-07-09
 - Add robust per-epoch validation logging for Dice and IoU metrics (both MONAI and manual)
