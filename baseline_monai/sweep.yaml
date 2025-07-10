@@ -11,13 +11,13 @@ parameters:
     max: 0.001
   batch_size:
     values: [8, 16, 32]
-  filters:
-    values: [16, 32, 64]
-  kernel_size:
-    values: [3, 5]
-  dropout:
-    min: 0.0
-    max: 0.5
+  # filters:
+  #   values: [16, 32, 64]
+  # kernel_size:
+  #   values: [3, 5]
+  # dropout:
+  #   min: 0.0
+  #   max: 0.5
   epochs:
     value: 20
   rotation:
@@ -29,3 +29,5 @@ parameters:
   translation:
     min: 0.0
     max: 0.2
+  optimizer:
+    values: ["Adam", "SGD", "RMSprop"]

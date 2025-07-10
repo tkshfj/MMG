@@ -8,13 +8,24 @@ import pandas as pd
 import numpy as np
 from data_utils import build_dataloaders
 from monai.networks.nets import DenseNet121
-from torch.optim import Adam
+from torch.optim import Adam, SGD, RMSprop
 from sklearn.metrics import confusion_matrix, roc_auc_score, accuracy_score, precision_score, recall_score
 import matplotlib.pyplot as plt
 import seaborn as sns
 
 INPUT_SHAPE = (224, 224)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def get_optimizer(name, parameters, lr):
+    if name.lower() == "adam":
+        return Adam(parameters, lr=lr)
+    elif name.lower() == "sgd":
+        return SGD(parameters, lr=lr)
+    elif name.lower() == "rmsprop":
+        return RMSprop(parameters, lr=lr)
+    else:
+        raise ValueError(f"Unsupported optimizer: {name}")
 
 
 def plot_confusion_matrix(y_true, y_pred, labels, title="Confusion Matrix"):
@@ -41,13 +52,16 @@ def main():
         shuffle=True,
         input_shape=INPUT_SHAPE,
         mode="classification",  # can use "segmentation" if needed
-        rotation=config.rotation,
-        zoom=config.zoom,
+        rotation=getattr(config, "rotation", 0.0),
+        zoom=getattr(config, "zoom", 0.0),
+        # rotation=config.rotation,
+        # zoom=config.zoom,
     )
 
     # Model definition (DenseNet121 for binary classification)
     model = DenseNet121(spatial_dims=2, in_channels=1, out_channels=1).to(DEVICE)
-    optimizer = Adam(model.parameters(), lr=config.learning_rate)
+    # optimizer = Adam(model.parameters(), lr=config.learning_rate)
+    optimizer = getattr(config, "optimizer", "Adam")
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # Training loop with early stopping
