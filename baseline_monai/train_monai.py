@@ -61,7 +61,8 @@ def main():
     # Model definition (DenseNet121 for binary classification)
     model = DenseNet121(spatial_dims=2, in_channels=1, out_channels=1).to(DEVICE)
     # optimizer = Adam(model.parameters(), lr=config.learning_rate)
-    optimizer = getattr(config, "optimizer", "Adam")
+    optimizer_name = getattr(config, "optimizer", "Adam")
+    optimizer = get_optimizer(optimizer_name, model.parameters(), config.learning_rate)
     criterion = torch.nn.BCEWithLogitsLoss()
 
     # Training loop with early stopping
