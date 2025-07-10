@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import ast
 import pydicom
+import torch
+from torch.utils.data import WeightedRandomSampler
 
 # Global configuration
 INPUT_SHAPE = (224, 224, 1)  # (512, 512, 1)
@@ -126,12 +128,13 @@ try:
     from monai.data import CacheDataset, DataLoader
     from monai.transforms import (
         LoadImaged, EnsureChannelFirstd, ScaleIntensityd, ResizeWithPadOrCropd,
-        RandFlipd, RandRotate90d, RandZoomd, ToTensord, Compose
+        RandFlipd, RandRotate90d, RandZoomd, RandAffined, RandGaussianNoised, ToTensord, Compose
     )
     from sklearn.model_selection import train_test_split
 except ImportError:
     # If MONAI not installed, this code block will be skipped (safe for TF-only environments)
     pass
+
 
 def build_dataloaders(
     metadata_csv: str,
@@ -199,6 +202,8 @@ def build_dataloaders(
         RandFlipd(keys=keys, prob=0.5, spatial_axis=0),
         RandRotate90d(keys=keys, prob=0.5),
         RandZoomd(keys=keys, prob=0.2, min_zoom=1.0-zoom, max_zoom=1.0+zoom),
+        RandAffined(keys=keys, prob=0.3, rotate_range=(0.2, 0.2), shear_range=(0.1, 0.1), scale_range=(0.1, 0.1)),
+        RandGaussianNoised(keys=keys, prob=0.15, std=0.01),
         ToTensord(keys=keys),
     ])
     val_transforms = Compose([
@@ -211,7 +216,20 @@ def build_dataloaders(
 
     train_ds = CacheDataset(data=train_records, transform=train_transforms, num_workers=num_workers)
     val_ds = CacheDataset(data=val_records, transform=val_transforms, num_workers=num_workers)
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=shuffle, num_workers=num_workers)
+
+    # BEGIN RESAMPLING LOGIC
+    # Compute class sample weights for the training set
+    train_labels = np.array([r["label"] for r in train_records])
+    class_sample_count = np.array([len(np.where(train_labels == t)[0]) for t in np.unique(train_labels)])
+    weight = 1. / class_sample_count
+    samples_weight = np.array([weight[int(l)] for l in train_labels])
+    samples_weight = torch.from_numpy(samples_weight).double()
+    sampler = WeightedRandomSampler(samples_weight, len(samples_weight), replacement=True)
+
+    # Use sampler for train_loader (no shuffle when using sampler)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, sampler=sampler, num_workers=num_workers)
+    # END RESAMPLING LOGIC
+
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=num_workers)
 
     return train_loader, val_loader

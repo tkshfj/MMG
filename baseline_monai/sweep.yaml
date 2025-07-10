@@ -32,6 +32,11 @@ parameters:
     max: 0.7
   pretrained:
     values: [False, True]
+  weight_decay:
+    min: 0.0
+    max: 0.01
+  arch:
+    values: ["DenseNet121", "DenseNet169"]
 
 # program: train_monai.py
 # method: bayes

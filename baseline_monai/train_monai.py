@@ -7,7 +7,7 @@ import torch
 import pandas as pd
 import numpy as np
 from data_utils import build_dataloaders
-from monai.networks.nets import DenseNet121
+from monai.networks.nets import DenseNet121, DenseNet169
 import torch.nn as nn
 from torch.optim import Adam, SGD, RMSprop
 from sklearn.metrics import confusion_matrix, roc_auc_score, accuracy_score, precision_score, recall_score
@@ -38,15 +38,47 @@ class DenseNetWithDropout(nn.Module):
         out = self.base.class_layers(out)
         return out
 
-def get_optimizer(name, parameters, lr):
+class FocalLoss(torch.nn.Module):
+    def __init__(self, alpha=1, gamma=2, reduction='mean', pos_weight=None):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+        self.reduction = reduction
+        self.pos_weight = pos_weight
+
+    def forward(self, inputs, targets):
+        BCE_loss = torch.nn.functional.binary_cross_entropy_with_logits(
+            inputs, targets, reduction='none', pos_weight=self.pos_weight
+        )
+        pt = torch.exp(-BCE_loss)
+        F_loss = self.alpha * (1-pt)**self.gamma * BCE_loss
+        if self.reduction == 'mean':
+            return F_loss.mean()
+        elif self.reduction == 'sum':
+            return F_loss.sum()
+        else:
+            return F_loss
+
+
+def get_optimizer(name, parameters, lr, weight_decay=1e-4):
     if name.lower() == "adam":
-        return Adam(parameters, lr=lr)
+        return Adam(parameters, lr=lr, weight_decay=weight_decay)
     elif name.lower() == "sgd":
-        return SGD(parameters, lr=lr)
+        return SGD(parameters, lr=lr, weight_decay=weight_decay)
     elif name.lower() == "rmsprop":
-        return RMSprop(parameters, lr=lr)
+        return RMSprop(parameters, lr=lr, weight_decay=weight_decay)
     else:
         raise ValueError(f"Unsupported optimizer: {name}")
+
+# def get_optimizer(name, parameters, lr):
+#     if name.lower() == "adam":
+#         return Adam(parameters, lr=lr)
+#     elif name.lower() == "sgd":
+#         return SGD(parameters, lr=lr)
+#     elif name.lower() == "rmsprop":
+#         return RMSprop(parameters, lr=lr)
+#     else:
+#         raise ValueError(f"Unsupported optimizer: {name}")
 
 def plot_confusion_matrix(y_true, y_pred, labels, title="Confusion Matrix"):
     cm = confusion_matrix(y_true, y_pred)
@@ -90,14 +122,37 @@ def main():
     pos_weight = compute_pos_weight(train_loader)
 
     # Model: Add dropout and pretrained options
-    model = DenseNetWithDropout(
-        dropout_rate=getattr(config, "dropout", 0.2),
-        pretrained=getattr(config, "pretrained", False)
-    ).to(DEVICE)
+    if getattr(config, "arch", "DenseNet121") == "DenseNet169":
+        model = DenseNet169(
+            spatial_dims=2,
+            in_channels=1,
+            out_channels=1,
+            pretrained=getattr(config, "pretrained", False)
+        ).to(DEVICE)
+    else:
+        model = DenseNet121(
+            spatial_dims=2,
+            in_channels=1,
+            out_channels=1,
+            pretrained=getattr(config, "pretrained", False)
+        ).to(DEVICE)
+
+    # model = DenseNetWithDropout(
+    #     dropout_rate=getattr(config, "dropout", 0.2),
+    #     pretrained=getattr(config, "pretrained", False)
+    # ).to(DEVICE)
 
     optimizer_name = getattr(config, "optimizer", "Adam")
-    optimizer = get_optimizer(optimizer_name, model.parameters(), config.learning_rate)
-    criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    weight_decay = getattr(config, "weight_decay", 0.0)
+    optimizer = get_optimizer(
+        optimizer_name,
+        model.parameters(),
+        config.learning_rate,
+        weight_decay=weight_decay
+    )
+    # optimizer = get_optimizer(optimizer_name, model.parameters(), config.learning_rate)
+    # criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
+    criterion = FocalLoss(pos_weight=pos_weight)
 
     patience = 5
     best_val_loss = float('inf')
