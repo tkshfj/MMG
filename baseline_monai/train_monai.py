@@ -42,7 +42,6 @@ def plot_confusion_matrix(y_true, y_pred, labels, title="Confusion Matrix"):
 def main():
     # Initialize wandb
     wandb.init()
-    wandb.config.update({"optimizer": "Adam"}, allow_val_change=True)
     config = wandb.config
 
     # Data preparation (single CSV, same as before)
