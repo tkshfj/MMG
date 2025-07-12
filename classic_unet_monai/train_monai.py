@@ -148,7 +148,8 @@ for epoch in range(config.epochs):
             })
         except Exception as e:
             print(f"Exception during validation at epoch {epoch}: {e}")
-            import traceback; traceback.print_exc()
+            import traceback
+            traceback.print_exc()
             wandb.log({"val_dice_exception": str(e), "epoch": epoch})
 
 # Save model with unique name, finish W&B

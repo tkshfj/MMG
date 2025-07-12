@@ -68,7 +68,7 @@ class MammoSegmentationDataset(Dataset):
         return sample
 
 
-def get_monai_transforms(task="segmentation", input_shape=(256,256)):
+def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
     from monai.transforms import (
         Compose, RandFlipd, RandRotate90d, ScaleIntensityd, ToTensord
     )
@@ -77,17 +77,18 @@ def get_monai_transforms(task="segmentation", input_shape=(256,256)):
         ScaleIntensityd(keys=["image"]),
         RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
         RandRotate90d(keys=keys, prob=0.5),
-        ToTensord(keys=keys + (["label"] if task=="multitask" else []))
+        ToTensord(keys=keys + (["label"] if task == "multitask" else []))
     ])
     val_transforms = Compose([
         ScaleIntensityd(keys=["image"]),
-        ToTensord(keys=keys + (["label"] if task=="multitask" else []))
+        ToTensord(keys=keys + (["label"] if task == "multitask" else []))
     ])
     return train_transforms, val_transforms
 
+
 def build_dataloaders(
     metadata_csv,
-    input_shape=(256,256),
+    input_shape=(256, 256),
     batch_size=8,
     task="segmentation",
     split=(0.7, 0.15, 0.15)
@@ -99,17 +100,17 @@ def build_dataloaders(
     df = df.sample(frac=1, random_state=42).reset_index(drop=True)
 
     train_df = df.iloc[:train_n]
-    val_df = df.iloc[train_n:train_n+val_n]
-    test_df = df.iloc[train_n+val_n:]
+    val_df = df.iloc[train_n:train_n + val_n]
+    test_df = df.iloc[train_n + val_n:]
 
     train_tf, val_tf = get_monai_transforms(task, input_shape)
 
     train_ds = MammoSegmentationDataset(train_df, input_shape, task, transform=train_tf)
-    val_ds   = MammoSegmentationDataset(val_df, input_shape, task, transform=val_tf)
-    test_ds  = MammoSegmentationDataset(test_df, input_shape, task, transform=val_tf)
+    val_ds = MammoSegmentationDataset(val_df, input_shape, task, transform=val_tf)
+    test_ds = MammoSegmentationDataset(test_df, input_shape, task, transform=val_tf)
 
     train_loader = torch.utils.data.DataLoader(train_ds, batch_size=batch_size, shuffle=True)
-    val_loader   = torch.utils.data.DataLoader(val_ds, batch_size=batch_size, shuffle=False)
-    test_loader  = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
+    val_loader = torch.utils.data.DataLoader(val_ds, batch_size=batch_size, shuffle=False)
+    test_loader = torch.utils.data.DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
     return train_loader, val_loader, test_loader
