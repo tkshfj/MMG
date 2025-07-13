@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-07-13
+- Add and submit testing report for peer review
+- Watch Weeks 15-16 lectures
+
 # 2025-07-10
 - Refactor baseline code: add MONAI DataLoader and wandb sweep support for flexible hyperparameter tuning and standardized metric logging.
 - Add dropout, threshold tuning, and class-weighted loss to MONAI DenseNet; update sweep.yaml for improved recall and AUC.
