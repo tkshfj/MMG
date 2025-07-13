@@ -3,6 +3,7 @@
 # 2025-07-13
 - Add and submit testing report for peer review
 - Watch Weeks 15-16 lectures
+- Refactor MONAI multitask pipeline: corrects metric computation, adds Dice/IoU, streamlines validation
 
 # 2025-07-10
 - Refactor baseline code: add MONAI DataLoader and wandb sweep support for flexible hyperparameter tuning and standardized metric logging.
