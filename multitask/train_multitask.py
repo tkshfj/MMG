@@ -78,7 +78,9 @@ for epoch in range(config.epochs):
         optimizer.zero_grad()
         class_logits, seg_out = model(images)
         loss_seg = segmentation_loss_fn(seg_out, masks)
-        loss_class = classification_loss_fn(class_logits.squeeze(), labels)
+        # loss_class = classification_loss_fn(class_logits.squeeze(), labels)
+        loss_class = classification_loss_fn(class_logits.view(-1), labels.view(-1))
+        # loss_class = classification_loss_fn(class_logits.flatten(), labels.flatten())
         loss = alpha * loss_class + beta * loss_seg
         loss.backward()
         optimizer.step()
@@ -88,7 +90,9 @@ for epoch in range(config.epochs):
         with torch.no_grad():
             class_probs = torch.sigmoid(class_logits.squeeze()).cpu().numpy()
             preds = (class_probs > 0.5).astype(np.float32)
-            train_class_preds.extend(preds.tolist())
+            # train_class_preds.extend(preds.tolist())
+            preds = np.array(preds)
+            train_class_preds.extend(preds.flatten().tolist())
             train_class_targets.extend(labels.cpu().numpy().tolist())
             # Segmentation
             dice_metric(seg_out, masks)
