@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-07-14
+- Launch a sweep: MONAI multitask pipeline (* runs, July 14-)
+
 # 2025-07-13
 - Add and submit testing report for peer review
 - Watch Weeks 15-16 lectures
