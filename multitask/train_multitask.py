@@ -28,6 +28,7 @@ def main():
         task="multitask"
     )
     wandb.init(project="multitask_exp", config=default_config)
+    run_id = wandb.run.id
     config = wandb.config
     # learning_rate = config.base_learning_rate * config.lr_multiplier
     BATCH_SIZE = config.batch_size
@@ -191,7 +192,9 @@ def main():
 
     # Save final model
     print("Training complete.")
-    torch.save(model.state_dict(), "models/multitask_unet_final.pth")
+    # torch.save(model.state_dict(), "models/multitask_unet_final.pth")
+    save_path = f"models/multitask_unet_{run_id}.pth"
+    torch.save(model.state_dict(), save_path)
 
 
 if __name__ == "__main__":
