@@ -1,7 +1,13 @@
 # Project Log
 
+# 2025-07-16
+- Lauch refactored MONAI multitask pipeline (* runs, July 16-)
+
+# 2025-07-15
+- Refactor MONAI multitask pipeline: corrects metric computation, adds Dice/IoU, streamlines validation
+
 # 2025-07-14
-- Launch a sweep: MONAI multitask pipeline (* runs, July 14-)
+- Launch a sweep: MONAI multitask pipeline (12 runs, July 14-15)
 
 # 2025-07-13
 - Add and submit testing report for peer review

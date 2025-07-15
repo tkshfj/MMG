@@ -190,6 +190,7 @@ def main():
             "train_loss": avg_train_loss,
             "val_loss": avg_val_loss,
             "val_dice": avg_dice,
+            "manual_dice": avg_manual_dice,
             "val_iou": avg_iou,
             "val_acc": val_acc,
             "val_auc": val_rocauc
