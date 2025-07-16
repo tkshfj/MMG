@@ -1,16 +1,15 @@
-import os                                 # For file and path handling
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"  # Suppress TensorFlow logging
-import torch                              # PyTorch core
-import torch.nn as nn                     # Neural network components
-from torch.optim import Adam              # Adam optimizer
-# from monai.data import set_determinism    # Reproducibility
-from monai.utils import set_determinism
-from monai.metrics import DiceMetric, MeanIoU  # Dice metric for segmentation
-import wandb                              # Weights & Biases for logging
+import os                                       # For file and path handling
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"        # Suppress TensorFlow logging
+import torch                                    # PyTorch core
+import torch.nn as nn                           # Neural network components
+from torch.optim import Adam                    # Adam optimizer
+from monai.utils import set_determinism         # Reproducibility
+from monai.metrics import DiceMetric, MeanIoU   # Dice metric for segmentation
+import wandb                                    # Weights & Biases for logging
 from data_utils_monai import build_dataloaders  # Custom dataset utility
-from multitask_unet import MultiTaskUNet  # Model
+from multitask_unet import MultiTaskUNet        # Model
 from sklearn.metrics import accuracy_score, roc_auc_score  # For classification metrics
-import numpy as np  # For numerical operations
+import numpy as np                              # For numerical operations
 
 
 def main():
@@ -30,7 +29,6 @@ def main():
     wandb.init(project="multitask_exp", config=default_config)
     run_id = wandb.run.id
     config = wandb.config
-    # learning_rate = config.base_learning_rate * config.lr_multiplier
     BATCH_SIZE = config.batch_size
     LEARNING_RATE = config.base_learning_rate * config.lr_multiplier
     EPOCHS = config.epochs
@@ -47,7 +45,8 @@ def main():
         input_shape=(256, 256),
         batch_size=BATCH_SIZE,
         task="multitask",  # or "segmentation"
-        split=(0.7, 0.15, 0.15)
+        split=(0.7, 0.15, 0.15),
+        num_workers=16  # support multiprocessing for data loading
     )
 
     # =======================

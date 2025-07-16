@@ -97,7 +97,8 @@ def build_dataloaders(
     input_shape=(256, 256),
     batch_size=8,
     task="segmentation",
-    split=(0.7, 0.15, 0.15)
+    split=(0.7, 0.15, 0.15),
+    num_workers = 16
 ):
     """Builds train/val/test DataLoaders from a CSV split by given proportions."""
     # Load dataframe
@@ -148,8 +149,11 @@ def build_dataloaders(
     test_ds = MammoSegmentationDataset(test_df, input_shape=input_shape, task=task, transform=test_transforms)
 
     # DataLoaders
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2)
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2)
+    # train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4)
+    # val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2)
+    # test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
 
     return train_loader, val_loader, test_loader

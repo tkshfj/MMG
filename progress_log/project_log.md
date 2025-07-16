@@ -1,5 +1,8 @@
 # Project Log
 
+# 205-07-17
+- Refactor build dataloaders function for multiprocessing support
+
 # 2025-07-16
 - Lauch refactored MONAI multitask pipeline (* runs, July 16-)
 
