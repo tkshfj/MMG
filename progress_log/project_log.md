@@ -2,6 +2,8 @@
 
 # 205-07-17
 - Refactor build dataloaders function for multiprocessing support
+- Refactor U-Net multitask pipeline with enhanced MONAI integration
+- Refactor classic U-Net segmentation pipeline with enhanced MONAI integration
 
 # 2025-07-16
 - Lauch refactored MONAI multitask pipeline (* runs, July 16-)
