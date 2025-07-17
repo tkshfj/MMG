@@ -6,7 +6,6 @@ import pydicom
 import cv2
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
-# from monai.transforms import Compose, RandFlip, RandRotate, ToTensor
 from monai.transforms import Compose, RandFlipd, RandRotate90d, ToTensord, ScaleIntensityd
 
 EPSILON = 1e-8  # Small value to avoid division by zero
@@ -81,12 +80,10 @@ def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
         ScaleIntensityd(keys=["image"]),
         RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
         RandRotate90d(keys=keys, prob=0.5),
-        # ToTensord(keys=keys + (["label"] if task == "multitask" else []))
         ToTensord(keys=keys + (["label"] if task == "multitask" else []))
     ])
     val_transforms = Compose([
         ScaleIntensityd(keys=["image"]),
-        # ToTensord(keys=keys + (["label"] if task == "multitask" else []))
         ToTensord(keys=keys + (["label"] if task == "multitask" else []))
     ])
     return train_transforms, val_transforms
@@ -149,9 +146,6 @@ def build_dataloaders(
     test_ds = MammoSegmentationDataset(test_df, input_shape=input_shape, task=task, transform=test_transforms)
 
     # DataLoaders
-    # train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=4)
-    # val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=2)
-    # test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=2)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
