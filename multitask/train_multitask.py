@@ -26,7 +26,7 @@ def main():
         input_shape=[256, 256, 1],
         task="multitask"
     )
-    wandb.init(project="multitask_exp", config=default_config)
+    wandb.init(project="multitask", config=default_config)
     run_id = wandb.run.id
     config = wandb.config
     BATCH_SIZE = config.batch_size
