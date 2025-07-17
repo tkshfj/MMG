@@ -46,7 +46,7 @@ def main():
         batch_size=BATCH_SIZE,
         task="multitask",  # or "segmentation"
         split=(0.7, 0.15, 0.15),
-        num_workers=16  # support multiprocessing for data loading
+        num_workers=32  # 16; support multiprocessing for data loading
     )
 
     # =======================
@@ -191,7 +191,6 @@ def main():
 
     # Save final model
     print("Training complete.")
-    # torch.save(model.state_dict(), "models/multitask_unet_final.pth")
     save_path = f"models/multitask_unet_{run_id}.pth"
     torch.save(model.state_dict(), save_path)
 
