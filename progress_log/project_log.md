@@ -1,6 +1,9 @@
 # Project Log
 
-# 205-07-17
+# 2025-07-18
+- Create U-Net multitask modular pipeline with MONAI integration
+
+# 2025-07-17
 - Refactor build dataloaders function for multiprocessing support
 - Refactor U-Net multitask pipeline with enhanced MONAI integration
 - Refactor classic U-Net segmentation pipeline with enhanced MONAI integration
