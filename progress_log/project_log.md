@@ -2,6 +2,7 @@
 
 # 2025-07-18
 - Create U-Net multitask modular pipeline with MONAI integration
+- Refactor U-Net multitask modular pipeline with MONAI integation
 
 # 2025-07-17
 - Refactor build dataloaders function for multiprocessing support
