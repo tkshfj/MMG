@@ -1,9 +1,9 @@
 # data_utils_monai.py
 from ast import literal_eval
+import cv2
 import numpy as np
 import pandas as pd
 import pydicom
-import cv2
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from monai.transforms import Compose, RandFlipd, RandRotate90d, ToTensord, ScaleIntensityd
@@ -95,7 +95,7 @@ def build_dataloaders(
     batch_size=8,
     task="segmentation",
     split=(0.7, 0.15, 0.15),
-    num_workers = 16
+    num_workers=32
 ):
     """Builds train/val/test DataLoaders from a CSV split by given proportions."""
     # Load dataframe

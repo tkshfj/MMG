@@ -1,4 +1,4 @@
-program: train_multitask.py
+program: train.py
 method: bayes
 metric:
   name: val_dice

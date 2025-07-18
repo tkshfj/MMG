@@ -1,14 +1,15 @@
 import torch
+import os
 import wandb
-from sklearn.metrics import accuracy_score, roc_auc_score  # For classification metrics
-import numpy as np                              # For numerical operations
 from monai.utils import set_determinism
-from multitask_model_utils import build_model, get_optimizer
-from data_utils_monai import build_dataloaders
-from multitask_eval_utils import (
-    get_segmentation_metrics, get_classification_metrics,
-    get_handlers, get_config
+from model_utils import build_model, get_optimizer
+from data_utils import build_dataloaders
+from eval_utils import (
+    get_segmentation_metrics, get_classification_metrics, get_config,
+    compute_segmentation_metrics, compute_classification_metrics, log_wandb,
+    log_sample_images
 )
+
 
 def train(config=None):
     with wandb.init(config=config):
@@ -23,24 +24,17 @@ def train(config=None):
             batch_size=config.batch_size,
             task="multitask",
             split=(0.7, 0.15, 0.15),
-            num_workers=32
+            num_workers=12
         )
 
         model = build_model(config).to(config.device)
         optimizer = get_optimizer(config.optimizer, model.parameters(), config.learning_rate, config.weight_decay)
         criterion_seg, criterion_cls = get_segmentation_metrics()["loss"], get_classification_metrics()["loss"]
         dice_metric, iou_metric = get_segmentation_metrics()["dice"], get_segmentation_metrics()["iou"]
-
-        # for epoch in range(config.config.epochs):
-        #     # --- Training loop ---
-        #     # [move your training loop logic here, using model, optimizer, criterions]
-        #     pass
-
-        #     # --- Validation loop ---
-        #     # [move your validation logic here, using metrics, handlers, wandb logging]
-        #     pass
-
-        #     # --- wandb logging, model saving, etc. ---
+        # MONAI/W&B handlers (prepared for integration or future Trainer/Evaluator)
+        # Note: These handlers are designed for Ignite Engine, not direct calls
+        # train_handlers = get_handlers("train")
+        # val_handlers = get_handlers("val", model=model, save_dir="models/")
 
         # Training Loops
         for epoch in range(config.epochs):
@@ -65,6 +59,10 @@ def train(config=None):
 
                 running_loss += loss.item()
 
+                # Handlers are designed for Ignite Engine, not direct calls
+                # for h in train_handlers:
+                #     h({"loss": loss.item()})
+
             avg_train_loss = running_loss / len(train_loader)
             print(f"Epoch {epoch + 1}/{config.epochs} | Train Loss: {avg_train_loss:.4f}")
 
@@ -75,6 +73,7 @@ def train(config=None):
             cls_preds, cls_probs, cls_targets = [], [], []
             dice_metric.reset()
             iou_metric.reset()
+            images_for_logging, masks_for_logging, preds_for_logging = [], [], []
 
             with torch.no_grad():
                 for batch in val_loader:
@@ -127,15 +126,17 @@ def train(config=None):
                     manual_dices.append(manual_dice)
                     # print(f"[DEBUG] Manual Dice: {manual_dice:.4f}")
 
+                    # For image logging, store first batch (or every N batches)
+                    if len(images_for_logging) < 2:
+                        images_for_logging.append(images.cpu())
+                        masks_for_logging.append(masks.cpu())
+                        preds_for_logging.append(pred_mask.cpu())
+
             avg_val_loss = val_loss / len(val_loader)
-            avg_dice = dice_metric.aggregate().item()
-            avg_iou = iou_metric.aggregate().item()
-            avg_manual_dice = np.mean(manual_dices) if manual_dices else float("nan")
-            val_acc = accuracy_score(cls_targets, cls_preds)
-            try:
-                val_rocauc = roc_auc_score(cls_targets, cls_probs)
-            except ValueError:
-                val_rocauc = float("nan")
+            avg_dice, avg_iou, avg_manual_dice = compute_segmentation_metrics(dice_metric, iou_metric, manual_dices, task=config.task)
+            val_acc, val_rocauc = compute_classification_metrics(cls_targets, cls_preds, cls_probs)
+            # val_f1 = f1_score(cls_targets, cls_preds, task=config.task)  # Commented out since not used
+            # cm = confusion_matrix(cls_targets, cls_preds)  # Commented out since not used
 
             print(
                 f"Epoch {epoch + 1} | Val Loss: {avg_val_loss:.4f} | "
@@ -143,22 +144,38 @@ def train(config=None):
                 f"Val Acc: {val_acc:.4f} | Val AUC: {val_rocauc:.4f}"
             )
 
+            # Custom epoch dictionary for handlers (commented out since handlers are disabled)
+            # epoch_metrics = {
+            #     "val_acc": val_acc,
+            #     "val_auc": val_rocauc,
+            #     "val_f1": val_f1,
+            #     "val_cm_00": cm[0, 0] if cm.shape == (2, 2) else 0,
+            #     "val_cm_01": cm[0, 1] if cm.shape == (2, 2) else 0,
+            #     "val_cm_10": cm[1, 0] if cm.shape == (2, 2) else 0,
+            #     "val_cm_11": cm[1, 1] if cm.shape == (2, 2) else 0,
+            # }
+            # for h in val_handlers:
+            #     h(epoch_metrics)
+
             # Logging
-            wandb.log({
-                "epoch": epoch + 1,
-                "train_loss": avg_train_loss,
-                "val_loss": avg_val_loss,
-                "val_dice": avg_dice,
-                "val_dice_manual": avg_manual_dice,
-                "val_iou": avg_iou,
-                "val_acc": val_acc,
-                "val_auc": val_rocauc
-            })
+            log_wandb(epoch, avg_train_loss, avg_val_loss, avg_dice, avg_manual_dice, avg_iou, val_acc, val_rocauc, task=config.task)
+
+            # For segmentation-only
+            # log_wandb(epoch, avg_train_loss, avg_val_loss, avg_dice, avg_manual_dice, avg_iou, task="segmentation")
+
+            # For classification-only
+            # log_wandb(epoch, avg_train_loss, avg_val_loss, val_acc=val_acc, val_rocauc=val_rocauc, task="classification")
+
+            # Log sample images (first batch only)
+            if images_for_logging:
+                log_sample_images(images_for_logging[0], masks_for_logging[0], preds_for_logging[0], epoch, task=config.task)
 
         # Save final model
         print("Training complete.")
-        save_path = f"models/multitask_unet_{run_id}.pth"
+        os.makedirs("outputs/models", exist_ok=True)
+        save_path = f"outputs/models/multitask_unet_{run_id}.pth"
         torch.save(model.state_dict(), save_path)
+
 
 if __name__ == "__main__":
     train()
