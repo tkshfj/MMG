@@ -1,5 +1,7 @@
 # multitask_modular/train.py
 import os
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+
 import torch
 import wandb
 from ignite.handlers import ModelCheckpoint
@@ -269,7 +271,7 @@ def image_log_handler(model, prepare_batch_fn, num_images=4):
 def train(config=None):
     # Initialize W&B run (config passed from sweep or CLI)
     with wandb.init(config=config):
-        config = get_config(wandb.config)  # retrieve config object
+        config = get_config(wandb.config, dir="outputs/wandb")
         set_determinism(seed=42)           # for reproducibility
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         config.device = device  # store device in config
