@@ -246,8 +246,8 @@ def image_log_handler(model, prepare_batch_fn, num_images=4):
 # Main training function using MONAI engines
 def train(config=None):
     # Initialize W&B run (config passed from sweep or CLI)
-    with wandb.init(config=config):
-        config = get_config(wandb.config, dir="outputs/wandb")
+    with wandb.init(config=config, dir="outputs/wandb"):
+        config = get_config(wandb.config)
         set_determinism(seed=42)           # for reproducibility
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         config.device = device  # store device in config
