@@ -45,12 +45,14 @@ def seg_output_transform(output):
     # For segmentation (Dice/IoU/Jaccard): returns (pred_mask, true_mask), both batched
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
         pred_masks, true_masks = [], []
+        # Get device from first sample's seg_logits
+        device = output[0]['pred'][1].device
         for sample in output:
             seg_logits = sample['pred'][1]
             true_mask = sample['label']['mask']
             # Ensure (1, H, W)
-            pred_mask = (torch.sigmoid(seg_logits).unsqueeze(0) > 0.5).float()
-            true_mask = true_mask.unsqueeze(0).float()
+            pred_mask = (torch.sigmoid(seg_logits).unsqueeze(0) > 0.5).float().to(device)
+            true_mask = true_mask.unsqueeze(0).float().to(device)
             pred_masks.append(pred_mask)
             true_masks.append(true_mask)
         pred_masks = torch.cat(pred_masks, dim=0)
@@ -66,7 +68,8 @@ def cls_output_transform(output):
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
         # Should return [batch, num_classes], NOT [batch]
         pred_logits = torch.stack([s['pred'][0] for s in output])  # s['pred'][0] should be [num_classes]
-        true_labels = torch.tensor([s['label']['label'] for s in output], dtype=torch.long)
+        device = pred_logits.device
+        true_labels = torch.tensor([s['label']['label'] for s in output], dtype=torch.long, device=device)
         assert pred_logits.shape[0] == true_labels.shape[0], "Batch size mismatch in classification output"
         print("DEBUG: pred_logits.shape:", pred_logits.shape)
         print("CLS METRIC TRANS:", pred_logits.shape, true_labels.shape)
@@ -82,8 +85,10 @@ def auc_output_transform(output):
     """
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
         probs_list, true_labels = [], []
+        # Get device from first sample's logits
+        device = torch.as_tensor(output[0]['pred'][0]).device
         for sample in output:
-            class_logits = torch.as_tensor(sample['pred'][0])
+            class_logits = torch.as_tensor(sample['pred'][0]).to(device)
             label = sample['label']['label']
             # If class_logits is shape [num_classes] (standard case), softmax on dim=0
             if class_logits.ndim == 1:
@@ -97,7 +102,8 @@ def auc_output_transform(output):
             else:
                 raise ValueError(f"class_logits shape unexpected: {class_logits.shape}")
             probs_list.append(prob.unsqueeze(0))
-            true_labels.append(torch.tensor([label], dtype=torch.long))
+            # true_labels.append(torch.tensor([label], dtype=torch.long))
+            true_labels.append(torch.tensor([label], dtype=torch.long, device=device))
         return torch.cat(probs_list, dim=0), torch.cat(true_labels, dim=0)
     else:
         raise ValueError(f"auc_output_transform expected list of dicts, got: {output}")
@@ -155,9 +161,16 @@ def attach_metrics(evaluator):
     Accuracy(
         output_transform=lambda output: (
             torch.stack([s['pred'][0] for s in output]),
-            torch.tensor([int(s['label']['label']) for s in output], dtype=torch.long)
+            torch.tensor([int(s['label']['label']) for s in output], dtype=torch.long,
+                        device=torch.stack([s['pred'][0] for s in output]).device)
         )
     ).attach(evaluator, "val_accuracy")
+    # Accuracy(
+    #     output_transform=lambda output: (
+    #         torch.stack([s['pred'][0] for s in output]),
+    #         torch.tensor([int(s['label']['label']) for s in output], dtype=torch.long)
+    #     )
+    # ).attach(evaluator, "val_accuracy")
     # ROCAUCMetric(
     #     output_transform=lambda output: (
     #         torch.stack([s['pred'][0] for s in output]),
@@ -171,9 +184,17 @@ def attach_metrics(evaluator):
         loss_fn=get_classification_metrics()["loss"],
         output_transform=lambda output: (
             torch.stack([s["pred"][0] for s in output]),
-            torch.tensor([int(s["label"]["label"]) for s in output], dtype=torch.long)
+            torch.tensor([int(s["label"]["label"]) for s in output], dtype=torch.long,
+                        device=torch.stack([s['pred'][0] for s in output]).device)
         )
     ).attach(evaluator, "val_loss")
+    # Loss(
+    #     loss_fn=get_classification_metrics()["loss"],
+    #     output_transform=lambda output: (
+    #         torch.stack([s["pred"][0] for s in output]),
+    #         torch.tensor([int(s["label"]["label"]) for s in output], dtype=torch.long)
+    #     )
+    # ).attach(evaluator, "val_loss")
 
 
 # Handlers for logging to Weights & Biases and image logging
