@@ -149,10 +149,10 @@ def manual_dice_handler(model, prepare_batch_fn):
 
         print(f"[Manual Dice] Mean Dice over validation set: {mean_dice:.4f}")
 
-        engine.state.metrics["manual_val_dice"] = mean_dice
+        engine.state.metrics["val_dice_manual"] = mean_dice
         if wandb.run is not None:
             # Do **not** pass step=engine.state.epoch here, let wandb auto-increment step
-            wandb.log({"manual_val_dice": mean_dice})
+            wandb.log({"val_dice_manual": mean_dice})
 
     return _handler
 
@@ -164,7 +164,7 @@ def attach_metrics(evaluator):
             torch.stack([s['pred'][0] for s in output]),
             torch.tensor([int(s['label']['label']) for s in output], dtype=torch.long, device=torch.stack([s['pred'][0] for s in output]).device)
         )
-    ).attach(evaluator, "val_accuracy")
+    ).attach(evaluator, "val_acc")
     # ROCAUCMetric(
     #     output_transform=lambda output: (
     #         torch.stack([s['pred'][0] for s in output]),
@@ -300,13 +300,13 @@ def train(config=None):
         attach_metrics(evaluator)
 
         # Attach Dice and Jaccard using the cm object
-        DiceCoefficient(cm=cm_metric).attach(evaluator, "val_mean_dice")
+        DiceCoefficient(cm=cm_metric).attach(evaluator, "val_dice")
         JaccardIndex(cm=cm_metric).attach(evaluator, "val_iou")
 
         # Attach StatsHandler for validation metrics at epoch end
         StatsHandler(
             tag_name="val",
-            output_transform=from_engine(["val_accuracy", "val_auc", "val_loss", "val_mean_dice", "val_iou"], first=False),
+            output_transform=from_engine(["val_acc", "val_auc", "val_loss", "val_dice", "val_iou"], first=False),
             iteration_log=False
         ).attach(evaluator)
 
