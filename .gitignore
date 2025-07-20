@@ -10,6 +10,7 @@ logs/fit/
 models/
 not_used/
 results/history/
+outputs/
 wandb/
 
 /working/
