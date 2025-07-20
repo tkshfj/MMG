@@ -187,7 +187,6 @@ def attach_metrics(evaluator):
 def wandb_log_handler(engine):
     """Log metrics from engine.state.metrics to Weights & Biases."""
     log_data = {}
-    # Convert metrics to plain float for logging
     for k, v in engine.state.metrics.items():
         try:
             # Handle torch tensors or numpy values
@@ -196,16 +195,41 @@ def wandb_log_handler(engine):
                 if v.numel() == 1:
                     log_data[k] = v.item()
                 else:
-                    # Log as separate entries: val_dice_class0, val_dice_class1
+                    # Log classwise: val_mean_dice_c0, val_mean_dice_c1, etc.
                     for i, val in enumerate(v.flatten()):
                         log_data[f"{k}_c{i}"] = float(val)
+                    # Log mean over classes as the main key (e.g., val_mean_dice, val_iou)
+                    log_data[k] = float(v.mean().item())
             else:
                 log_data[k] = float(v)
         except Exception as e:
             print(f"[wandb_log_handler] Warning: Could not log {k}: {v} - {e}")
-    # Also log current epoch
     log_data["epoch"] = engine.state.epoch
     wandb.log(log_data)
+
+
+# def wandb_log_handler(engine):
+#     """Log metrics from engine.state.metrics to Weights & Biases."""
+#     log_data = {}
+#     # Convert metrics to plain float for logging
+#     for k, v in engine.state.metrics.items():
+#         try:
+#             # Handle torch tensors or numpy values
+#             if isinstance(v, torch.Tensor):
+#                 v = v.cpu().detach()
+#                 if v.numel() == 1:
+#                     log_data[k] = v.item()
+#                 else:
+#                     # Log as separate entries: val_dice_class0, val_dice_class1
+#                     for i, val in enumerate(v.flatten()):
+#                         log_data[f"{k}_c{i}"] = float(val)
+#             else:
+#                 log_data[k] = float(v)
+#         except Exception as e:
+#             print(f"[wandb_log_handler] Warning: Could not log {k}: {v} - {e}")
+#     # Also log current epoch
+#     log_data["epoch"] = engine.state.epoch
+#     wandb.log(log_data)
 
 
 def image_log_handler(model, prepare_batch_fn, num_images=4):
