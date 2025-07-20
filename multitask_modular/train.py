@@ -149,6 +149,7 @@ def manual_dice_handler(model, prepare_batch_fn):
 
         print(f"[Manual Dice] Mean Dice over validation set: {mean_dice:.4f}")
 
+        engine.state.metrics["manual_val_dice"] = mean_dice
         if wandb.run is not None:
             # Do **not** pass step=engine.state.epoch here, let wandb auto-increment step
             wandb.log({"manual_val_dice": mean_dice})
@@ -161,16 +162,9 @@ def attach_metrics(evaluator):
     Accuracy(
         output_transform=lambda output: (
             torch.stack([s['pred'][0] for s in output]),
-            torch.tensor([int(s['label']['label']) for s in output], dtype=torch.long,
-                        device=torch.stack([s['pred'][0] for s in output]).device)
+            torch.tensor([int(s['label']['label']) for s in output], dtype=torch.long, device=torch.stack([s['pred'][0] for s in output]).device)
         )
     ).attach(evaluator, "val_accuracy")
-    # Accuracy(
-    #     output_transform=lambda output: (
-    #         torch.stack([s['pred'][0] for s in output]),
-    #         torch.tensor([int(s['label']['label']) for s in output], dtype=torch.long)
-    #     )
-    # ).attach(evaluator, "val_accuracy")
     # ROCAUCMetric(
     #     output_transform=lambda output: (
     #         torch.stack([s['pred'][0] for s in output]),
@@ -184,17 +178,9 @@ def attach_metrics(evaluator):
         loss_fn=get_classification_metrics()["loss"],
         output_transform=lambda output: (
             torch.stack([s["pred"][0] for s in output]),
-            torch.tensor([int(s["label"]["label"]) for s in output], dtype=torch.long,
-                        device=torch.stack([s['pred'][0] for s in output]).device)
+            torch.tensor([int(s["label"]["label"]) for s in output], dtype=torch.long, device=torch.stack([s['pred'][0] for s in output]).device)
         )
     ).attach(evaluator, "val_loss")
-    # Loss(
-    #     loss_fn=get_classification_metrics()["loss"],
-    #     output_transform=lambda output: (
-    #         torch.stack([s["pred"][0] for s in output]),
-    #         torch.tensor([int(s["label"]["label"]) for s in output], dtype=torch.long)
-    #     )
-    # ).attach(evaluator, "val_loss")
 
 
 # Handlers for logging to Weights & Biases and image logging
@@ -320,20 +306,20 @@ def train(config=None):
         # Attach StatsHandler for validation metrics at epoch end
         StatsHandler(
             tag_name="val",
-            output_transform=from_engine(["val_accuracy", "val_auc", "val_loss"], first=False),
+            output_transform=from_engine(["val_accuracy", "val_auc", "val_loss", "val_mean_dice", "val_iou"], first=False),
             iteration_log=False
         ).attach(evaluator)
 
         # Event Handlers
         # Run validation (evaluator) at the end of every training epoch
         trainer.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: evaluator.run())
-        # Log metrics to Weights & Biases after each epoch (for both trainer and evaluator)
-        trainer.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
-        evaluator.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
         # Log manual Dice score at the end of each validation epoch
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, manual_dice_handler(model, prepare_batch))
         # Log sample images at end of each validation epoch (using evaluator)
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, image_log_handler(model, prepare_batch))
+        # Log metrics to Weights & Biases after each epoch (for both trainer and evaluator)
+        trainer.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
+        evaluator.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda e: print("Eval metrics at epoch end:", list(e.state.metrics.keys())))
 
         # Early Stopping & Checkpointing
