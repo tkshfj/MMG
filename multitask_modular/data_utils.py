@@ -12,10 +12,10 @@ EPSILON = 1e-8  # Small value to avoid division by zero
 
 
 class MammoSegmentationDataset(Dataset):
-    """ MONAI/PyTorch Dataset for mammogram segmentation or multitask learning."""
+    """MONAI/PyTorch Dataset for mammogram segmentation or multitask learning."""
     def __init__(self, df, input_shape=(256, 256), task='segmentation', transform=None):
         self.df = df
-        self.input_shape = input_shape
+        self.input_shape = input_shape  # (H, W)
         self.task = task
         self.transform = transform
 
@@ -45,19 +45,20 @@ class MammoSegmentationDataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         img = self.load_dicom(row['image_path'])
-        img = cv2.resize(img, self.input_shape)
+        # OpenCV expects (width, height)
+        img = cv2.resize(img, (self.input_shape[1], self.input_shape[0]))
         img = np.expand_dims(img, axis=0)  # [C, H, W] for MONAI
 
         if self.task == 'segmentation':
             mask_paths = literal_eval(row['mask_paths']) if isinstance(row['mask_paths'], str) else row['mask_paths']
             mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
-            mask = cv2.resize(mask, self.input_shape, interpolation=cv2.INTER_NEAREST)
+            mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
             mask = np.expand_dims(mask, axis=0)
             sample = {"image": img, "mask": mask}
         elif self.task == 'multitask':
             mask_paths = literal_eval(row['mask_paths']) if isinstance(row['mask_paths'], str) else row['mask_paths']
             mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
-            mask = cv2.resize(mask, self.input_shape, interpolation=cv2.INTER_NEAREST)
+            mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
             mask = np.expand_dims(mask, axis=0)
             label = float(row['label'])
             sample = {"image": img, "mask": mask, "label": label}
@@ -72,9 +73,7 @@ class MammoSegmentationDataset(Dataset):
 
 
 def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
-    from monai.transforms import (
-        Compose, RandFlipd, RandRotate90d, ScaleIntensityd, ToTensord
-    )
+    from monai.transforms import Compose, RandFlipd, RandRotate90d, ScaleIntensityd, ToTensord
     keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
     train_transforms = Compose([
         ScaleIntensityd(keys=["image"]),
@@ -93,12 +92,11 @@ def build_dataloaders(
     metadata_csv,
     input_shape=(256, 256),
     batch_size=8,
-    task="segmentation",
+    task="multitask",
     split=(0.7, 0.15, 0.15),
     num_workers=32
 ):
     """Builds train/val/test DataLoaders from a CSV split by given proportions."""
-    # Load dataframe
     df = pd.read_csv(metadata_csv)
 
     # Split into train, val, test (by fractions)
@@ -120,13 +118,8 @@ def build_dataloaders(
         random_state=42,
         stratify=temp_df['label'] if 'label' in temp_df.columns else None
     )
-
     # Decide transform keys
-    if task in ["segmentation", "multitask"]:
-        keys = ["image", "mask"]
-    else:
-        keys = ["image"]
-
+    keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
     # Define transforms (train has augment, val/test don't)
     train_transforms = Compose([
         ScaleIntensityd(keys=["image"]),
@@ -139,15 +132,18 @@ def build_dataloaders(
         ToTensord(keys=keys + (["label"] if task == "multitask" else []))
     ])
     test_transforms = val_transforms
-
     # Create datasets
     train_ds = MammoSegmentationDataset(train_df, input_shape=input_shape, task=task, transform=train_transforms)
     val_ds = MammoSegmentationDataset(val_df, input_shape=input_shape, task=task, transform=val_transforms)
     test_ds = MammoSegmentationDataset(test_df, input_shape=input_shape, task=task, transform=test_transforms)
-
     # DataLoaders
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
 
     return train_loader, val_loader, test_loader
+
+
+#         img = cv2.resize(img, self.input_shape[:2])
+#             mask = cv2.resize(mask, self.input_shape, interpolation=cv2.INTER_NEAREST)
+#             mask = cv2.resize(mask, self.input_shape, interpolation=cv2.INTER_NEAREST)

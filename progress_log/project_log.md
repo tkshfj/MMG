@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-07-21
+- Refactor U-Net multitask modular pipeline with MONAI/Ignite integration
+
 # 2025-07-20
 - Refactor U-Net multitask modular pipeline with MONAI integration
 

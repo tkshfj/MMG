@@ -1,4 +1,4 @@
-from types import SimpleNamespace
+# eval_utils.py
 import numpy as np
 import matplotlib.pyplot as plt
 import torch.nn as nn
@@ -14,20 +14,6 @@ def get_segmentation_metrics():
 
 def get_classification_metrics():
     return {"loss": nn.CrossEntropyLoss()}
-
-
-def get_config(cfg):
-    defaults = {
-        "batch_size": 16,
-        "learning_rate": 2e-4,
-        "weight_decay": 1e-4,
-        "epochs": 40,
-        "optimizer": "Adam",
-        "task": "multitask"
-    }
-    if cfg is not None:
-        defaults.update(dict(cfg))
-    return SimpleNamespace(**defaults)
 
 
 # Metric Computation Functions
