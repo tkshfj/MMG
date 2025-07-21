@@ -23,7 +23,7 @@ def prepare_batch(batch, device=None, non_blocking=False):
 
 
 # Main training function using MONAI engines
-def train(config=None):
+def main(config=None):
     # Initialize W&B run (config passed from sweep or CLI)
     with wandb.init(config=config, dir="outputs/wandb"):
         config = load_and_validate_config(wandb.config)
@@ -95,4 +95,4 @@ def train(config=None):
 
 
 if __name__ == "__main__":
-    train()
+    main()
