@@ -8,8 +8,8 @@ parameters:
     values: [16, 32, 64, 128]
   epochs:
     value: 40
-  metadata_csv:
-    values: "../data/processed/cbis_ddsm_metadata_full.csv"
+  # metadata_csv:
+  #   values: ../data/processed/cbis_ddsm_metadata_full.csv
   base_learning_rate:
     value: 0.0002
   lr_multiplier:
