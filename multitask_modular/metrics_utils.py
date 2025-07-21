@@ -60,8 +60,8 @@ def seg_output_transform(output):
         pred_logits = torch.cat(pred_logits, dim=0)  # [B, 2, H, W]
         pred_labels = torch.argmax(pred_logits, dim=1)  # [B, H, W]
         true_masks = torch.cat(true_masks, dim=0)    # [B, H, W]
-        # return pred_logits, true_masks
-        return pred_labels, true_masks
+        return pred_logits, true_masks
+        # return pred_labels, true_masks
     else:
         raise ValueError("seg_output_transform expected list of dicts")
 
