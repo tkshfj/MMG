@@ -3,6 +3,9 @@
 # 2025-07-23
 - Create minimal requirements.txt
 - Report: Minimal requirements.txt & Environment Dependency Management
+- Report: Debugging and Refactoring MONAI/Ignite multitask pipeline
+  - Shape Mismatch in Ignite Metrics: ValueError: y_pred does not have correct number of classes: 256 vs 2
+- Code review: MONAI/Ignite multitask pipeline
 
 # 2025-07-22
 - Refactor U-Net multitask modular pipeline with MONAI/Ignite integration

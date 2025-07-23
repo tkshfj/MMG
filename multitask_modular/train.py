@@ -9,7 +9,7 @@ from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_utils import build_model, get_optimizer
 from engine_utils import build_trainer, build_evaluator
-from metrics_utils import seg_output_transform, auc_output_transform, multitask_loss, attach_metrics
+from metrics_utils import seg_output_transform, auc_output_transform, multitask_loss, attach_metrics, seg_output_transform_for_confmat
 from handlers import register_handlers, wandb_log_handler, image_log_handler, manual_dice_handler
 
 
@@ -64,7 +64,11 @@ def main(config=None):
         )
 
         # Attach metrics to evaluator
-        attach_metrics(evaluator, config, seg_output_transform=seg_output_transform)
+        attach_metrics(
+            evaluator,
+            config,
+            seg_output_transform_for_metrics=seg_output_transform_for_confmat)
+        # seg_output_transform=seg_output_transform
 
         register_handlers(
             trainer,
@@ -76,7 +80,7 @@ def main(config=None):
             manual_dice_handler=manual_dice_handler,
             image_log_handler=image_log_handler,
             wandb_log_handler=wandb_log_handler,
-            add_segmentation_metrics=True,
+            add_segmentation_metrics=False,
             num_classes=2,
             seg_output_transform=seg_output_transform,
             dice_name="val_dice",

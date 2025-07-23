@@ -16,21 +16,38 @@ def attach_segmentation_metrics(evaluator, num_classes=2, output_transform=None,
 
 
 def register_handlers(
-    trainer, evaluator, model, config,
-    train_loader=None, val_loader=None,
-    manual_dice_handler=None, image_log_handler=None, wandb_log_handler=None,
+    trainer,
+    evaluator,
+    model,
+    config,
+    train_loader=None,
+    val_loader=None,
+    manual_dice_handler=None,
+    image_log_handler=None,
+    wandb_log_handler=None,
     add_segmentation_metrics=False,
-    num_classes=2, seg_output_transform=None, dice_name="val_dice", iou_name="val_iou",
+    num_classes=2,
+    seg_output_transform=None,
+    dice_name="val_dice",
+    iou_name="val_iou",
     prepare_batch=None
 ):
     # Attach all event handlers to trainer/evaluator: logging, checkpoint, early stop, etc.
     if add_segmentation_metrics and seg_output_transform is not None:
-        attach_segmentation_metrics(evaluator, num_classes=num_classes, output_transform=seg_output_transform, dice_name=dice_name, iou_name=iou_name)
+        attach_segmentation_metrics(
+            evaluator,
+            num_classes=num_classes,
+            output_transform=seg_output_transform,
+            dice_name=dice_name,
+            iou_name=iou_name
+        )
 
     # Training loss stats (per-iteration and per-epoch)
     StatsHandler(
         tag_name="train",
-        output_transform=from_engine(["loss"], first=True)
+        output_transform=from_engine(["loss"], first=True),
+        iteration_log=False,
+        epoch_log=True
     ).attach(trainer)
 
     # Validation metrics at epoch end
@@ -58,7 +75,7 @@ def register_handlers(
         trainer.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
 
-    evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda e: print("Eval metrics at epoch end:", list(e.state.metrics.keys())))
+    # evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda e: print("Eval metrics at epoch end:", list(e.state.metrics.keys())))
 
     # Early Stopping
     early_stopper = EarlyStopHandler(
@@ -91,23 +108,38 @@ def register_handlers(
     evaluator.add_event_handler(Events.EPOCH_COMPLETED, model_ckpt, {"model": model})
 
 
-# Handlers for logging to Weights & Biases and image logging
 def wandb_log_handler(engine):
-    """Log metrics from engine.state.metrics to Weights & Biases."""
+    """Log metrics from engine.state.metrics to Weights & Biases with proper dtype handling."""
     log_data = {}
     for k, v in engine.state.metrics.items():
         try:
-            # Handle torch tensors or numpy values
+            # Convert MetaTensor (MONAI) to torch.Tensor
+            if hasattr(v, "as_tensor"):
+                v = v.as_tensor()
+            # Handle torch.Tensor (including confusion matrices and vectors)
             if isinstance(v, torch.Tensor):
                 v = v.cpu().detach()
-                if v.numel() == 1:
-                    log_data[k] = v.item()
-                else:
-                    # Log classwise: val_mean_dice_c0, val_mean_dice_c1, etc.
+                # Confusion matrix (2D integer tensor)
+                if v.ndim == 2 and v.dtype in (torch.int32, torch.int64):
+                    for i in range(v.shape[0]):
+                        for j in range(v.shape[1]):
+                            log_data[f"{k}_{i}{j}"] = int(v[i, j])
+                # Vector/tensor per class (float)
+                elif v.numel() > 1:
                     for i, val in enumerate(v.flatten()):
                         log_data[f"{k}_c{i}"] = float(val)
-                    # Log mean over classes as the main key (e.g., val_mean_dice, val_iou)
-                    log_data[k] = float(v.mean().item())
+                    # If not confusion matrix, log mean as main key
+                    if v.dtype.is_floating_point:
+                        log_data[k] = float(v.mean().item())
+                # Scalar
+                elif v.numel() == 1:
+                    log_data[k] = float(v.item())
+                else:
+                    # Catch-all for unhandled shapes
+                    log_data[k] = v.tolist()
+            # Handle numpy arrays
+            elif hasattr(v, "item"):
+                log_data[k] = float(v.item())
             else:
                 log_data[k] = float(v)
         except Exception as e:
