@@ -1,46 +1,71 @@
 # Project Log
 
+# 2025-07-23
+- Create minimal requirements.txt
+- Report: Minimal requirements.txt & Environment Dependency Management
+
+# 2025-07-22
+- Refactor U-Net multitask modular pipeline with MONAI/Ignite integration
+- Report: Refactoring Unified MONAI/Ignite Pipeline with Task Argument
+- Report: Segmentation Metrics in MONAI with Ignite
+
 # 2025-07-21
 - Refactor U-Net multitask modular pipeline with MONAI/Ignite integration
+- Launch sweep with MONAI/Ignite integration: U-Net multitask modular pipeline (* runs, July 21-)
+- Report: MONAI/Ignite Modular Deep Learning Pipeline (MMG Project)
+- Report: Understanding the `y_pred does not have correct number of classes` Error in Ignite Segmentation Metrics
 
 # 2025-07-20
 - Refactor U-Net multitask modular pipeline with MONAI integration
+- Launch sweep with MONAI integration: U-Net multitask modular pipeline (11 runs, July 20-21)
+- Report: Logging and Metrics Management in MONAI/Wandb Deep Learning Pipeline
+- Report: MONAI Multitask Deep Learning Pipeline — Technical Report (20 July 2025)
 
 # 2025-07-19
 - Refactor U-Net multitask modular pipeline with MONAI integration
+- Report: U-Net multitask Pipeline with MONAI with Ignite integration
+- Report: Updated list of core error messages
 
 # 2025-07-18
 - Create U-Net multitask modular pipeline with MONAI integration
 - Refactor U-Net multitask modular pipeline with MONAI integation
+- Report: Modular U-Net multitask Pipeline with MONAI & W&B
 
 # 2025-07-17
 - Refactor build dataloaders function for multiprocessing support
 - Refactor U-Net multitask pipeline with enhanced MONAI integration
 - Refactor classic U-Net segmentation pipeline with enhanced MONAI integration
+- Report: Multitask U-Net Training, Debugging and Sweep Analysis
 
 # 2025-07-16
-- Lauch refactored MONAI multitask pipeline (* runs, July 16-)
+- Lauch refactored MONAI multitask pipeline (57 runs, July 16-20)
 
 # 2025-07-15
 - Refactor MONAI multitask pipeline: corrects metric computation, adds Dice/IoU, streamlines validation
+- Report: Multitask Pipeline with MONAI
+- Report: Debugging and Refactoring Multitask U-Net Validation with MONAI Metrics
 
 # 2025-07-14
-- Launch a sweep: MONAI multitask pipeline (12 runs, July 14-15)
+- Launch sweep: MONAI multitask pipeline (12 runs, July 14-15)
+- Report: MONAI-based Multitask Pipeline
 
 # 2025-07-13
 - Add and submit testing report for peer review
 - Watch Weeks 15-16 lectures
 - Refactor MONAI multitask pipeline: corrects metric computation, adds Dice/IoU, streamlines validation
+- Report: Multi-Task Classification & Segmentation Pipeline
 
 # 2025-07-10
 - Refactor baseline code: add MONAI DataLoader and wandb sweep support for flexible hyperparameter tuning and standardized metric logging.
 - Add dropout, threshold tuning, and class-weighted loss to MONAI DenseNet; update sweep.yaml for improved recall and AUC.
 - Add Focal Loss, stronger data augmentation, weight decay sweep, and class-balanced sampling for improved model recall and precision.
-- Lauch adaptive sweep with monai integration: baseline CNN model for classification task (* runs, July 10-)
+- Lauch adaptive sweep with monai integration: baseline CNN model for classification task (60 runs, July 10)
 
 # 2025-07-09
 - Add robust per-epoch validation logging for Dice and IoU metrics (both MONAI and manual)
-- Lauch adaptive sweep with monai integration: classic U-Net seg monai  (* runs, July 9-)
+- Lauch adaptive sweep with monai integration: classic U-Net seg monai  (21 runs, July 9-13)
+- Report: MONAI Segmentation Validation and PyTorch Checkpointing
+- Report: U-Net Segmentation Sweep Runs and MONAI Migration
 
 # 2025-07-08
 - Refactor validation to aggregate DiceMetric over full validation set, log both per-epoch val_dice_coefficient and manual Dice, add output/mask shape and stats debug, and improve exception handling for robust MONAI segmentation analysis.
@@ -49,6 +74,8 @@
 # 2025-07-07
 - Refactor data_utils_monai.py to fix monai dataloader collate error
 - Launch adaptive sweep with monai integration: classic U-Net seg monai
+- Report: MONAI DataLoader Collate Error and Solutions
+- Report: Refactor Report: Robust Medical Image Data Pipeline with MONAI
 
 # 2025-07-06
 - Refactor data_utils_monai.py to integrate MONAI core components for transforms and data loading.
