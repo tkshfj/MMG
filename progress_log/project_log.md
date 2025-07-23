@@ -7,6 +7,8 @@
   - Shape Mismatch in Ignite Metrics: ValueError: y_pred does not have correct number of classes: 256 vs 2
 - Code review: MONAI/Ignite multitask pipeline
 - Refactor: add logging for data loading errors, use dynamic metric keys in handlers
+- Save multitask modular pipeline as of 2025-07-21
+- Lauch refactored MONAI/Ignite multitask pipeline (* runs, July 24-)
 
 # 2025-07-22
 - Refactor U-Net multitask modular pipeline with MONAI/Ignite integration
@@ -15,7 +17,7 @@
 
 # 2025-07-21
 - Refactor U-Net multitask modular pipeline with MONAI/Ignite integration
-- Launch sweep with MONAI/Ignite integration: U-Net multitask modular pipeline (* runs, July 21-)
+- Launch sweep with MONAI/Ignite integration: U-Net multitask modular pipeline (34 runs, July 21-24)
 - Report: MONAI/Ignite Modular Deep Learning Pipeline (MMG Project)
 - Report: Understanding the `y_pred does not have correct number of classes` Error in Ignite Segmentation Metrics
 
