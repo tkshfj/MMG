@@ -19,7 +19,7 @@ def load_and_validate_config(wandb_config):
         "l2_reg": 1e-4,
         "split": (0.7, 0.15, 0.15),
         "task": "multitask",
-                "early_stop": {
+        "early_stop": {
             "patience": 10,
             "min_delta": 0.001,
             "metric": "val_auc",
