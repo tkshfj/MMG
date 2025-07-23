@@ -1,0 +1,35 @@
+program: train.py
+method: bayes
+metric:
+  name: val_dice
+  goal: maximize
+parameters:
+  batch_size:
+    values: [16, 32, 64, 128]
+  epochs:
+    value: 40
+  # metadata_csv:
+  #   values: ../data/processed/cbis_ddsm_metadata_full.csv
+  base_learning_rate:
+    value: 0.0002
+  lr_multiplier:
+    distribution: uniform
+    min: 0.8
+    max: 1.2
+  dropout:
+    distribution: uniform
+    min: 0.15
+    max: 0.25
+  l2_reg:
+    distribution: uniform
+    min: 0.00001
+    max: 0.00015
+  input_shape:
+    value: [256, 256]
+  task:
+    value: multitask
+  # Optionally sweep over loss weights
+  alpha:
+    values: [0.5, 1.0, 2.0]
+  beta:
+    values: [0.5, 1.0, 2.0]
