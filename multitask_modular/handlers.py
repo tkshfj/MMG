@@ -89,13 +89,26 @@ def register_handlers(
 
     # evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda e: print("Eval metrics at epoch end:", list(e.state.metrics.keys())))
 
+    def get_score_function(config):
+        key = config["early_stop"]["metric"]
+        mode = config["early_stop"].get("mode", "max")
+        if mode == "max":
+            return lambda engine: engine.state.metrics.get(key, 0.0)
+        else:
+            # For 'min' metrics (like loss), invert value so improvement is still detected correctly
+            return lambda engine: -engine.state.metrics.get(key, 0.0)
+
     # Early Stopping
     early_stopper = EarlyStopHandler(
-        patience=10,
-        min_delta=0.001,
-        score_function=lambda engine: engine.state.metrics.get("val_auc", 0.0)
+        patience=config["early_stop"]["patience"],
+        min_delta=config["early_stop"]["min_delta"],
+        score_function=get_score_function(config),
+        trainer=trainer
+        # patience=10,
+        # min_delta=0.001,
+        # score_function=lambda engine: engine.state.metrics.get("val_auc", 0.0)
     )
-    early_stopper.set_trainer(trainer)
+    # early_stopper.set_trainer(trainer)
     evaluator.add_event_handler(Events.EPOCH_COMPLETED, early_stopper)
 
     # Checkpoint handler (periodic)

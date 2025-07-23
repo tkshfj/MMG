@@ -26,6 +26,11 @@ parameters:
     max: 0.00015
   input_shape:
     value: [256, 256]
+  early_stop:
+    patience: 10
+    min_delta: 0.001
+    metric: val_auc
+    mode: max
   task:
     value: multitask
   # Optionally sweep over loss weights

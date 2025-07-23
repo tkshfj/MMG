@@ -19,6 +19,12 @@ def load_and_validate_config(wandb_config):
         "l2_reg": 1e-4,
         "split": (0.7, 0.15, 0.15),
         "task": "multitask",
+                "early_stop": {
+            "patience": 10,
+            "min_delta": 0.001,
+            "metric": "val_auc",
+            "mode": "max"
+        }
     }
     for k, v in optional_defaults.items():
         config.setdefault(k, v)
@@ -32,6 +38,20 @@ def load_and_validate_config(wandb_config):
     missing = [k for k in required if k not in config]
     if missing:
         raise ValueError(f"Missing required config keys: {missing}")
+
+    # Merge/validate early_stop config
+    if "early_stop" in config:
+        early_stop_defaults = optional_defaults["early_stop"]
+        es = config["early_stop"]
+        # Merge missing defaults into config["early_stop"]
+        for k, v in early_stop_defaults.items():
+            es.setdefault(k, v)
+        # Type coercion for sweep/CLI string values
+        es["patience"] = int(es.get("patience", early_stop_defaults["patience"]))
+        es["min_delta"] = float(es.get("min_delta", early_stop_defaults["min_delta"]))
+        es["metric"] = str(es.get("metric", early_stop_defaults["metric"]))
+        es["mode"] = str(es.get("mode", early_stop_defaults["mode"]))
+        config["early_stop"] = es
 
     # Type conversions for tuples (from str, e.g., in sweep configs)
     def to_tuple(val, typ=float):

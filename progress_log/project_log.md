@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-07-24
+- Refactor to Set Early Stopping Conditions in MONAI/Ignite Pipeline
+
 # 2025-07-23
 - Create minimal requirements.txt
 - Report: Minimal requirements.txt & Environment Dependency Management
