@@ -1,4 +1,12 @@
-# data_utils_monai.py
+# data_utils.py
+import logging
+
+logging.basicConfig(
+    level=logging.INFO,  # Change to DEBUG or WARNING as appropriate
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
+
 from ast import literal_eval
 import cv2
 import numpy as np
@@ -25,7 +33,8 @@ class MammoSegmentationDataset(Dataset):
             img = dcm.pixel_array.astype(np.float32)
             img = (img - img.min()) / (img.max() - img.min() + EPSILON)
         except Exception as e:
-            print(f"[DICOM ERROR] {path}: {e}")
+            logger.warning(f"[DICOM ERROR] Failed to load {path}: {e}")
+            # print(f"[DICOM ERROR] {path}: {e}")
             img = np.zeros(self.input_shape, dtype=np.float32)
         return img
 

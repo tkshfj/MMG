@@ -50,10 +50,22 @@ def register_handlers(
         epoch_log=True
     ).attach(trainer)
 
+    def get_val_metric_keys(config, add_segmentation_metrics=False, dice_name="val_dice", iou_name="val_iou"):
+        """Return a list of metric keys for StatsHandler output_transform, based on config['task'] and metrics attached."""
+        keys = []
+        # Classification metrics
+        if config.get("task") in ("classification", "multitask"):
+            keys += ["val_acc", "val_auc", "val_loss"]
+        # Segmentation metrics
+        if config.get("task") in ("segmentation", "multitask") and add_segmentation_metrics:
+            keys += [dice_name, iou_name]
+        return keys
+
     # Validation metrics at epoch end
-    val_metrics = ["val_acc", "val_auc", "val_loss"]
-    if add_segmentation_metrics:
-        val_metrics += [dice_name, iou_name]
+    val_metrics = get_val_metric_keys(config, add_segmentation_metrics, dice_name, iou_name)
+    # val_metrics = ["val_acc", "val_auc", "val_loss"]
+    # if add_segmentation_metrics:
+    #     val_metrics += [dice_name, iou_name]
 
     StatsHandler(
         tag_name="val",
