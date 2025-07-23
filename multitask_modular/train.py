@@ -39,7 +39,7 @@ def main(config=None):
             batch_size=config.get("batch_size", 16),
             task=config.get("task", "multitask"),
             split=config.get("split", (0.7, 0.15, 0.15)),
-            num_workers=config.get("num_workers", 12)
+            num_workers=config.get("num_workers", 32)
         )
 
         # Build model and optimizer
