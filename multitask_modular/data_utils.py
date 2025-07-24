@@ -14,7 +14,7 @@ import pandas as pd
 import pydicom
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
-from monai.transforms import Compose, RandFlipd, RandRotate90d, ToTensord, ScaleIntensityd
+from monai.transforms import Compose, RandFlipd, RandRotate90d, ToTensord, ScaleIntensityd, Lambdad
 
 EPSILON = 1e-8  # Small value to avoid division by zero
 
@@ -69,32 +69,49 @@ class MammoSegmentationDataset(Dataset):
             mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
             mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
             mask = np.expand_dims(mask, axis=0)
-            label = float(row['label'])
+            label = int(row['label'])
             sample = {"image": img, "mask": mask, "label": label}
         else:  # classification
-            label = float(row['label'])
+            label = int(row['label'])
             sample = {"image": img, "label": label}
 
         if self.transform:
             sample = self.transform(sample)
+            # After transform, label may be converted to float tensor by ToTensord,
+            # so force it back to long if present:
+            if "label" in sample:
+                # Handles both numpy and torch tensor
+                if hasattr(sample["label"], "dtype") and hasattr(sample["label"], "long"):
+                    sample["label"] = sample["label"].long()
+                else:
+                    sample["label"] = int(sample["label"])
 
         return sample
 
 
+def to_long(x):
+    if hasattr(x, "long"):
+        return x.long()
+    return int(x)
+
+
 def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
-    from monai.transforms import Compose, RandFlipd, RandRotate90d, ScaleIntensityd, ToTensord
     keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
-    train_transforms = Compose([
+    train_transforms = [
         ScaleIntensityd(keys=["image"]),
         RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
         RandRotate90d(keys=keys, prob=0.5),
-        ToTensord(keys=keys + (["label"] if task == "multitask" else []))
-    ])
-    val_transforms = Compose([
+        ToTensord(keys=keys + (["label"] if task in ["classification", "multitask"] else [])),
+    ]
+    val_transforms = [
         ScaleIntensityd(keys=["image"]),
-        ToTensord(keys=keys + (["label"] if task == "multitask" else []))
-    ])
-    return train_transforms, val_transforms
+        ToTensord(keys=keys + (["label"] if task in ["classification", "multitask"] else [])),
+    ]
+    if task in ["classification", "multitask"]:
+        train_transforms.append(Lambdad(keys="label", func=to_long))
+        val_transforms.append(Lambdad(keys="label", func=to_long))
+
+    return Compose(train_transforms), Compose(val_transforms)
 
 
 def build_dataloaders(
@@ -127,19 +144,8 @@ def build_dataloaders(
         random_state=42,
         stratify=temp_df['label'] if 'label' in temp_df.columns else None
     )
-    # Decide transform keys
-    keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
-    # Define transforms (train has augment, val/test don't)
-    train_transforms = Compose([
-        ScaleIntensityd(keys=["image"]),
-        RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
-        RandRotate90d(keys=keys, prob=0.5),
-        ToTensord(keys=keys + (["label"] if task == "multitask" else []))
-    ])
-    val_transforms = Compose([
-        ScaleIntensityd(keys=["image"]),
-        ToTensord(keys=keys + (["label"] if task == "multitask" else []))
-    ])
+
+    train_transforms, val_transforms = get_monai_transforms(task=task, input_shape=input_shape)
     test_transforms = val_transforms
     # Create datasets
     train_ds = MammoSegmentationDataset(train_df, input_shape=input_shape, task=task, transform=train_transforms)

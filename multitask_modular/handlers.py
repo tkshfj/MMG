@@ -4,6 +4,7 @@ import wandb
 from monai.handlers import CheckpointSaver, EarlyStopHandler, StatsHandler, from_engine
 from ignite.handlers import ModelCheckpoint
 from ignite.engine import Events
+import logging
 
 
 # Attach Dice and Jaccard metrics via ConfusionMatrix if requested
@@ -70,7 +71,7 @@ def register_handlers(
     StatsHandler(
         tag_name="val",
         output_transform=from_engine(val_metrics, first=False),
-        iteration_log=False
+        iteration_log=True  # False
     ).attach(evaluator)
 
     # Run validation after each training epoch
@@ -134,43 +135,73 @@ def register_handlers(
 
 
 def wandb_log_handler(engine):
-    """Log metrics from engine.state.metrics to Weights & Biases with proper dtype handling."""
+    """Log all available metrics from engine.state.metrics to wandb, handling types robustly."""
     log_data = {}
     for k, v in engine.state.metrics.items():
         try:
-            # Convert MetaTensor (MONAI) to torch.Tensor
+            # Handle MetaTensor (MONAI) to Tensor
             if hasattr(v, "as_tensor"):
                 v = v.as_tensor()
-            # Handle torch.Tensor (including confusion matrices and vectors)
+            # Handle torch.Tensor
             if isinstance(v, torch.Tensor):
                 v = v.cpu().detach()
-                # Confusion matrix (2D integer tensor)
-                if v.ndim == 2 and v.dtype in (torch.int32, torch.int64):
-                    for i in range(v.shape[0]):
-                        for j in range(v.shape[1]):
-                            log_data[f"{k}_{i}{j}"] = int(v[i, j])
-                # Vector/tensor per class (float)
+                if v.ndim == 2 and v.dtype in (torch.int32, torch.int64):  # Confusion matrix
+                    log_data[k] = v.tolist()
                 elif v.numel() > 1:
-                    for i, val in enumerate(v.flatten()):
-                        log_data[f"{k}_c{i}"] = float(val)
-                    # If not confusion matrix, log mean as main key
-                    if v.dtype.is_floating_point:
-                        log_data[k] = float(v.mean().item())
-                # Scalar
+                    log_data[k] = float(v.mean().item()) if v.dtype.is_floating_point else v.tolist()
                 elif v.numel() == 1:
                     log_data[k] = float(v.item())
                 else:
-                    # Catch-all for unhandled shapes
                     log_data[k] = v.tolist()
-            # Handle numpy arrays
+            # Handle numpy scalars
             elif hasattr(v, "item"):
                 log_data[k] = float(v.item())
             else:
                 log_data[k] = float(v)
         except Exception as e:
-            print(f"[wandb_log_handler] Warning: Could not log {k}: {v} - {e}")
+            logging.warning(f"[wandb_log_handler] Could not log {k}: {v} - {e}")
     log_data["epoch"] = engine.state.epoch
     wandb.log(log_data)
+
+
+# def wandb_log_handler(engine):
+#     """Log metrics from engine.state.metrics to Weights & Biases with proper dtype handling."""
+#     log_data = {}
+#     for k, v in engine.state.metrics.items():
+#         try:
+#             # Convert MetaTensor (MONAI) to torch.Tensor
+#             if hasattr(v, "as_tensor"):
+#                 v = v.as_tensor()
+#             # Handle torch.Tensor (including confusion matrices and vectors)
+#             if isinstance(v, torch.Tensor):
+#                 v = v.cpu().detach()
+#                 # Confusion matrix (2D integer tensor)
+#                 if v.ndim == 2 and v.dtype in (torch.int32, torch.int64):
+#                     for i in range(v.shape[0]):
+#                         for j in range(v.shape[1]):
+#                             log_data[f"{k}_{i}{j}"] = int(v[i, j])
+#                 # Vector/tensor per class (float)
+#                 elif v.numel() > 1:
+#                     for i, val in enumerate(v.flatten()):
+#                         log_data[f"{k}_c{i}"] = float(val)
+#                     # If not confusion matrix, log mean as main key
+#                     if v.dtype.is_floating_point:
+#                         log_data[k] = float(v.mean().item())
+#                 # Scalar
+#                 elif v.numel() == 1:
+#                     log_data[k] = float(v.item())
+#                 else:
+#                     # Catch-all for unhandled shapes
+#                     log_data[k] = v.tolist()
+#             # Handle numpy arrays
+#             elif hasattr(v, "item"):
+#                 log_data[k] = float(v.item())
+#             else:
+#                 log_data[k] = float(v)
+#         except Exception as e:
+#             print(f"[wandb_log_handler] Warning: Could not log {k}: {v} - {e}")
+#     log_data["epoch"] = engine.state.epoch
+#     wandb.log(log_data)
 
 
 def image_log_handler(model, prepare_batch_fn, num_images=4):
@@ -184,7 +215,17 @@ def image_log_handler(model, prepare_batch_fn, num_images=4):
             all_pred_masks = []
             for batch in engine.state.dataloader:
                 images, targets = prepare_batch_fn(batch, device)
-                class_logits, seg_logits = model(images)
+
+                # Only proceed if "mask" exists in targets (segmentation or multitask)
+                if "mask" not in targets:
+                    continue  # skip this batch
+
+                # Model may be multitask or just segmentation
+                if isinstance(model(images), (tuple, list)) and len(model(images)) > 1:
+                    _, seg_logits = model(images)
+                else:
+                    seg_logits = model(images)
+
                 pred_mask = (torch.sigmoid(seg_logits) > 0.5).float()
                 gt_mask = targets["mask"]
 
@@ -197,6 +238,10 @@ def image_log_handler(model, prepare_batch_fn, num_images=4):
                 if len(all_images) >= num_images:
                     break
 
+            if len(all_images) == 0:
+                # Optionally log or warn that no images/masks were available for logging
+                return
+
             for i in range(min(len(all_images), num_images)):
                 wandb.log({
                     "image": wandb.Image(all_images[i], caption="GT vs Pred"),
@@ -206,10 +251,44 @@ def image_log_handler(model, prepare_batch_fn, num_images=4):
     return _handler
 
 
+# def image_log_handler(model, prepare_batch_fn, num_images=4):
+#     def _handler(engine):
+#         model.eval()
+#         device = next(model.parameters()).device
+
+#         with torch.no_grad():
+#             all_images = []
+#             all_gt_masks = []
+#             all_pred_masks = []
+#             for batch in engine.state.dataloader:
+#                 images, targets = prepare_batch_fn(batch, device)
+#                 class_logits, seg_logits = model(images)
+#                 pred_mask = (torch.sigmoid(seg_logits) > 0.5).float()
+#                 gt_mask = targets["mask"]
+
+#                 for i in range(len(images)):
+#                     all_images.append(images[i].cpu())
+#                     all_gt_masks.append(gt_mask[i].cpu())
+#                     all_pred_masks.append(pred_mask[i].cpu())
+#                     if len(all_images) >= num_images:
+#                         break
+#                 if len(all_images) >= num_images:
+#                     break
+
+#             for i in range(min(len(all_images), num_images)):
+#                 wandb.log({
+#                     "image": wandb.Image(all_images[i], caption="GT vs Pred"),
+#                     "gt_mask": wandb.Image(all_gt_masks[i]),
+#                     "pred_mask": wandb.Image(all_pred_masks[i]),
+#                 })
+#     return _handler
+
+
 def manual_dice_handler(model, prepare_batch_fn):
     """
     Returns an Ignite handler that manually computes the Dice score
     for segmentation outputs at the end of each evaluation epoch.
+    Skips batches without masks (e.g., classification-only).
     """
     def _handler(engine):
         model.eval()
@@ -221,13 +300,23 @@ def manual_dice_handler(model, prepare_batch_fn):
         with torch.no_grad():
             for batch in engine.state.dataloader:
                 images, targets = prepare_batch_fn(batch, device)
-                class_logits, seg_out = model(images)
+                if "mask" not in targets:
+                    logging.warning("Skipping batch without 'mask' in targets (possible classification-only batch)")
+                    continue  # Skip if mask not present
+
+                # For multitask models
+                outputs = model(images)
+                # multitask: tuple, else just seg
+                seg_out = outputs[1] if isinstance(outputs, (tuple, list)) and len(outputs) > 1 else outputs
+                # if isinstance(model(images), (tuple, list)) and len(model(images)) > 1:
+                #     _, seg_out = model(images)
+                # else:
+                #     seg_out = model(images)
 
                 # Apply sigmoid → binary thresholding
                 pred_mask = (torch.sigmoid(seg_out) > 0.5).float()
                 if pred_mask.ndim == 3:
                     pred_mask = pred_mask.unsqueeze(1)
-
                 gt_mask = targets["mask"]
                 if gt_mask.ndim == 3:
                     gt_mask = gt_mask.unsqueeze(1)
@@ -235,9 +324,12 @@ def manual_dice_handler(model, prepare_batch_fn):
                 all_preds.append(pred_mask.cpu())
                 all_targets.append(gt_mask.cpu())
 
+        if not all_preds or not all_targets:
+            logging.warning("No masks found for manual dice calculation.")
+            return
+
         all_preds = torch.cat(all_preds, dim=0)
         all_targets = torch.cat(all_targets, dim=0)
-
         # Compute Dice coefficient
         intersection = (all_preds * all_targets).sum(dim=(1, 2, 3))
         union = all_preds.sum(dim=(1, 2, 3)) + all_targets.sum(dim=(1, 2, 3))
@@ -245,10 +337,56 @@ def manual_dice_handler(model, prepare_batch_fn):
         mean_dice = dice_scores.mean()
 
         print(f"[Manual Dice] Mean Dice over validation set: {mean_dice:.4f}")
-
         engine.state.metrics["val_dice_manual"] = mean_dice
         if wandb.run is not None:
             # Do **not** pass step=engine.state.epoch here, let wandb auto-increment step
             wandb.log({"val_dice_manual": mean_dice})
-
     return _handler
+
+
+# def manual_dice_handler(model, prepare_batch_fn):
+#     """
+#     Returns an Ignite handler that manually computes the Dice score
+#     for segmentation outputs at the end of each evaluation epoch.
+#     """
+#     def _handler(engine):
+#         model.eval()
+#         device = next(model.parameters()).device
+
+#         all_preds = []
+#         all_targets = []
+
+#         with torch.no_grad():
+#             for batch in engine.state.dataloader:
+#                 images, targets = prepare_batch_fn(batch, device)
+#                 class_logits, seg_out = model(images)
+
+#                 # Apply sigmoid → binary thresholding
+#                 pred_mask = (torch.sigmoid(seg_out) > 0.5).float()
+#                 if pred_mask.ndim == 3:
+#                     pred_mask = pred_mask.unsqueeze(1)
+
+#                 gt_mask = targets["mask"]
+#                 if gt_mask.ndim == 3:
+#                     gt_mask = gt_mask.unsqueeze(1)
+
+#                 all_preds.append(pred_mask.cpu())
+#                 all_targets.append(gt_mask.cpu())
+
+#         all_preds = torch.cat(all_preds, dim=0)
+#         all_targets = torch.cat(all_targets, dim=0)
+
+#         # Compute Dice coefficient
+#         intersection = (all_preds * all_targets).sum(dim=(1, 2, 3))
+#         union = all_preds.sum(dim=(1, 2, 3)) + all_targets.sum(dim=(1, 2, 3))
+#         dice_scores = (2. * intersection / (union + 1e-8)).numpy()
+#         mean_dice = dice_scores.mean()
+
+#         print(f"[Manual Dice] Mean Dice over validation set: {mean_dice:.4f}")
+
+#         engine.state.metrics["val_dice_manual"] = mean_dice
+#         if wandb.run is not None:
+#             # Do **not** pass step=engine.state.epoch here, let wandb auto-increment step
+#             wandb.log({"val_dice_manual": mean_dice})
+
+#     return _handler

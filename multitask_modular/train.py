@@ -16,10 +16,22 @@ from handlers import register_handlers, wandb_log_handler, image_log_handler, ma
 # Batch preparation function for engines
 def prepare_batch(batch, device=None, non_blocking=False):
     """Move batch data to device and prepare inputs/targets for the model."""
-    images = batch['image'].to(device, non_blocking=non_blocking)
-    masks = batch['mask'].to(device, non_blocking=non_blocking)
-    labels = batch['label'].long().to(device, non_blocking=non_blocking)
-    return images, {'label': labels, 'mask': masks}
+    images = batch["image"].to(device, non_blocking=non_blocking)
+    if "mask" in batch and "label" in batch:
+        # Multitask
+        masks = batch["mask"].to(device, non_blocking=non_blocking)
+        labels = batch["label"].to(device, non_blocking=non_blocking).long()
+        return images, {"mask": masks, "label": labels}
+    elif "mask" in batch:
+        # Segmentation only
+        masks = batch["mask"].to(device, non_blocking=non_blocking)
+        return images, {"mask": masks}
+    elif "label" in batch:
+        # Classification only
+        labels = batch["label"].to(device, non_blocking=non_blocking).long()
+        return images, {"label": labels}
+    else:
+        raise ValueError(f"Batch does not contain 'mask' or 'label': keys={batch.keys()}")
 
 
 # Main training function using MONAI engines
@@ -67,7 +79,9 @@ def main(config=None):
         attach_metrics(
             evaluator,
             config,
-            seg_output_transform_for_metrics=seg_output_transform_for_confmat)
+            seg_output_transform_for_metrics=seg_output_transform_for_confmat,
+            val_loader=val_loader
+        )
         # seg_output_transform=seg_output_transform
 
         register_handlers(
