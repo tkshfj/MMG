@@ -8,6 +8,7 @@
   - Refine hyperparameter ranges based on top-performing runs
 - Adjust the sweep hyperparameters
 - Relauch refactored MONAI/Ignite multitask pipeline (* runs from amber-sweep-1, July 24-)
+- Debug and Refactor MONAI/Ignite Multitask Pipeline
 
 # 2025-07-23
 - Create minimal requirements.txt
