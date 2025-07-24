@@ -20,15 +20,15 @@ parameters:
     # min: 0.8
     # max: 1.2
   dropout:
+    distribution: uniform
     min: 0.18
     max: 0.21
-    # distribution: uniform
     # min: 0.15
     # max: 0.25
   l2_reg:
     distribution: uniform
-    min: 6e-5
-    max: 1.2e-4
+    min: 0.00006
+    max: 0.00012
     # min: 0.00001
     # max: 0.00015
   input_shape:
@@ -37,13 +37,17 @@ parameters:
     value: multitask
   # Optionally sweep over loss weights
   alpha:
+    distribution: uniform
     min: 1.8
     max: 2.0
     # values: [0.5, 1.0, 2.0]
   beta:
+    distribution: uniform
     min: 0.5
     max: 1.0
     # values: [0.5, 1.0, 2.0]
+
+config:
   early_stop:
     patience: 10
     min_delta: 0.001
