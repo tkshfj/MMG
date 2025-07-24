@@ -1,12 +1,12 @@
 program: train.py
 method: bayes
 metric:
-  name: val_dice
+  name: val_auc
   goal: maximize
 parameters:
   batch_size:
-    values: [16, 32]
-    # values: [16, 32, 64, 128]
+    # values: [16, 32]
+    values: [16, 32, 64]
   epochs:
     value: 40
   # metadata_csv:
@@ -15,14 +15,14 @@ parameters:
     value: 0.0002
   lr_multiplier:
     distribution: uniform
-    min: 0.9
-    max: 1.2
+    min: 0.95
+    max: 1.10
     # min: 0.8
     # max: 1.2
   dropout:
     distribution: uniform
-    min: 0.18
-    max: 0.21
+    min: 0.17
+    max: 0.20
     # min: 0.15
     # max: 0.25
   l2_reg:
@@ -30,26 +30,25 @@ parameters:
     min: 0.00006
     max: 0.00012
     # min: 0.00001
-    # max: 0.00015
+    # max: 0.00010
   input_shape:
     value: [256, 256]
-  task:
-    value: multitask
-  # Optionally sweep over loss weights
   alpha:
     distribution: uniform
-    min: 1.8
+    min: 1.6
     max: 2.0
     # values: [0.5, 1.0, 2.0]
   beta:
     distribution: uniform
-    min: 0.5
-    max: 1.0
+    min: 0.8
+    max: 1.4
     # values: [0.5, 1.0, 2.0]
+  task:
+    value: multitask
 
-config:
-  early_stop:
-    patience: 10
-    min_delta: 0.001
-    metric: val_auc
-    mode: max
+# config:
+#   early_stop:
+#     patience: 10
+#     min_delta: 0.001
+#     metric: val_auc
+#     mode: max

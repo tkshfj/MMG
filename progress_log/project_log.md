@@ -6,8 +6,8 @@
 - Analyze Sweep Results
   - Analyze the top 5 runs from the latest sweep
   - Refine hyperparameter ranges based on top-performing runs
-- Update the sweep hyperparameters
-- Lauch refactored MONAI/Ignite multitask pipeline (* runs, July 24-)
+- Adjust the sweep hyperparameters
+- Relauch refactored MONAI/Ignite multitask pipeline (* runs from amber-sweep-1, July 24-)
 
 # 2025-07-23
 - Create minimal requirements.txt
