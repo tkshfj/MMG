@@ -2,6 +2,12 @@
 
 # 2025-07-24
 - Refactor to Set Early Stopping Conditions in MONAI/Ignite Pipeline
+- Report: Confusion Matrix Example and Interpretation
+- Analyze Sweep Results
+  - Analyze the top 5 runs from the latest sweep
+  - Refine hyperparameter ranges based on top-performing runs
+- Update the sweep hyperparameters
+- Lauch refactored MONAI/Ignite multitask pipeline (* runs, July 24-)
 
 # 2025-07-23
 - Create minimal requirements.txt
@@ -11,7 +17,7 @@
 - Code review: MONAI/Ignite multitask pipeline
 - Refactor: add logging for data loading errors, use dynamic metric keys in handlers
 - Save multitask modular pipeline as of 2025-07-21
-- Lauch refactored MONAI/Ignite multitask pipeline (* runs, July 24-)
+- Lauch refactored MONAI/Ignite multitask pipeline (7 runs, July 24)
 
 # 2025-07-22
 - Refactor U-Net multitask modular pipeline with MONAI/Ignite integration
