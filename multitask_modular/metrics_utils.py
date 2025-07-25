@@ -82,8 +82,7 @@ def seg_output_transform(output):
 
 def seg_output_transform_for_confmat(output):
     """
-    Returns predicted *class* labels and ground truth mask for ConfusionMatrix.
-    Both must be long tensors, shape [B, H, W].
+    Returns raw logits/probabilities and ground truth mask for ConfusionMatrix.
     """
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
         preds, masks = [], []
@@ -91,22 +90,53 @@ def seg_output_transform_for_confmat(output):
             seg_logits = s['pred'][1] if isinstance(s.get('pred'), (tuple, list)) and len(s['pred']) > 1 else None
             mask = s.get('label', {}).get('mask', None)
             if seg_logits is not None and mask is not None:
-                # --- THIS IS THE CRUCIAL FIX: produce int class maps, not prob maps! ---
+                # For binary, expand to 2 channels if needed
                 if seg_logits.shape[0] == 1:
-                    pred_labels = (torch.sigmoid(seg_logits) > 0.5).long().squeeze(0)
+                    prob = torch.cat([1 - torch.sigmoid(seg_logits), torch.sigmoid(seg_logits)], dim=0)
                 else:
-                    pred_labels = torch.argmax(seg_logits, dim=0).long()
-                preds.append(pred_labels.unsqueeze(0))  # [1, H, W]
+                    prob = torch.softmax(seg_logits, dim=0)
+                preds.append(prob.unsqueeze(0))  # [1, 2, H, W]
                 if mask.ndim == 3 and mask.shape[0] == 1:
                     mask = mask.squeeze(0)
                 masks.append(mask.long().unsqueeze(0))
         if not preds or not masks:
             logging.error(f"[seg_output_transform_for_confmat] No masks found in batch! Output: {output}")
             raise ValueError("No masks found in batch for segmentation metric.")
-        pred_tensor = torch.cat(preds, dim=0)   # [B, H, W], long
+        pred_tensor = torch.cat(preds, dim=0)   # [B, 2, H, W]
         mask_tensor = torch.cat(masks, dim=0)   # [B, H, W], long
         return pred_tensor, mask_tensor
     raise ValueError("seg_output_transform_for_confmat expects a list of dicts")
+
+
+# def seg_output_transform_for_confmat(output):
+#     """
+#     Returns predicted *class* labels and ground truth mask for ConfusionMatrix.
+#     Both must be long tensors, shape [B, H, W].
+#     """
+#     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
+#         preds, masks = [], []
+#         for s in output:
+#             seg_logits = s['pred'][1] if isinstance(s.get('pred'), (tuple, list)) and len(s['pred']) > 1 else None
+#             mask = s.get('label', {}).get('mask', None)
+#             if seg_logits is not None and mask is not None:
+#                 # If seg_logits shape [C, H, W]
+#                 if seg_logits.shape[0] == 1:
+#                     # Binary: shape [1, H, W]
+#                     pred_labels = (torch.sigmoid(seg_logits) > 0.5).long().squeeze(0)  # [H, W]
+#                 else:
+#                     # Multiclass: shape [C, H, W]
+#                     pred_labels = torch.argmax(seg_logits, dim=0).long()  # [H, W]
+#                 preds.append(pred_labels.unsqueeze(0))  # [1, H, W]
+#                 if mask.ndim == 3 and mask.shape[0] == 1:
+#                     mask = mask.squeeze(0)
+#                 masks.append(mask.long().unsqueeze(0))  # [1, H, W]
+#         if not preds or not masks:
+#             logging.error(f"[seg_output_transform_for_confmat] No masks found in batch! Output: {output}")
+#             raise ValueError("No masks found in batch for segmentation metric.")
+#         pred_tensor = torch.cat(preds, dim=0)   # [B, H, W], long
+#         mask_tensor = torch.cat(masks, dim=0)   # [B, H, W], long
+#         return pred_tensor, mask_tensor
+#     raise ValueError("seg_output_transform_for_confmat expects a list of dicts")
 
 
 # Key Presence Utility
@@ -128,6 +158,15 @@ def _validate_key_in_dataset(loader, key, num_batches=3):
     except Exception as e:
         logging.warning(f"Could not inspect loader for key '{key}': {e}")
     return False
+
+
+def debug_output_transform(orig_transform):
+    def wrapped(output):
+        y_pred, y = orig_transform(output)
+        print("DEBUG:", "y_pred.shape", y_pred.shape, "y_pred.dtype", y_pred.dtype)
+        print("DEBUG:", "y.shape", y.shape, "y.dtype", y.dtype)
+        return y_pred, y
+    return wrapped
 
 
 # Attach Metrics
@@ -165,6 +204,8 @@ def attach_metrics(
     # Attach segmentation metrics
     if task in ("segmentation", "multitask") and seg_output_transform_for_metrics is not None and has_mask:
         cm = ConfusionMatrix(num_classes=num_classes, output_transform=seg_output_transform_for_metrics)
+        # debug_transform = debug_output_transform(seg_output_transform_for_metrics)
+        # cm = ConfusionMatrix(num_classes=num_classes, output_transform=debug_transform)
         DiceCoefficient(cm).attach(evaluator, "val_dice")
         JaccardIndex(cm).attach(evaluator, "val_iou")
         logging.info("Attached segmentation metrics: val_dice, val_iou")

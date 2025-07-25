@@ -56,7 +56,7 @@ def register_handlers(
         keys = []
         # Classification metrics
         if config.get("task") in ("classification", "multitask"):
-            keys += ["val_acc", "val_auc", "val_loss"]
+            keys += ["val_acc", "val_auc", "val_loss", "val_cls_confmat"]
         # Segmentation metrics
         if config.get("task") in ("segmentation", "multitask") and add_segmentation_metrics:
             keys += [dice_name, iou_name]
@@ -68,10 +68,17 @@ def register_handlers(
     # if add_segmentation_metrics:
     #     val_metrics += [dice_name, iou_name]
 
+    # def safe_from_engine(keys, first=False):
+    #     def _fn(data):
+    #         return {k: data[0][k] for k in keys if k in data[0]} if first else [
+    #             {k: i[k] for k in keys if k in i} for i in data
+    #         ]
+    #     return _fn
+
     StatsHandler(
         tag_name="val",
         output_transform=from_engine(val_metrics, first=False),
-        iteration_log=True  # False
+        iteration_log=False
     ).attach(evaluator)
 
     # Run validation after each training epoch
@@ -146,6 +153,9 @@ def wandb_log_handler(engine):
             if isinstance(v, torch.Tensor):
                 v = v.cpu().detach()
                 if v.ndim == 2 and v.dtype in (torch.int32, torch.int64):  # Confusion matrix
+                    for i in range(v.shape[0]):
+                        for j in range(v.shape[1]):
+                            log_data[f"{k}_{i}{j}"] = int(v[i, j])
                     log_data[k] = v.tolist()
                 elif v.numel() > 1:
                     log_data[k] = float(v.mean().item()) if v.dtype.is_floating_point else v.tolist()
