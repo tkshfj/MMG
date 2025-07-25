@@ -9,7 +9,7 @@ from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_utils import build_model, get_optimizer
 from engine_utils import build_trainer, build_evaluator
-from metrics_utils import seg_output_transform, auc_output_transform, multitask_loss, attach_metrics, seg_output_transform_for_confmat
+from metrics_utils import seg_output_transform, seg_output_transform_for_confmat, cls_output_transform, auc_output_transform, multitask_loss, attach_metrics
 from handlers import register_handlers, wandb_log_handler, image_log_handler, manual_dice_handler
 
 
@@ -80,6 +80,8 @@ def main(config=None):
             evaluator,
             config,
             seg_output_transform_for_metrics=seg_output_transform_for_confmat,
+            cls_output_transform=cls_output_transform,
+            auc_output_transform=auc_output_transform,
             val_loader=val_loader
         )
         # seg_output_transform=seg_output_transform

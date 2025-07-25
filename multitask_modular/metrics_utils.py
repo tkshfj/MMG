@@ -81,9 +81,7 @@ def seg_output_transform(output):
 
 
 def seg_output_transform_for_confmat(output):
-    """
-    Returns raw logits/probabilities and ground truth mask for ConfusionMatrix.
-    """
+    """ Returns raw logits/probabilities and ground truth mask for ConfusionMatrix. """
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
         preds, masks = [], []
         for s in output:
