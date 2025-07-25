@@ -5,16 +5,16 @@ from ignite.metrics import Accuracy, Loss, ConfusionMatrix, ROC_AUC, DiceCoeffic
 from eval_utils import get_classification_metrics, get_segmentation_metrics
 
 
-# Output Transforms
+# Output Transforms for Accuracy, ConfusionMatrix
 def cls_output_transform(output):
     """
     Extract classification logits and labels (both as tensors).
     Returns: (logits, labels) for metrics; labels must be torch.long
     """
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
-        logits = torch.stack([s['pred'][0] for s in output])
+        logits = torch.stack([x['pred'][0] for x in output])  # [B, num_classes]
         labels = torch.tensor(
-            [s['label'].get('label') for s in output if 'label' in s['label']],
+            [x['label'].get('label') for x in output if 'label' in x['label']],
             dtype=torch.long, device=logits.device
         )
         if labels.shape[0] == 0:
@@ -23,6 +23,7 @@ def cls_output_transform(output):
     raise ValueError("cls_output_transform expects a list of dicts with 'pred' and 'label' keys.")
 
 
+# for ROC AUC
 def auc_output_transform(output):
     """
     Extract probabilities and labels for AUROC computation.
@@ -30,27 +31,39 @@ def auc_output_transform(output):
     Skips samples without label.
     """
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
-        device = torch.as_tensor(output[0]['pred'][0]).device
-        probs, labels = [], []
-        for s in output:
-            label_dict = s.get('label', {})
-            if 'label' not in label_dict:
-                continue
-            logits = torch.as_tensor(s['pred'][0]).to(device)
-            # [batch, num_classes] or [num_classes]
-            if logits.ndim == 1:
-                prob = torch.softmax(logits, dim=0)[1]
-            elif logits.ndim == 2:
-                prob = torch.softmax(logits, dim=1)[0, 1]
-            else:
-                raise ValueError(f"auc_output_transform: Invalid logits shape: {logits.shape}")
-            probs.append(prob.unsqueeze(0))
-            labels.append(torch.tensor([label_dict["label"]], dtype=torch.long, device=device))
-        if not labels:
-            logging.error(f"[auc_output_transform] No labels found in batch! Output: {output}")
+        y_pred = torch.stack([x["pred"][0] for x in output])
+        y_true = torch.tensor(
+            [x["label"]["label"] for x in output if "label" in x["label"]],
+            dtype=torch.long,
+            device=y_pred.device
+        )
+        if y_true.numel() == 0:
             raise ValueError("auc_output_transform found no labels in batch for AUROC metric.")
-        return torch.cat(probs, dim=0), torch.cat(labels, dim=0)
-    raise ValueError("auc_output_transform expects a list of dicts")
+        return y_pred, y_true
+    raise ValueError("auc_output_transform expects a list of dicts with 'pred' and nested 'label'")
+
+    # if isinstance(output, list) and all(isinstance(x, dict) for x in output):
+    #     device = torch.as_tensor(output[0]['pred'][0]).device
+    #     probs, labels = [], []
+    #     for s in output:
+    #         label_dict = s.get('label', {})
+    #         if 'label' not in label_dict:
+    #             continue
+    #         logits = torch.as_tensor(s['pred'][0]).to(device)
+    #         # [batch, num_classes] or [num_classes]
+    #         if logits.ndim == 1:
+    #             prob = torch.softmax(logits, dim=0)[1]
+    #         elif logits.ndim == 2:
+    #             prob = torch.softmax(logits, dim=1)[0, 1]
+    #         else:
+    #             raise ValueError(f"auc_output_transform: Invalid logits shape: {logits.shape}")
+    #         probs.append(prob.unsqueeze(0))
+    #         labels.append(torch.tensor([label_dict["label"]], dtype=torch.long, device=device))
+    #     if not labels:
+    #         logging.error(f"[auc_output_transform] No labels found in batch! Output: {output}")
+    #         raise ValueError("auc_output_transform found no labels in batch for AUROC metric.")
+    #     return torch.cat(probs, dim=0), torch.cat(labels, dim=0)
+    # raise ValueError("auc_output_transform expects a list of dicts")
 
 
 def seg_output_transform(output):
@@ -59,25 +72,34 @@ def seg_output_transform(output):
     Returns: (pred_labels, true_masks) -- both long tensors, shape [B, H, W]
     """
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
-        preds, masks = [], []
-        for s in output:
-            seg_logits = s['pred'][1]
-            # Binary vs multiclass
-            if seg_logits.shape[0] == 1:
-                # Binary, output is [1, H, W]; sigmoid, threshold at 0.5
-                pred_labels = (torch.sigmoid(seg_logits) > 0.5).long().squeeze(0)
-            else:
-                # Multiclass: [C, H, W]; argmax over C
-                pred_labels = torch.argmax(seg_logits, dim=0).long()
-            preds.append(pred_labels.unsqueeze(0))  # [1, H, W]
-            mask = s['label']['mask']
-            if mask.ndim == 3 and mask.shape[0] == 1:
-                mask = mask.squeeze(0)
-            masks.append(mask.long().unsqueeze(0))
-        pred_tensor = torch.cat(preds, dim=0)   # [B, H, W]
-        true_tensor = torch.cat(masks, dim=0)   # [B, H, W]
-        return pred_tensor, true_tensor
-    raise ValueError("seg_output_transform expects a list of dicts")
+        y_pred = torch.stack([x["pred"][1] for x in output])  # segmentation output
+        y_true = torch.stack([
+            x["label"]["mask"] for x in output if "mask" in x["label"]
+        ])
+        return y_pred, y_true
+    raise ValueError("seg_output_transform expects a list of dicts with 'pred' and nested 'label'")
+
+
+# if isinstance(output, list) and all(isinstance(x, dict) for x in output):
+#     preds, masks = [], []
+#     for s in output:
+#         seg_logits = s['pred'][1]
+#         # Binary vs multiclass
+#         if seg_logits.shape[0] == 1:
+#             # Binary, output is [1, H, W]; sigmoid, threshold at 0.5
+#             pred_labels = (torch.sigmoid(seg_logits) > 0.5).long().squeeze(0)
+#         else:
+#             # Multiclass: [C, H, W]; argmax over C
+#             pred_labels = torch.argmax(seg_logits, dim=0).long()
+#         preds.append(pred_labels.unsqueeze(0))  # [1, H, W]
+#         mask = s['label']['mask']
+#         if mask.ndim == 3 and mask.shape[0] == 1:
+#             mask = mask.squeeze(0)
+#         masks.append(mask.long().unsqueeze(0))
+#     pred_tensor = torch.cat(preds, dim=0)   # [B, H, W]
+#     true_tensor = torch.cat(masks, dim=0)   # [B, H, W]
+#     return pred_tensor, true_tensor
+# raise ValueError("seg_output_transform expects a list of dicts")
 
 
 def seg_output_transform_for_confmat(output):

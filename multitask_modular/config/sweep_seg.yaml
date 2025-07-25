@@ -14,7 +14,7 @@ parameters:
   base_learning_rate:
     value: 0.0002
   num_workers:
-    value: 12
+    value: 4
   lr_multiplier:
     distribution: uniform
     min: 0.95

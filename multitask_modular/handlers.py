@@ -1,10 +1,10 @@
 # handlers.py
+import logging
 import torch
 import wandb
 from monai.handlers import CheckpointSaver, EarlyStopHandler, StatsHandler, from_engine
 from ignite.handlers import ModelCheckpoint
 from ignite.engine import Events
-import logging
 
 
 # Attach Dice and Jaccard metrics via ConfusionMatrix if requested
@@ -300,58 +300,99 @@ def manual_dice_handler(model, prepare_batch_fn):
     for segmentation outputs at the end of each evaluation epoch.
     Skips batches without masks (e.g., classification-only).
     """
-    def _handler(engine):
-        model.eval()
-        device = next(model.parameters()).device
+    """
+    Logs manual Dice score at the end of validation epoch.
+    Works only for batches that include 'mask' in batch["label"].
+    """
+    logger = logging.getLogger(__name__)
 
-        all_preds = []
-        all_targets = []
+    def handler(engine):
+        val_loader = engine.state.dataloader
+        device = engine.state.device
+        model.eval()
+
+        dice_scores = []
 
         with torch.no_grad():
-            for batch in engine.state.dataloader:
-                images, targets = prepare_batch_fn(batch, device)
-                if "mask" not in targets:
-                    logging.warning("Skipping batch without 'mask' in targets (possible classification-only batch)")
-                    continue  # Skip if mask not present
+            for batch in val_loader:
+                inputs, targets = prepare_batch_fn(batch, device=device, non_blocking=False)
 
-                # For multitask models
-                outputs = model(images)
-                # multitask: tuple, else just seg
-                seg_out = outputs[1] if isinstance(outputs, (tuple, list)) and len(outputs) > 1 else outputs
-                # if isinstance(model(images), (tuple, list)) and len(model(images)) > 1:
-                #     _, seg_out = model(images)
-                # else:
-                #     seg_out = model(images)
+                if not isinstance(batch.get("label", {}), dict) or "mask" not in batch["label"]:
+                    logger.warning("Skipping batch without 'mask' in nested label dict (classification-only batch).")
+                    continue
 
-                # Apply sigmoid → binary thresholding
-                pred_mask = (torch.sigmoid(seg_out) > 0.5).float()
-                if pred_mask.ndim == 3:
-                    pred_mask = pred_mask.unsqueeze(1)
-                gt_mask = targets["mask"]
-                if gt_mask.ndim == 3:
-                    gt_mask = gt_mask.unsqueeze(1)
+                outputs = model(inputs)
+                _, seg_output = outputs
 
-                all_preds.append(pred_mask.cpu())
-                all_targets.append(gt_mask.cpu())
+                pred_mask = (torch.sigmoid(seg_output) > 0.5).float()
+                true_mask = targets["mask"]
 
-        if not all_preds or not all_targets:
-            logging.warning("No masks found for manual dice calculation.")
-            return
+                intersection = (pred_mask * true_mask).sum(dim=(1, 2, 3))
+                union = pred_mask.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3))
+                dice = (2.0 * intersection + 1e-7) / (union + 1e-7)
+                dice_scores.extend(dice.cpu().tolist())
 
-        all_preds = torch.cat(all_preds, dim=0)
-        all_targets = torch.cat(all_targets, dim=0)
-        # Compute Dice coefficient
-        intersection = (all_preds * all_targets).sum(dim=(1, 2, 3))
-        union = all_preds.sum(dim=(1, 2, 3)) + all_targets.sum(dim=(1, 2, 3))
-        dice_scores = (2. * intersection / (union + 1e-8)).numpy()
-        mean_dice = dice_scores.mean()
+        if dice_scores:
+            avg_dice = sum(dice_scores) / len(dice_scores)
+            wandb.log({"manual_dice": avg_dice})
+        else:
+            logger.warning("No masks found for manual dice calculation.")
 
-        print(f"[Manual Dice] Mean Dice over validation set: {mean_dice:.4f}")
-        engine.state.metrics["val_dice_manual"] = mean_dice
-        if wandb.run is not None:
-            # Do **not** pass step=engine.state.epoch here, let wandb auto-increment step
-            wandb.log({"val_dice_manual": mean_dice})
-    return _handler
+    return handler
+
+
+# def _handler(engine):
+#     model.eval()
+#     device = next(model.parameters()).device
+
+#     all_preds = []
+#     all_targets = []
+
+#     with torch.no_grad():
+#         for batch in engine.state.dataloader:
+#             images, targets = prepare_batch_fn(batch, device)
+#             if "mask" not in targets:
+#                 logging.warning("Skipping batch without 'mask' in targets (possible classification-only batch)")
+#                 continue  # Skip if mask not present
+
+#             # For multitask models
+#             outputs = model(images)
+#             # multitask: tuple, else just seg
+#             seg_out = outputs[1] if isinstance(outputs, (tuple, list)) and len(outputs) > 1 else outputs
+#             # if isinstance(model(images), (tuple, list)) and len(model(images)) > 1:
+#             #     _, seg_out = model(images)
+#             # else:
+#             #     seg_out = model(images)
+
+#             # Apply sigmoid → binary thresholding
+#             pred_mask = (torch.sigmoid(seg_out) > 0.5).float()
+#             if pred_mask.ndim == 3:
+#                 pred_mask = pred_mask.unsqueeze(1)
+#             gt_mask = targets["mask"]
+#             if gt_mask.ndim == 3:
+#                 gt_mask = gt_mask.unsqueeze(1)
+
+#             all_preds.append(pred_mask.cpu())
+#             all_targets.append(gt_mask.cpu())
+
+#     if not all_preds or not all_targets:
+#         logging.warning("No masks found for manual dice calculation.")
+#         return
+
+#     all_preds = torch.cat(all_preds, dim=0)
+#     all_targets = torch.cat(all_targets, dim=0)
+#     # Compute Dice coefficient
+#     intersection = (all_preds * all_targets).sum(dim=(1, 2, 3))
+#     union = all_preds.sum(dim=(1, 2, 3)) + all_targets.sum(dim=(1, 2, 3))
+#     dice_scores = (2. * intersection / (union + 1e-8)).numpy()
+#     mean_dice = dice_scores.mean()
+
+#     print(f"[Manual Dice] Mean Dice over validation set: {mean_dice:.4f}")
+#     engine.state.metrics["val_dice_manual"] = mean_dice
+#     if wandb.run is not None:
+#         # Do **not** pass step=engine.state.epoch here, let wandb auto-increment step
+#         wandb.log({"val_dice_manual": mean_dice})
+# return _handler
 
 
 # def manual_dice_handler(model, prepare_batch_fn):

@@ -9,29 +9,9 @@ from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_utils import build_model, get_optimizer
 from engine_utils import build_trainer, build_evaluator
+from eval_utils import prepare_batch  # compute_segmentation_metrics, get_segmentation_metrics, get_classification_metrics
 from metrics_utils import seg_output_transform, seg_output_transform_for_confmat, cls_output_transform, auc_output_transform, multitask_loss, attach_metrics
 from handlers import register_handlers, wandb_log_handler, image_log_handler, manual_dice_handler
-
-
-# Batch preparation function for engines
-def prepare_batch(batch, device=None, non_blocking=False):
-    """Move batch data to device and prepare inputs/targets for the model."""
-    images = batch["image"].to(device, non_blocking=non_blocking)
-    if "mask" in batch and "label" in batch:
-        # Multitask
-        masks = batch["mask"].to(device, non_blocking=non_blocking)
-        labels = batch["label"].to(device, non_blocking=non_blocking).long()
-        return images, {"mask": masks, "label": labels}
-    elif "mask" in batch:
-        # Segmentation only
-        masks = batch["mask"].to(device, non_blocking=non_blocking)
-        return images, {"mask": masks}
-    elif "label" in batch:
-        # Classification only
-        labels = batch["label"].to(device, non_blocking=non_blocking).long()
-        return images, {"label": labels}
-    else:
-        raise ValueError(f"Batch does not contain 'mask' or 'label': keys={batch.keys()}")
 
 
 # Main training function using MONAI engines

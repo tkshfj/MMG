@@ -54,39 +54,72 @@ class MammoSegmentationDataset(Dataset):
     def __getitem__(self, idx):
         row = self.df.iloc[idx]
         img = self.load_dicom(row['image_path'])
-        # OpenCV expects (width, height)
         img = cv2.resize(img, (self.input_shape[1], self.input_shape[0]))
-        img = np.expand_dims(img, axis=0)  # [C, H, W] for MONAI
+        img = np.expand_dims(img, axis=0)  # [C, H, W]
 
-        if self.task == 'segmentation':
+        label_dict = {}
+
+        if self.task in ['segmentation', 'multitask']:
             mask_paths = literal_eval(row['mask_paths']) if isinstance(row['mask_paths'], str) else row['mask_paths']
             mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
             mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
             mask = np.expand_dims(mask, axis=0)
-            sample = {"image": img, "mask": mask}
-        elif self.task == 'multitask':
-            mask_paths = literal_eval(row['mask_paths']) if isinstance(row['mask_paths'], str) else row['mask_paths']
-            mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
-            mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
-            mask = np.expand_dims(mask, axis=0)
-            label = int(row['label'])
-            sample = {"image": img, "mask": mask, "label": label}
-        else:  # classification
-            label = int(row['label'])
-            sample = {"image": img, "label": label}
+            label_dict["mask"] = mask
+
+        if self.task in ['classification', 'multitask']:
+            label_dict["label"] = int(row['label'])
+
+        sample = {
+            "image": img,
+            "label": label_dict if label_dict else None
+        }
 
         if self.transform:
             sample = self.transform(sample)
-            # After transform, label may be converted to float tensor by ToTensord,
-            # so force it back to long if present:
-            if "label" in sample:
-                # Handles both numpy and torch tensor
-                if hasattr(sample["label"], "dtype") and hasattr(sample["label"], "long"):
-                    sample["label"] = sample["label"].long()
+            if isinstance(sample.get("label"), dict) and "label" in sample["label"]:
+                if hasattr(sample["label"]["label"], "long"):
+                    sample["label"]["label"] = sample["label"]["label"].long()
                 else:
-                    sample["label"] = int(sample["label"])
+                    sample["label"]["label"] = int(sample["label"]["label"])
 
         return sample
+
+    # def __getitem__(self, idx):
+    #     row = self.df.iloc[idx]
+    #     img = self.load_dicom(row['image_path'])
+    #     # OpenCV expects (width, height)
+    #     img = cv2.resize(img, (self.input_shape[1], self.input_shape[0]))
+    #     img = np.expand_dims(img, axis=0)  # [C, H, W] for MONAI
+
+    #     if self.task == 'segmentation':
+    #         mask_paths = literal_eval(row['mask_paths']) if isinstance(row['mask_paths'], str) else row['mask_paths']
+    #         mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
+    #         mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
+    #         mask = np.expand_dims(mask, axis=0)
+    #         sample = {"image": img, "mask": mask}
+    #     elif self.task == 'multitask':
+    #         mask_paths = literal_eval(row['mask_paths']) if isinstance(row['mask_paths'], str) else row['mask_paths']
+    #         mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
+    #         mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
+    #         mask = np.expand_dims(mask, axis=0)
+    #         label = int(row['label'])
+    #         sample = {"image": img, "mask": mask, "label": label}
+    #     else:  # classification
+    #         label = int(row['label'])
+    #         sample = {"image": img, "label": label}
+
+    #     if self.transform:
+    #         sample = self.transform(sample)
+    #         # After transform, label may be converted to float tensor by ToTensord,
+    #         # so force it back to long if present:
+    #         if "label" in sample:
+    #             # Handles both numpy and torch tensor
+    #             if hasattr(sample["label"], "dtype") and hasattr(sample["label"], "long"):
+    #                 sample["label"] = sample["label"].long()
+    #             else:
+    #                 sample["label"] = int(sample["label"])
+
+    #     return sample
 
 
 def to_long(x):
