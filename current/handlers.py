@@ -2,10 +2,9 @@
 import logging
 import torch
 import wandb
-from monai.handlers import CheckpointSaver, EarlyStopHandler, StatsHandler, from_engine
-from ignite.handlers import ModelCheckpoint
+from monai.handlers import EarlyStopHandler, StatsHandler, from_engine  # CheckpointSaver
 from ignite.engine import Events
-from ignite.handlers import DiskSaver
+from ignite.handlers import ModelCheckpoint, DiskSaver
 
 
 class SafeDiskSaver(DiskSaver):
@@ -122,15 +121,25 @@ def register_handlers(
     import os
     os.makedirs('outputs/checkpoints', exist_ok=True)
     # Use this SafeDiskSaver in CheckpointSaver
-    checkpoint_handler = CheckpointSaver(
-        save_dir="outputs/checkpoints",
-        save_dict={"model": model},
-        save_key_metric=True,
-        save_interval=1,
+    # checkpoint_handler = CheckpointSaver(
+    #     save_dir="outputs/checkpoints",
+    #     save_dict={"model": model},
+    #     save_key_metric=True,
+    #     save_interval=1,
+    #     n_saved=3,
+    #     save_handler=SafeDiskSaver("outputs/checkpoints", create_dir=True, require_empty=False),
+    # )
+    # checkpoint_handler.attach(trainer)
+    checkpoint_handler = ModelCheckpoint(
+        dirname="outputs/checkpoints",
+        filename_prefix="model",
         n_saved=3,
+        save_interval=1,
+        create_dir=True,
+        require_empty=False,
         save_handler=SafeDiskSaver("outputs/checkpoints", create_dir=True, require_empty=False),
     )
-    checkpoint_handler.attach(trainer)
+    trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler, {"model": model})
 
     # Save best model by AUC
     os.makedirs('outputs/best_model', exist_ok=True)
