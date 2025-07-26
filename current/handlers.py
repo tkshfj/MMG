@@ -5,6 +5,15 @@ import wandb
 from monai.handlers import CheckpointSaver, EarlyStopHandler, StatsHandler, from_engine
 from ignite.handlers import ModelCheckpoint
 from ignite.engine import Events
+from ignite.handlers import DiskSaver
+
+
+class SafeDiskSaver(DiskSaver):
+    def remove(self, filename):
+        try:
+            super().remove(filename)
+        except FileNotFoundError:
+            print(f"WARNING: Checkpoint file not found for deletion: {filename}")
 
 
 # Attach Dice and Jaccard metrics via ConfusionMatrix if requested
@@ -112,13 +121,16 @@ def register_handlers(
     # Checkpoint handler (periodic)
     import os
     os.makedirs('outputs/checkpoints', exist_ok=True)
-    checkpoint_saver = CheckpointSaver(
+    # Use this SafeDiskSaver in CheckpointSaver
+    checkpoint_handler = CheckpointSaver(
         save_dir="outputs/checkpoints",
         save_dict={"model": model},
+        save_key_metric=True,
         save_interval=1,
-        n_saved=2,
+        n_saved=3,
+        save_handler=SafeDiskSaver("outputs/checkpoints", create_dir=True, require_empty=False),
     )
-    checkpoint_saver.attach(trainer)
+    checkpoint_handler.attach(trainer)
 
     # Save best model by AUC
     os.makedirs('outputs/best_model', exist_ok=True)
