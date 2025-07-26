@@ -5,7 +5,7 @@ metric:
   goal: maximize
 parameters:
   num_workers:
-    value: 12
+    value: 16
   batch_size:
     values: [16, 32, 64]
   epochs:
