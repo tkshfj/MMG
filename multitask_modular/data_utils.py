@@ -14,16 +14,16 @@ import pandas as pd
 import pydicom
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
-from monai.transforms import Compose, RandFlipd, RandRotate90d, ToTensord, ScaleIntensityd, Lambdad
+from monai.transforms import Compose, ScaleIntensityd, RandFlipd, RandRotate90d, ToTensord, Lambdad
 
 EPSILON = 1e-8  # Small value to avoid division by zero
 
 
 class MammoSegmentationDataset(Dataset):
-    """MONAI/PyTorch Dataset for mammogram segmentation or multitask learning."""
+    """ MONAI/PyTorch Dataset for multitask learning. """
     def __init__(self, df, input_shape=(256, 256), task='segmentation', transform=None):
         self.df = df
-        self.input_shape = input_shape  # (H, W)
+        self.input_shape = input_shape
         self.task = task
         self.transform = transform
 
@@ -34,7 +34,6 @@ class MammoSegmentationDataset(Dataset):
             img = (img - img.min()) / (img.max() - img.min() + EPSILON)
         except Exception as e:
             logger.warning(f"[DICOM ERROR] Failed to load {path}: {e}")
-            # print(f"[DICOM ERROR] {path}: {e}")
             img = np.zeros(self.input_shape, dtype=np.float32)
         return img
 
@@ -58,93 +57,95 @@ class MammoSegmentationDataset(Dataset):
         img = np.expand_dims(img, axis=0)  # [C, H, W]
 
         label_dict = {}
-
         if self.task in ['segmentation', 'multitask']:
             mask_paths = literal_eval(row['mask_paths']) if isinstance(row['mask_paths'], str) else row['mask_paths']
             mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
             mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
             mask = np.expand_dims(mask, axis=0)
             label_dict["mask"] = mask
-
         if self.task in ['classification', 'multitask']:
             label_dict["label"] = int(row['label'])
 
-        sample = {
-            "image": img,
-            "label": label_dict if label_dict else None
-        }
+        sample = {"image": img, "label": label_dict if label_dict else None}
 
         if self.transform:
             sample = self.transform(sample)
-            if isinstance(sample.get("label"), dict) and "label" in sample["label"]:
-                if hasattr(sample["label"]["label"], "long"):
-                    sample["label"]["label"] = sample["label"]["label"].long()
-                else:
-                    sample["label"]["label"] = int(sample["label"]["label"])
-
         return sample
 
-    # def __getitem__(self, idx):
-    #     row = self.df.iloc[idx]
-    #     img = self.load_dicom(row['image_path'])
-    #     # OpenCV expects (width, height)
-    #     img = cv2.resize(img, (self.input_shape[1], self.input_shape[0]))
-    #     img = np.expand_dims(img, axis=0)  # [C, H, W] for MONAI
 
-    #     if self.task == 'segmentation':
-    #         mask_paths = literal_eval(row['mask_paths']) if isinstance(row['mask_paths'], str) else row['mask_paths']
-    #         mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
-    #         mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
-    #         mask = np.expand_dims(mask, axis=0)
-    #         sample = {"image": img, "mask": mask}
-    #     elif self.task == 'multitask':
-    #         mask_paths = literal_eval(row['mask_paths']) if isinstance(row['mask_paths'], str) else row['mask_paths']
-    #         mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
-    #         mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
-    #         mask = np.expand_dims(mask, axis=0)
-    #         label = int(row['label'])
-    #         sample = {"image": img, "mask": mask, "label": label}
-    #     else:  # classification
-    #         label = int(row['label'])
-    #         sample = {"image": img, "label": label}
-
-    #     if self.transform:
-    #         sample = self.transform(sample)
-    #         # After transform, label may be converted to float tensor by ToTensord,
-    #         # so force it back to long if present:
-    #         if "label" in sample:
-    #             # Handles both numpy and torch tensor
-    #             if hasattr(sample["label"], "dtype") and hasattr(sample["label"], "long"):
-    #                 sample["label"] = sample["label"].long()
-    #             else:
-    #                 sample["label"] = int(sample["label"])
-
-    #     return sample
+# Custom Transform for Nested Labels
+def to_long_nested_label(label):
+    """ Convert only label['label'] to long/int if label is a dict with 'label' key. """
+    if isinstance(label, dict):
+        if "label" in label and not isinstance(label["label"], int):
+            # Convert to int if not already
+            if hasattr(label["label"], "long"):
+                label["label"] = label["label"].long()
+            else:
+                label["label"] = int(label["label"])
+    return label
 
 
-def to_long(x):
-    if hasattr(x, "long"):
-        return x.long()
-    return int(x)
-
-
+# MONAI transforms for segmentation and classification tasks
 def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
     keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
+    # For multitask/classification, label might not always be present in some samples
+    tensord_keys = keys + (["label"] if task in ["classification", "multitask"] else [])
     train_transforms = [
         ScaleIntensityd(keys=["image"]),
-        RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
-        RandRotate90d(keys=keys, prob=0.5),
-        ToTensord(keys=keys + (["label"] if task in ["classification", "multitask"] else [])),
+        RandFlipd(keys=keys, prob=0.5, spatial_axis=1, allow_missing_keys=True),
+        RandRotate90d(keys=keys, prob=0.5, allow_missing_keys=True),
+        ToTensord(keys=tensord_keys, allow_missing_keys=True),
     ]
     val_transforms = [
         ScaleIntensityd(keys=["image"]),
-        ToTensord(keys=keys + (["label"] if task in ["classification", "multitask"] else [])),
+        ToTensord(keys=tensord_keys, allow_missing_keys=True),
     ]
     if task in ["classification", "multitask"]:
-        train_transforms.append(Lambdad(keys="label", func=to_long))
-        val_transforms.append(Lambdad(keys="label", func=to_long))
-
+        # Apply to nested dict
+        train_transforms.append(Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True))
+        val_transforms.append(Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True))
     return Compose(train_transforms), Compose(val_transforms)
+
+
+# def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
+#     keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
+#     tensord_keys = keys + (["label"] if task in ["classification", "multitask"] else [])
+
+#     train_transforms = [
+#         ScaleIntensityd(keys=["image"]),
+#         RandFlipd(keys=keys, prob=0.5, spatial_axis=1, allow_missing_keys=True),
+#         RandRotate90d(keys=keys, prob=0.5, allow_missing_keys=True),
+#         ToTensord(keys=tensord_keys, allow_missing_keys=True),
+#     ]
+#     val_transforms = [
+#         ScaleIntensityd(keys=["image"]),
+#         ToTensord(keys=tensord_keys, allow_missing_keys=True),
+#     ]
+#     if task in ["classification", "multitask"]:
+#         train_transforms.append(Lambdad(keys="label", func=to_long, allow_missing_keys=True))
+#         val_transforms.append(Lambdad(keys="label", func=to_long, allow_missing_keys=True))
+
+#     return Compose(train_transforms), Compose(val_transforms)
+
+
+# def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
+#     keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
+#     train_transforms = [
+#         ScaleIntensityd(keys=["image"]),
+#         RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
+#         RandRotate90d(keys=keys, prob=0.5),
+#         ToTensord(keys=keys + (["label"] if task in ["classification", "multitask"] else [])),
+#     ]
+#     val_transforms = [
+#         ScaleIntensityd(keys=["image"]),
+#         ToTensord(keys=keys + (["label"] if task in ["classification", "multitask"] else [])),
+#     ]
+#     if task in ["classification", "multitask"]:
+#         train_transforms.append(Lambdad(keys="label", func=to_long))
+#         val_transforms.append(Lambdad(keys="label", func=to_long))
+
+#     return Compose(train_transforms), Compose(val_transforms)
 
 
 def build_dataloaders(
@@ -153,9 +154,10 @@ def build_dataloaders(
     batch_size=8,
     task="multitask",
     split=(0.7, 0.15, 0.15),
-    num_workers=32
+    num_workers=32,
+    debug=False
 ):
-    """Builds train/val/test DataLoaders from a CSV split by given proportions."""
+    """ Builds train/val/test DataLoaders from a CSV split by given proportions."""
     df = pd.read_csv(metadata_csv)
 
     # Split into train, val, test (by fractions)
@@ -188,6 +190,24 @@ def build_dataloaders(
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
+
+    # Debug batch content for masks
+    if debug:
+        print("\n[DEBUG] Validating val_loader content for segmentation/multitask task:")
+        val_sample = next(iter(val_loader))
+        print("  Batch keys:", val_sample.keys())
+        label = val_sample.get("label")
+        if isinstance(label, dict):
+            print("  Label dict keys:", label.keys())
+            if "mask" in label:
+                print("  Mask shape:", label['mask'].shape)
+            else:
+                print("  [WARNING] 'mask' not in label dict!")
+        else:
+            print("  [WARNING] 'label' is not a dict or missing!")
+        # You can also print a sample image/mask value if needed
+        # print("  Image shape:", val_sample["image"].shape)
+        # print("  Mask sample values:", label["mask"][0, 0, :10, :10])
 
     return train_loader, val_loader, test_loader
 

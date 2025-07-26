@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-07-26
+- Refactor and debug MONAI/Ignite multitask pipeline to use nested label dictionary
+
 # 2025-07-25
 - Debug and Refactor MONAI/Ignite Multitask Pipeline
 - Resolve bincount_cuda not implemented for Float error in segmentation output transforms for ConfusionMatrix

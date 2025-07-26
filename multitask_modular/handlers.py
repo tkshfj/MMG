@@ -296,13 +296,8 @@ def image_log_handler(model, prepare_batch_fn, num_images=4):
 
 def manual_dice_handler(model, prepare_batch_fn):
     """
-    Returns an Ignite handler that manually computes the Dice score
-    for segmentation outputs at the end of each evaluation epoch.
-    Skips batches without masks (e.g., classification-only).
-    """
-    """
-    Logs manual Dice score at the end of validation epoch.
-    Works only for batches that include 'mask' in batch["label"].
+    Ignite handler to manually compute and log Dice score for segmentation.
+    Logs as 'val_dice_manual' to W&B at the end of each evaluation epoch.
     """
     logger = logging.getLogger(__name__)
 
@@ -310,20 +305,18 @@ def manual_dice_handler(model, prepare_batch_fn):
         val_loader = engine.state.dataloader
         device = engine.state.device
         model.eval()
-
         dice_scores = []
 
         with torch.no_grad():
             for batch in val_loader:
                 inputs, targets = prepare_batch_fn(batch, device=device, non_blocking=False)
-
-                if not isinstance(batch.get("label", {}), dict) or "mask" not in batch["label"]:
+                label = batch.get("label", {})
+                if not isinstance(label, dict) or "mask" not in label:
                     logger.warning("Skipping batch without 'mask' in nested label dict (classification-only batch).")
                     continue
 
                 outputs = model(inputs)
                 _, seg_output = outputs
-
                 pred_mask = (torch.sigmoid(seg_output) > 0.5).float()
                 true_mask = targets["mask"]
 
@@ -334,66 +327,59 @@ def manual_dice_handler(model, prepare_batch_fn):
 
         if dice_scores:
             avg_dice = sum(dice_scores) / len(dice_scores)
-            wandb.log({"manual_dice": avg_dice})
+            # Log using desired key and associate with validation epoch
+            wandb.log({"val_dice_manual": avg_dice}, step=engine.state.epoch)
         else:
             logger.warning("No masks found for manual dice calculation.")
 
     return handler
 
 
-# def _handler(engine):
-#     model.eval()
-#     device = next(model.parameters()).device
+# def manual_dice_handler(model, prepare_batch_fn):
+#     """
+#     Returns an Ignite handler that manually computes the Dice score
+#     for segmentation outputs at the end of each evaluation epoch.
+#     Skips batches without masks (e.g., classification-only).
+#     """
+#     """
+#     Logs manual Dice score at the end of validation epoch.
+#     Works only for batches that include 'mask' in batch["label"].
+#     """
+#     logger = logging.getLogger(__name__)
 
-#     all_preds = []
-#     all_targets = []
+#     def handler(engine):
+#         val_loader = engine.state.dataloader
+#         device = engine.state.device
+#         model.eval()
 
-#     with torch.no_grad():
-#         for batch in engine.state.dataloader:
-#             images, targets = prepare_batch_fn(batch, device)
-#             if "mask" not in targets:
-#                 logging.warning("Skipping batch without 'mask' in targets (possible classification-only batch)")
-#                 continue  # Skip if mask not present
+#         dice_scores = []
 
-#             # For multitask models
-#             outputs = model(images)
-#             # multitask: tuple, else just seg
-#             seg_out = outputs[1] if isinstance(outputs, (tuple, list)) and len(outputs) > 1 else outputs
-#             # if isinstance(model(images), (tuple, list)) and len(model(images)) > 1:
-#             #     _, seg_out = model(images)
-#             # else:
-#             #     seg_out = model(images)
+#         with torch.no_grad():
+#             for batch in val_loader:
+#                 inputs, targets = prepare_batch_fn(batch, device=device, non_blocking=False)
 
-#             # Apply sigmoid → binary thresholding
-#             pred_mask = (torch.sigmoid(seg_out) > 0.5).float()
-#             if pred_mask.ndim == 3:
-#                 pred_mask = pred_mask.unsqueeze(1)
-#             gt_mask = targets["mask"]
-#             if gt_mask.ndim == 3:
-#                 gt_mask = gt_mask.unsqueeze(1)
+#                 if not isinstance(batch.get("label", {}), dict) or "mask" not in batch["label"]:
+#                     logger.warning("Skipping batch without 'mask' in nested label dict (classification-only batch).")
+#                     continue
 
-#             all_preds.append(pred_mask.cpu())
-#             all_targets.append(gt_mask.cpu())
+#                 outputs = model(inputs)
+#                 _, seg_output = outputs
 
-#     if not all_preds or not all_targets:
-#         logging.warning("No masks found for manual dice calculation.")
-#         return
+#                 pred_mask = (torch.sigmoid(seg_output) > 0.5).float()
+#                 true_mask = targets["mask"]
 
-#     all_preds = torch.cat(all_preds, dim=0)
-#     all_targets = torch.cat(all_targets, dim=0)
-#     # Compute Dice coefficient
-#     intersection = (all_preds * all_targets).sum(dim=(1, 2, 3))
-#     union = all_preds.sum(dim=(1, 2, 3)) + all_targets.sum(dim=(1, 2, 3))
-#     dice_scores = (2. * intersection / (union + 1e-8)).numpy()
-#     mean_dice = dice_scores.mean()
+#                 intersection = (pred_mask * true_mask).sum(dim=(1, 2, 3))
+#                 union = pred_mask.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3))
+#                 dice = (2.0 * intersection + 1e-7) / (union + 1e-7)
+#                 dice_scores.extend(dice.cpu().tolist())
 
-#     print(f"[Manual Dice] Mean Dice over validation set: {mean_dice:.4f}")
-#     engine.state.metrics["val_dice_manual"] = mean_dice
-#     if wandb.run is not None:
-#         # Do **not** pass step=engine.state.epoch here, let wandb auto-increment step
-#         wandb.log({"val_dice_manual": mean_dice})
-# return _handler
+#         if dice_scores:
+#             avg_dice = sum(dice_scores) / len(dice_scores)
+#             wandb.log({"manual_dice": avg_dice})
+#         else:
+#             logger.warning("No masks found for manual dice calculation.")
 
+#     return handler
 
 # def manual_dice_handler(model, prepare_batch_fn):
 #     """

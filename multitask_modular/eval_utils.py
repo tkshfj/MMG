@@ -18,21 +18,47 @@ def get_classification_metrics():
 
 # Batch preparation function for engines
 def prepare_batch(batch, device=None, non_blocking=False):
-    """Prepare inputs and nested labels for multitask learning."""
+    """
+    Prepare inputs and nested labels for multitask learning with MONAI/Ignite.
+    Supports nested label dictionaries: batch["label"]["mask"], batch["label"]["label"]
+    """
     images = batch["image"].to(device, non_blocking=non_blocking)
     label_dict = batch.get("label", {})
     if not isinstance(label_dict, dict):
-        raise ValueError(f"Expected 'label' to be a dict, got {type(label_dict)}")
+        raise ValueError(f"Expected 'label' to be a dict, got {type(label_dict)} (batch keys: {list(batch.keys())})")
+    # Prepare target dictionary
+    target = {}
     mask = label_dict.get("mask")
     class_label = label_dict.get("label")
-    target = {}
+    # Ensure mask and class_label are moved to the correct device
     if mask is not None:
         target["mask"] = mask.to(device, non_blocking=non_blocking)
     if class_label is not None:
-        target["label"] = class_label.to(device, non_blocking=non_blocking).long()
+        target["label"] = class_label.to(device, non_blocking=non_blocking).long()  # force integer class labels
+    # Ensure at least one target is present
     if not target:
-        raise ValueError(f"Batch label dictionary contains neither 'mask' nor 'label': keys={label_dict.keys()}")
+        raise ValueError(
+            f"Batch label dictionary contains neither 'mask' nor 'label': keys={list(label_dict.keys())}"
+        )
     return images, target
+
+
+# def prepare_batch(batch, device=None, non_blocking=False):
+#     """Prepare inputs and nested labels for multitask learning."""
+#     images = batch["image"].to(device, non_blocking=non_blocking)
+#     label_dict = batch.get("label", {})
+#     if not isinstance(label_dict, dict):
+#         raise ValueError(f"Expected 'label' to be a dict, got {type(label_dict)}")
+#     mask = label_dict.get("mask")
+#     class_label = label_dict.get("label")
+#     target = {}
+#     if mask is not None:
+#         target["mask"] = mask.to(device, non_blocking=non_blocking)
+#     if class_label is not None:
+#         target["label"] = class_label.to(device, non_blocking=non_blocking).long()
+#     if not target:
+#         raise ValueError(f"Batch label dictionary contains neither 'mask' nor 'label': keys={label_dict.keys()}")
+#     return images, target
 
 
 # def prepare_batch(batch, device=None, non_blocking=False):
