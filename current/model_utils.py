@@ -1,16 +1,16 @@
-# import torch.nn as nn
+# model_utils.py
+# This module provides utilities for building models and optimizers in a PyTorch-based framework.
 from torch.optim import Adam, SGD, RMSprop
 from multitask_unet import MultiTaskUNet
-from monai.networks.nets import DenseNet121, UNet  # DenseNet169
+from simple_cnn import SimpleCNN
+from monai.networks.nets import DenseNet121, UNet, ViT, SwinUNETR
 
 # Define registry for model constructors
 MODEL_REGISTRY = {
-    "multitask_unet": lambda config: MultiTaskUNet(
-        spatial_dims=2,
+    # For simple CNN models
+    "simple_cnn": lambda config: SimpleCNN(
         in_channels=getattr(config, "in_channels", 1),
-        out_channels=getattr(config, "out_channels", 1),
-        num_class_labels=getattr(config, "num_class_labels", 2),
-        features=getattr(config, "features", (32, 64, 128, 256, 512))
+        num_classes=getattr(config, "num_classes", 2)
     ),
     # For classification models
     "densenet121": lambda config: DenseNet121(
@@ -19,6 +19,7 @@ MODEL_REGISTRY = {
         out_channels=getattr(config, "out_channels", 1),
         pretrained=getattr(config, "pretrained", False)
     ),
+    # For segmentation models
     "unet": lambda config: UNet(
         spatial_dims=2,
         in_channels=getattr(config, "in_channels", 1),
@@ -26,6 +27,41 @@ MODEL_REGISTRY = {
         channels=getattr(config, "features", (32, 64, 128, 256, 512)),
         strides=(2, 2, 2, 2),
         num_res_units=2,
+    ),
+    # For multitask models
+    "multitask_unet": lambda config: MultiTaskUNet(
+        spatial_dims=2,
+        in_channels=getattr(config, "in_channels", 1),
+        out_channels=getattr(config, "out_channels", 1),
+        num_class_labels=getattr(config, "num_class_labels", 2),
+        features=getattr(config, "features", (32, 64, 128, 256, 512))
+    ),
+    # For Vision Transformer models
+    "vit": lambda config: ViT(
+        in_channels=getattr(config, "in_channels", 1),
+        img_size=getattr(config, "img_size", 224),
+        patch_size=getattr(config, "patch_size", 16),
+        pos_embed="conv",
+        classification=True,
+        num_classes=getattr(config, "num_class_labels", 2),
+        hidden_size=768,  # Standard ViT-Base
+        mlp_dim=3072,
+        num_layers=12,
+        num_heads=12,
+        dropout_rate=0.1,
+    ),
+    # For Swin UNETR models
+    "swin_unetr": lambda config: SwinUNETR(
+        in_channels=getattr(config, "in_channels", 1),
+        out_channels=getattr(config, "out_channels", 1),
+        img_size=getattr(config, "img_size", (256, 256)),
+        feature_size=48,
+        use_checkpoint=getattr(config, "use_checkpoint", False),
+        norm_layer="instance",
+        depths=(2, 2, 6, 2),
+        num_heads=(3, 6, 12, 24),
+        window_size=7,
+        mlp_ratio=4.0,
     ),
 }
 

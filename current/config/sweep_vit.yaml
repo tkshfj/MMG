@@ -5,7 +5,7 @@ metric:
   goal: maximize
 parameters:
   num_workers:
-    value: 32
+    value: 12
   batch_size:
     values: [16, 32, 64]
   epochs:
@@ -39,7 +39,7 @@ parameters:
   task:
     value: multitask
   model_name:
-    value: multitask_unet
+    value: vit
 
 # config:
 #   early_stop:
