@@ -40,6 +40,8 @@ parameters:
     value: multitask
   model_name:
     value: vit
+  run_cap:
+    value: 20
 
 # config:
 #   early_stop:
