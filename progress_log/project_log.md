@@ -5,6 +5,7 @@
 - Reorganize directories
 - Add Baseline CNN and ViT Models to MONAI/Ignite Pipeline
 - Report: Model Extension Feasibility using MONAI/Ignite framework
+- Lauch refactored MONAI/Ignite multitask pipeline for multitask U-Net and ViT (20 runs each, July 26-)
 - Fix: Checkpoint Handling in Ignite/MONAI
 
 # 2025-07-25
