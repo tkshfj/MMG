@@ -103,9 +103,9 @@ def log_wandb(
         if val_rocauc is not None:
             log_dict["val_auc"] = val_rocauc
 
-    wandb.log(log_dict)
     # Log only keys with non-None values
-    # wandb.log({k: v for k, v in log_dict.items() if v is not None})
+    # wandb.log(log_dict)
+    wandb.log({k: v for k, v in log_dict.items() if v is not None})
 
 
 def log_sample_images(images, masks=None, preds=None, epoch=0, n=2, task="multitask"):
