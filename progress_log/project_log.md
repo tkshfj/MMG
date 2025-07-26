@@ -4,6 +4,7 @@
 - Refactor and debug MONAI/Ignite multitask pipeline to use nested label dictionary
 - Reorganize directories
 - Add Baseline CNN and ViT Models to MONAI/Ignite Pipeline
+- Report: Model Extension Feasibility using MONAI/Ignite framework
 
 # 2025-07-25
 - Debug and Refactor MONAI/Ignite Multitask Pipeline
