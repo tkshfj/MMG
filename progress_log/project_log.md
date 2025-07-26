@@ -2,7 +2,8 @@
 
 # 2025-07-26
 - Refactor and debug MONAI/Ignite multitask pipeline to use nested label dictionary
-- Rename subdirectories
+- Reorganize directories
+- Add Baseline CNN and ViT Models to MONAI/Ignite Pipeline
 
 # 2025-07-25
 - Debug and Refactor MONAI/Ignite Multitask Pipeline
