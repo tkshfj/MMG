@@ -121,18 +121,18 @@ def register_handlers(
     import os
     os.makedirs('outputs/checkpoints', exist_ok=True)
 
-    periodic_ckpt_handler = ModelCheckpoint(
+    checkpoint_handler = ModelCheckpoint(
         dirname="outputs/checkpoints",
         filename_prefix="model",
         n_saved=3,
         create_dir=True,
         require_empty=False,
-        save_handler=SafeDiskSaver("outputs/checkpoints", create_dir=True, require_empty=False),
+        # save_handler=SafeDiskSaver("outputs/checkpoints", create_dir=True, require_empty=False)
     )
 
     @trainer.on(Events.EPOCH_COMPLETED(every=1))
-    def save_periodic_ckpt(engine):
-        periodic_ckpt_handler(engine, {"model": model})
+    def save_model(engine):
+        checkpoint_handler(engine, {"model": model})
 
     # Best Model Saving (by val_auc)
     os.makedirs('outputs/best_model', exist_ok=True)
@@ -146,47 +146,6 @@ def register_handlers(
         require_empty=False
     )
     evaluator.add_event_handler(Events.EPOCH_COMPLETED, best_ckpt_handler, {"model": model})
-
-    # # Checkpoint handler (periodic)
-    # import os
-    # os.makedirs('outputs/checkpoints', exist_ok=True)
-    # # Use this SafeDiskSaver in CheckpointSaver
-    # # checkpoint_handler = CheckpointSaver(
-    # #     save_dir="outputs/checkpoints",
-    # #     save_dict={"model": model},
-    # #     save_key_metric=True,
-    # #     save_interval=1,
-    # #     n_saved=3,
-    # #     save_handler=SafeDiskSaver("outputs/checkpoints", create_dir=True, require_empty=False),
-    # # )
-    # # checkpoint_handler.attach(trainer)
-    # checkpoint_handler = ModelCheckpoint(
-    #     dirname="outputs/checkpoints",
-    #     filename_prefix="model",
-    #     n_saved=3,
-    #     create_dir=True,
-    #     require_empty=False,
-    #     save_handler=SafeDiskSaver("outputs/checkpoints", create_dir=True, require_empty=False),
-    # )
-
-    # # Attach with save_interval logic
-    # @trainer.on(Events.EPOCH_COMPLETED(every=1))
-    # def save_model(engine):
-    #     checkpoint_handler(engine, {"model": model})
-    # # trainer.add_event_handler(Events.EPOCH_COMPLETED, checkpoint_handler, {"model": model})
-
-    # # Save best model by AUC
-    # os.makedirs('outputs/best_model', exist_ok=True)
-    # model_ckpt = ModelCheckpoint(
-    #     dirname="outputs/best_model",
-    #     filename_prefix="best_val_auc",
-    #     n_saved=1,
-    #     score_function=lambda engine: engine.state.metrics.get("val_auc", 0.0),
-    #     score_name="val_auc",
-    #     global_step_transform=lambda e, _: e.state.epoch,
-    #     require_empty=False
-    # )
-    # evaluator.add_event_handler(Events.EPOCH_COMPLETED, model_ckpt, {"model": model})
 
 
 def wandb_log_handler(engine):
