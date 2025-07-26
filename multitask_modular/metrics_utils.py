@@ -98,29 +98,6 @@ def seg_output_transform_for_confmat(output):
     return probs, true_mask.long()
 
 
-# def seg_output_transform_for_confmat(output):
-#     """
-#     Prepares segmentation predictions and targets for confusion matrix and Dice/IoU.
-#     Expects a list of dicts, not a tuple!
-#     """
-#     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
-#         # For each sample, get predicted mask and true mask
-#         pred_masks = torch.stack([x["pred"][1] for x in output])       # [B, 1, H, W] or [B, C, H, W]
-#         true_masks = torch.stack([x["label"]["mask"] for x in output])  # [B, 1, H, W] or [B, H, W]
-#         # If binary, squeeze channel
-#         if pred_masks.shape[1] == 1:
-#             pred_masks = pred_masks.squeeze(1)
-#         if true_masks.ndim == 4 and true_masks.shape[1] == 1:
-#             true_masks = true_masks.squeeze(1)
-#         # For binary, convert logits to class prediction (0/1)
-#         if pred_masks.ndim == 3:  # [B, H, W]
-#             pred_classes = (torch.sigmoid(pred_masks) > 0.5).long()
-#         else:  # [B, C, H, W] for multiclass
-#             pred_classes = torch.argmax(pred_masks, dim=1)
-#         return pred_classes, true_masks.long()
-#     raise ValueError("seg_output_transform_for_confmat expects a list of dicts with 'pred' and 'label.mask' keys")
-
-
 # Key Presence Utility
 def _validate_key_in_dataset(loader, key, num_batches=3):
     """Return True if dotted key is present in any of the first num_batches of loader."""

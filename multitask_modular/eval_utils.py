@@ -43,62 +43,6 @@ def prepare_batch(batch, device=None, non_blocking=False):
     return images, target
 
 
-# def prepare_batch(batch, device=None, non_blocking=False):
-#     """Prepare inputs and nested labels for multitask learning."""
-#     images = batch["image"].to(device, non_blocking=non_blocking)
-#     label_dict = batch.get("label", {})
-#     if not isinstance(label_dict, dict):
-#         raise ValueError(f"Expected 'label' to be a dict, got {type(label_dict)}")
-#     mask = label_dict.get("mask")
-#     class_label = label_dict.get("label")
-#     target = {}
-#     if mask is not None:
-#         target["mask"] = mask.to(device, non_blocking=non_blocking)
-#     if class_label is not None:
-#         target["label"] = class_label.to(device, non_blocking=non_blocking).long()
-#     if not target:
-#         raise ValueError(f"Batch label dictionary contains neither 'mask' nor 'label': keys={label_dict.keys()}")
-#     return images, target
-
-
-# def prepare_batch(batch, device=None, non_blocking=False):
-#     """Move batch data to device and prepare inputs/targets for the model."""
-#     images = batch["image"].to(device, non_blocking=non_blocking)
-#     label_dict = batch.get("label", {})
-#     if not isinstance(label_dict, dict):
-#         label_dict = {}
-#     output = {}
-#     mask = label_dict.get("mask")
-#     cls_label = label_dict.get("label")
-#     if mask is not None:
-#         output["mask"] = mask.to(device, non_blocking=non_blocking)
-#     if cls_label is not None:
-#         output["label"] = cls_label.to(device, non_blocking=non_blocking).long()
-#     if not output:
-#         raise ValueError(f"Batch label dictionary contains neither 'mask' nor 'label': keys={label_dict.keys()}")
-#     return images, output
-
-
-# def prepare_batch(batch, device=None, non_blocking=False):
-#     """Move batch data to device and prepare inputs/targets for the model."""
-#     images = batch["image"].to(device, non_blocking=non_blocking)
-#     if "mask" in batch and "label" in batch:
-#         # Multitask
-#         masks = batch["mask"].to(device, non_blocking=non_blocking)
-#         labels = batch["label"].to(device, non_blocking=non_blocking).long()
-#         return images, {"mask": masks, "label": labels}
-#     elif "mask" in batch:
-#         # Segmentation only
-#         masks = batch["mask"].to(device, non_blocking=non_blocking)
-#         return images, {"mask": masks}
-#     elif "label" in batch:
-#         # Classification only
-#         labels = batch["label"].to(device, non_blocking=non_blocking).long()
-#         return images, {"label": labels}
-#     else:
-#         raise ValueError(f"Batch does not contain 'mask' or 'label': keys={batch.keys()}")
-
-
 # Metric Computation Functions
 def compute_segmentation_metrics(dice_metric=None, iou_metric=None, manual_dices=None, task="multitask"):
     if task not in ("multitask", "segmentation"):

@@ -108,46 +108,6 @@ def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
     return Compose(train_transforms), Compose(val_transforms)
 
 
-# def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
-#     keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
-#     tensord_keys = keys + (["label"] if task in ["classification", "multitask"] else [])
-
-#     train_transforms = [
-#         ScaleIntensityd(keys=["image"]),
-#         RandFlipd(keys=keys, prob=0.5, spatial_axis=1, allow_missing_keys=True),
-#         RandRotate90d(keys=keys, prob=0.5, allow_missing_keys=True),
-#         ToTensord(keys=tensord_keys, allow_missing_keys=True),
-#     ]
-#     val_transforms = [
-#         ScaleIntensityd(keys=["image"]),
-#         ToTensord(keys=tensord_keys, allow_missing_keys=True),
-#     ]
-#     if task in ["classification", "multitask"]:
-#         train_transforms.append(Lambdad(keys="label", func=to_long, allow_missing_keys=True))
-#         val_transforms.append(Lambdad(keys="label", func=to_long, allow_missing_keys=True))
-
-#     return Compose(train_transforms), Compose(val_transforms)
-
-
-# def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
-#     keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
-#     train_transforms = [
-#         ScaleIntensityd(keys=["image"]),
-#         RandFlipd(keys=keys, prob=0.5, spatial_axis=1),
-#         RandRotate90d(keys=keys, prob=0.5),
-#         ToTensord(keys=keys + (["label"] if task in ["classification", "multitask"] else [])),
-#     ]
-#     val_transforms = [
-#         ScaleIntensityd(keys=["image"]),
-#         ToTensord(keys=keys + (["label"] if task in ["classification", "multitask"] else [])),
-#     ]
-#     if task in ["classification", "multitask"]:
-#         train_transforms.append(Lambdad(keys="label", func=to_long))
-#         val_transforms.append(Lambdad(keys="label", func=to_long))
-
-#     return Compose(train_transforms), Compose(val_transforms)
-
-
 def build_dataloaders(
     metadata_csv,
     input_shape=(256, 256),
@@ -205,7 +165,6 @@ def build_dataloaders(
                 print("  [WARNING] 'mask' not in label dict!")
         else:
             print("  [WARNING] 'label' is not a dict or missing!")
-        # You can also print a sample image/mask value if needed
         # print("  Image shape:", val_sample["image"].shape)
         # print("  Mask sample values:", label["mask"][0, 0, :10, :10])
 
