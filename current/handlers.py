@@ -110,15 +110,18 @@ def register_handlers(
     evaluator.add_event_handler(Events.EPOCH_COMPLETED, early_stopper)
 
     # Checkpoint handler (periodic)
-    ckpt_saver = CheckpointSaver(
+    import os
+    os.makedirs('outputs/checkpoints', exist_ok=True)
+    checkpoint_saver = CheckpointSaver(
         save_dir="outputs/checkpoints",
         save_dict={"model": model},
         save_interval=1,
         n_saved=2,
     )
-    ckpt_saver.attach(trainer)
+    checkpoint_saver.attach(trainer)
 
     # Save best model by AUC
+    os.makedirs('outputs/best_model', exist_ok=True)
     model_ckpt = ModelCheckpoint(
         dirname="outputs/best_model",
         filename_prefix="best_val_auc",
