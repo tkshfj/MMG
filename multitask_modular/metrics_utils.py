@@ -7,9 +7,7 @@ from eval_utils import get_classification_metrics, get_segmentation_metrics
 
 # Output Transforms for Accuracy, ConfusionMatrix
 def cls_output_transform(output):
-    """
-    Returns (logits, class indices). Converts one-hot to class indices if needed.
-    """
+    """Returns (logits, class indices). Converts one-hot to class indices if needed."""
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
         logits = torch.stack([x['pred'][0] for x in output])  # [B, num_classes]
         labels = torch.tensor(
@@ -30,9 +28,7 @@ def cls_output_transform(output):
 
 # for ROC AUC
 def auc_output_transform(output):
-    """
-    For binary ROC AUC: returns (prob_class1, true_class)
-    """
+    """For binary ROC AUC: returns (prob_class1, true_class)"""
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
         logits = torch.stack([x['pred'][0] for x in output])   # [B, 2]
         labels = torch.tensor(
@@ -146,9 +142,6 @@ def attach_metrics(
     available output transforms, and actual presence of label/mask in validation loader.
     """
     task = config.get("task", "multitask") if config else "multitask"
-
-    # has_label = (val_loader is None) or _validate_key_in_dataset(val_loader, "label")
-    # has_mask = (val_loader is None) or _validate_key_in_dataset(val_loader, "mask")
     has_label = (val_loader is None) or _validate_key_in_dataset(val_loader, "label.label")
     has_mask = (val_loader is None) or _validate_key_in_dataset(val_loader, "label.mask")
 
