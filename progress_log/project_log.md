@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-07-27
+- Refactor: Generalize Final Model Saving with Architecture Names
+
 # 2025-07-26
 - Refactor and debug MONAI/Ignite multitask pipeline to use nested label dictionary
 - Reorganize directories

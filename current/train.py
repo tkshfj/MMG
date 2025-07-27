@@ -89,8 +89,9 @@ def main(config=None):
         trainer.run()
 
         # Save final model
-        os.makedirs("outputs/models", exist_ok=True)
-        final_path = f"outputs/models/multitask_unet_{run_id}.pth"
+        os.makedirs("outputs/best_model", exist_ok=True)
+        architecture = getattr(config, "architecture", "multitask_unet").lower()
+        final_path = f"outputs/best_model/{architecture}_{run_id}.pth"
         torch.save(model.state_dict(), final_path)
         print("Training complete. Final model saved to:", final_path)
 
