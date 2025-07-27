@@ -67,10 +67,10 @@ MODEL_REGISTRY = {
 
 
 def build_model(config):
-    model_name = getattr(config, "model_name", "multitask_unet").lower()
-    if model_name not in MODEL_REGISTRY:
-        raise ValueError(f"Model '{model_name}' is not registered! Available: {list(MODEL_REGISTRY.keys())}")
-    return MODEL_REGISTRY[model_name](config)
+    architecture = getattr(config, "architecture", "multitask_unet").lower()
+    if architecture not in MODEL_REGISTRY:
+        raise ValueError(f"Model '{architecture}' is not registered! Available: {list(MODEL_REGISTRY.keys())}")
+    return MODEL_REGISTRY[architecture](config)
 
 
 def get_optimizer(name, parameters, lr, weight_decay=1e-4):

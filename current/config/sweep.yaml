@@ -1,47 +1,61 @@
 program: train.py
 method: bayes
+
 metric:
   name: val_auc
   goal: maximize
+
 parameters:
+  # Experiment settings
+  architecture:
+    value: multitask_unet
+  task:
+    value: multitask
+  run_cap:
+    value: 20
   num_workers:
     value: 16
-  batch_size:
-    values: [16, 32, 64]
+
+  # Fixed hyperparameters
   epochs:
     value: 40
+  input_shape:
+    value: [256, 256]
+
+  # Tunable hyperparameters
+  batch_size:
+    values: [16, 32, 64]
+
   base_learning_rate:
     value: 0.0002
+
   lr_multiplier:
     distribution: uniform
-    min: 0.8  # 0.95
-    max: 1.2  # 1.10
+    min: 0.8    # 0.95
+    max: 1.2    # 1.10
+
   dropout:
     distribution: uniform
-    min: 0.15  # 0.17
-    max: 0.25  # 0.20
+    min: 0.15   # 0.17
+    max: 0.25   # 0.20
+
   l2_reg:
     distribution: uniform
     min: 0.00001   # 0.00006
     max: 0.00012
-  input_shape:
-    value: [256, 256]
+
+  # Loss weighting hyperparameters
   alpha:
     values: [0.5, 1.0, 2.0]
     # distribution: uniform
     # min: 1.6
     # max: 2.0
+
   beta:
     values: [0.5, 1.0, 2.0]
     # distribution: uniform
     # min: 0.8
     # max: 1.4
-  task:
-    value: multitask
-  model_name:
-    value: multitask_unet
-  run_cap:
-    value: 20
 
 # config:
 #   early_stop:
