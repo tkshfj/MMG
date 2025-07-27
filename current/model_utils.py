@@ -1,8 +1,8 @@
 # model_utils.py
 # This module provides utilities for building models and optimizers in a PyTorch-based framework.
 from torch.optim import Adam, SGD, RMSprop
-from multitask_unet import MultiTaskUNet
-from simple_cnn import SimpleCNN
+from models.multitask_unet import MultiTaskUNet
+from models.simple_cnn import SimpleCNN
 from monai.networks.nets import DenseNet121, UNet, ViT, SwinUNETR
 
 # Define registry for model constructors
