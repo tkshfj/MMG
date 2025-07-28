@@ -8,11 +8,11 @@ from ignite.handlers import ModelCheckpoint, DiskSaver
 
 # Configurable save interval and retention
 CHECKPOINT_DIR = "outputs/checkpoints"
-CHECKPOINT_PREFIX = ""
+# CHECKPOINT_PREFIX = ""
 CHECKPOINT_RETENTION = None  # Number of checkpoints to keep
 CHECKPOINT_SAVE_EVERY = 1  # Save every N epochs (set to 1 for every epoch)
 BEST_MODEL_DIR = "outputs/best_model"
-BEST_MODEL_PREFIX = ""
+# BEST_MODEL_PREFIX = ""
 BEST_MODEL_RETENTION = 1  # Keep only the best model
 
 
@@ -50,6 +50,11 @@ def register_handlers(
     iou_name="val_iou",
     prepare_batch=None
 ):
+    # Get architecture name from config and sanitize for filename
+    arch_name = str(config.get("architecture", "model")).lower().replace("/", "_").replace(" ", "_")
+    checkpoint_prefix = f"{arch_name}"
+    best_model_prefix = f"{arch_name}_best"
+
     # Attach all event handlers to trainer/evaluator: logging, checkpoint, early stop, etc.
     if add_segmentation_metrics and seg_output_transform is not None:
         attach_segmentation_metrics(
@@ -132,7 +137,7 @@ def register_handlers(
 
     checkpoint_handler = ModelCheckpoint(
         dirname=CHECKPOINT_DIR,
-        filename_prefix=CHECKPOINT_PREFIX,
+        filename_prefix=checkpoint_prefix,
         n_saved=CHECKPOINT_RETENTION,
         create_dir=True,
         require_empty=False,
@@ -149,7 +154,7 @@ def register_handlers(
     os.makedirs(BEST_MODEL_DIR, exist_ok=True)
     best_ckpt_handler = ModelCheckpoint(
         dirname=BEST_MODEL_DIR,
-        filename_prefix=BEST_MODEL_PREFIX,
+        filename_prefix=best_model_prefix,
         n_saved=BEST_MODEL_RETENTION,
         score_function=lambda engine: engine.state.metrics.get("val_auc", 0.0),
         score_name="val_auc",
