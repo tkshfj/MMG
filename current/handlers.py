@@ -6,6 +6,11 @@ from monai.handlers import EarlyStopHandler, StatsHandler, from_engine  # Checkp
 from ignite.engine import Events
 from ignite.handlers import ModelCheckpoint, DiskSaver
 
+# Configurable save interval and retention
+CHECKPOINT_DIR = "outputs/checkpoints"
+CHECKPOINT_PREFIX = "model"
+CHECKPOINT_RETENTION = 3         # Number of checkpoints to keep
+CHECKPOINT_SAVE_EVERY = 1        # Save every N epochs (set to 1 for every epoch)
 
 class SafeDiskSaver(DiskSaver):
     def remove(self, filename):
@@ -122,17 +127,24 @@ def register_handlers(
     os.makedirs('outputs/checkpoints', exist_ok=True)
 
     checkpoint_handler = ModelCheckpoint(
-        dirname="outputs/checkpoints",
-        filename_prefix="model",
-        n_saved=3,
+        dirname=CHECKPOINT_DIR,
+        filename_prefix=CHECKPOINT_PREFIX,
+        n_saved=CHECKPOINT_RETENTION,
         create_dir=True,
         require_empty=False,
-        # save_handler=SafeDiskSaver("outputs/checkpoints", create_dir=True, require_empty=False)
+        save_as_state_dict=True,
     )
 
-    @trainer.on(Events.EPOCH_COMPLETED(every=1))
+    # Register handler to save every N epochs
+    @trainer.on(Events.EPOCH_COMPLETED(every=CHECKPOINT_SAVE_EVERY))
     def save_model(engine):
         checkpoint_handler(engine, {"model": model})
+
+    print(f"[INFO] Checkpoints will be saved to '{CHECKPOINT_DIR}' every {CHECKPOINT_SAVE_EVERY} epoch(s), keeping the last {CHECKPOINT_RETENTION}.")
+
+    # @trainer.on(Events.EPOCH_COMPLETED(every=1))
+    # def save_model(engine):
+    #     checkpoint_handler(engine, {"model": model})
 
     # Best Model Saving (by val_auc)
     os.makedirs('outputs/best_model', exist_ok=True)
