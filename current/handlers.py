@@ -11,6 +11,9 @@ CHECKPOINT_DIR = "outputs/checkpoints"
 CHECKPOINT_PREFIX = ""
 CHECKPOINT_RETENTION = None  # Number of checkpoints to keep
 CHECKPOINT_SAVE_EVERY = 1  # Save every N epochs (set to 1 for every epoch)
+BEST_MODEL_DIR = "outputs/best_model"
+BEST_MODEL_PREFIX = ""
+BEST_MODEL_RETENTION = 1  # Keep only the best model
 
 
 class SafeDiskSaver(DiskSaver):
@@ -125,7 +128,7 @@ def register_handlers(
 
     # Checkpoint Saving (Every N Epochs)
     import os
-    os.makedirs('outputs/checkpoints', exist_ok=True)
+    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
 
     checkpoint_handler = ModelCheckpoint(
         dirname=CHECKPOINT_DIR,
@@ -143,11 +146,11 @@ def register_handlers(
     print(f"[INFO] Checkpoints will be saved to '{CHECKPOINT_DIR}' every {CHECKPOINT_SAVE_EVERY} epoch(s), keeping the last {CHECKPOINT_RETENTION}.")
 
     # Best Model Saving (by val_auc)
-    os.makedirs('outputs/best_model', exist_ok=True)
+    os.makedirs(BEST_MODEL_DIR, exist_ok=True)
     best_ckpt_handler = ModelCheckpoint(
-        dirname="outputs/best_model",
-        filename_prefix="best_val_auc",
-        n_saved=1,
+        dirname=BEST_MODEL_DIR,
+        filename_prefix=BEST_MODEL_PREFIX,
+        n_saved=BEST_MODEL_RETENTION,
         score_function=lambda engine: engine.state.metrics.get("val_auc", 0.0),
         score_name="val_auc",
         global_step_transform=lambda e, _: e.state.epoch,
