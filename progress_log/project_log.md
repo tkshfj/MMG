@@ -2,6 +2,7 @@
 
 # 2025-07-27
 - Refactor: Generalize Final Model Saving with Architecture Names
+- Delete fit logs and model checkpoints from previous runs
 
 # 2025-07-26
 - Refactor and debug MONAI/Ignite multitask pipeline to use nested label dictionary
