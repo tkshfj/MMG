@@ -10,7 +10,7 @@ from ignite.handlers import ModelCheckpoint, DiskSaver
 CHECKPOINT_DIR = "outputs/checkpoints"
 # CHECKPOINT_PREFIX = ""
 CHECKPOINT_RETENTION = None  # Number of checkpoints to keep
-CHECKPOINT_SAVE_EVERY = 1  # Save every N epochs (set to 1 for every epoch)
+CHECKPOINT_SAVE_EVERY = 3  # Save every N epochs (set to 1 for every epoch)
 BEST_MODEL_DIR = "outputs/best_model"
 # BEST_MODEL_PREFIX = ""
 BEST_MODEL_RETENTION = 1  # Keep only the best model
