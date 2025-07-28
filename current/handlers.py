@@ -9,8 +9,8 @@ from ignite.handlers import ModelCheckpoint, DiskSaver
 # Configurable save interval and retention
 CHECKPOINT_DIR = "outputs/checkpoints"
 CHECKPOINT_PREFIX = ""
-CHECKPOINT_RETENTION = None         # Number of checkpoints to keep
-CHECKPOINT_SAVE_EVERY = 1        # Save every N epochs (set to 1 for every epoch)
+CHECKPOINT_RETENTION = None  # Number of checkpoints to keep
+CHECKPOINT_SAVE_EVERY = 1  # Save every N epochs (set to 1 for every epoch)
 
 
 class SafeDiskSaver(DiskSaver):
@@ -133,7 +133,6 @@ def register_handlers(
         n_saved=CHECKPOINT_RETENTION,
         create_dir=True,
         require_empty=False,
-        save_as_state_dict=True,
     )
 
     # Register handler to save every N epochs
