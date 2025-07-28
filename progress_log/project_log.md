@@ -1,6 +1,7 @@
 # Project Log
 
 # 2025-07-28
+- Fiz: FileNotFoundError When Deleting Old Checkpoints
 - Refactor handlers to include the architecture name in checkpoint and best model filenames
 - Refactor handers to prevent out-of-order warnings
 
