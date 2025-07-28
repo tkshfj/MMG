@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-07-28
+- Refactor handlers to include the architecture name in checkpoint and best model filenames
+- Refactor handers to prevent out-of-order warnings
+
 # 2025-07-27
 - Refactor: Generalize Final Model Saving with Architecture Names
 - Delete fit logs and model checkpoints from previous runs
