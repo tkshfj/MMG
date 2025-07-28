@@ -12,6 +12,7 @@ CHECKPOINT_PREFIX = ""
 CHECKPOINT_RETENTION = 3         # Number of checkpoints to keep
 CHECKPOINT_SAVE_EVERY = 1        # Save every N epochs (set to 1 for every epoch)
 
+
 class SafeDiskSaver(DiskSaver):
     def remove(self, filename):
         try:
@@ -141,10 +142,6 @@ def register_handlers(
         checkpoint_handler(engine, {"model": model})
 
     print(f"[INFO] Checkpoints will be saved to '{CHECKPOINT_DIR}' every {CHECKPOINT_SAVE_EVERY} epoch(s), keeping the last {CHECKPOINT_RETENTION}.")
-
-    # @trainer.on(Events.EPOCH_COMPLETED(every=1))
-    # def save_model(engine):
-    #     checkpoint_handler(engine, {"model": model})
 
     # Best Model Saving (by val_auc)
     os.makedirs('outputs/best_model', exist_ok=True)
