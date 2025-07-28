@@ -165,7 +165,7 @@ def register_handlers(
 
 
 def wandb_log_handler(engine):
-    """Log all available metrics from engine.state.metrics to wandb, handling types robustly."""
+    """ Log all available metrics from engine.state.metrics to wandb, handling types robustly and ensuring monotonic step logging. """
     log_data = {}
     for key, value in engine.state.metrics.items():
         try:
@@ -193,8 +193,41 @@ def wandb_log_handler(engine):
                 log_data[key] = float(value)
         except Exception as e:
             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
-    log_data["epoch"] = engine.state.epoch
-    wandb.log(log_data)
+    log_data["epoch"] = int(engine.state.epoch)
+    wandb.log(log_data, step=int(engine.state.epoch))
+
+
+# def wandb_log_handler(engine):
+#     """Log all available metrics from engine.state.metrics to wandb, handling types robustly."""
+#     log_data = {}
+#     for key, value in engine.state.metrics.items():
+#         try:
+#             # Handle MetaTensor (MONAI) to Tensor
+#             if hasattr(value, "as_tensor"):
+#                 value = value.as_tensor()
+#             # Handle torch.Tensor
+#             if isinstance(value, torch.Tensor):
+#                 value = value.cpu().detach()
+#                 if value.ndim == 2 and value.dtype in (torch.int32, torch.int64):  # Confusion matrix
+#                     for i in range(value.shape[0]):
+#                         for j in range(value.shape[1]):
+#                             log_data[f"{key}_{i}{j}"] = int(value[i, j])
+#                     log_data[key] = value.tolist()
+#                 elif value.numel() > 1:
+#                     log_data[key] = float(value.mean().item()) if value.dtype.is_floating_point else value.tolist()
+#                 elif value.numel() == 1:
+#                     log_data[key] = float(value.item())
+#                 else:
+#                     log_data[key] = value.tolist()
+#             # Handle numpy scalars
+#             elif hasattr(value, "item"):
+#                 log_data[key] = float(value.item())
+#             else:
+#                 log_data[key] = float(value)
+#         except Exception as e:
+#             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
+#     log_data["epoch"] = engine.state.epoch
+#     wandb.log(log_data)
 
 
 def image_log_handler(model, prepare_batch_fn, num_images=4):
