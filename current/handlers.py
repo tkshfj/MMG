@@ -5,8 +5,12 @@ import wandb
 from monai.handlers import EarlyStopHandler, StatsHandler, from_engine  # CheckpointSaver
 from ignite.engine import Events
 from ignite.handlers import ModelCheckpoint, DiskSaver
+import itertools
+import threading
 
-# Configurable save interval and retention
+# Constants
+_WANDB_GLOBAL_STEP = itertools.count()
+_WANDB_STEP_LOCK = threading.Lock()
 CHECKPOINT_DIR = "outputs/checkpoints"
 CHECKPOINT_RETENTION = None  # Number of checkpoints to keep
 CHECKPOINT_SAVE_EVERY = 3  # Save every N epochs (set to 1 for every epoch)
@@ -163,7 +167,14 @@ def register_handlers(
 
 
 def wandb_log_handler(engine):
-    """ Log all available metrics from engine.state.metrics to wandb, handling types robustly and ensuring monotonic step logging. """
+    """
+    Log all available metrics from engine.state.metrics to wandb,
+    handling types robustly and ensuring monotonic global step logging.
+    """
+    import logging
+    import torch
+    import wandb
+
     log_data = {}
     for key, value in engine.state.metrics.items():
         try:
@@ -192,20 +203,19 @@ def wandb_log_handler(engine):
         except Exception as e:
             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
 
-    # Use integer epoch for step
-    # log_data["epoch"] = int(engine.state.epoch)
-    # wandb.log(log_data, step=int(engine.state.epoch))
-    epoch = int(getattr(engine.state, "epoch", 0))
-    log_data["epoch"] = epoch
-    # Only log if wandb is initialized
+    # Assign a monotonic global step for wandb logging
+    with _WANDB_STEP_LOCK:
+        step = next(_WANDB_GLOBAL_STEP)
+
+    log_data["wandb_global_step"] = step
     if wandb.run is not None:
-        wandb.log(log_data, step=epoch)
+        wandb.log(log_data, step=step)
     else:
         logging.warning("wandb_log_handler: Wandb is not initialized or logged in; skipping logging.")
 
 
 # def wandb_log_handler(engine):
-#     """Log all available metrics from engine.state.metrics to wandb, handling types robustly."""
+#     """ Log all available metrics from engine.state.metrics to wandb, handling types robustly and ensuring monotonic step logging. """
 #     log_data = {}
 #     for key, value in engine.state.metrics.items():
 #         try:
@@ -233,12 +243,12 @@ def wandb_log_handler(engine):
 #                 log_data[key] = float(value)
 #         except Exception as e:
 #             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
-#     # log_data["epoch"] = engine.state.epoch
-#     # wandb.log(log_data)
+
 #     # Use integer epoch for step
+#     # log_data["epoch"] = int(engine.state.epoch)
+#     # wandb.log(log_data, step=int(engine.state.epoch))
 #     epoch = int(getattr(engine.state, "epoch", 0))
 #     log_data["epoch"] = epoch
-
 #     # Only log if wandb is initialized
 #     if wandb.run is not None:
 #         wandb.log(log_data, step=epoch)
