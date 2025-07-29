@@ -193,8 +193,17 @@ def wandb_log_handler(engine):
                 log_data[key] = float(value)
         except Exception as e:
             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
-    log_data["epoch"] = int(engine.state.epoch)
-    wandb.log(log_data, step=int(engine.state.epoch))
+    # log_data["epoch"] = int(engine.state.epoch)
+    # wandb.log(log_data, step=int(engine.state.epoch))
+    # Use integer epoch for step
+    epoch = int(getattr(engine.state, "epoch", 0))
+    log_data["epoch"] = epoch
+
+    # Only log if wandb is initialized
+    if wandb.run is not None:
+        wandb.log(log_data, step=epoch)
+    else:
+        logging.warning("wandb_log_handler: Wandb is not initialized or logged in; skipping logging.")
 
 
 # def wandb_log_handler(engine):
