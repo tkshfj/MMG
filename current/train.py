@@ -17,7 +17,7 @@ from handlers import register_handlers, wandb_log_handler, image_log_handler, ma
 # Main training function using MONAI engines
 def main(config=None):
     # Initialize W&B run (config passed from sweep or CLI)
-    with wandb.init(config=config, dir="outputs/wandb"):
+    with wandb.init(config=config, dir="outputs"):
         config = load_and_validate_config(wandb.config)
         set_determinism(seed=42)
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
