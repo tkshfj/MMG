@@ -5,15 +5,11 @@ import wandb
 from monai.handlers import EarlyStopHandler, StatsHandler, from_engine  # CheckpointSaver
 from ignite.engine import Events
 from ignite.handlers import ModelCheckpoint, DiskSaver
-import itertools
-import threading
 
-# Constants
-_WANDB_GLOBAL_STEP = itertools.count()
-_WANDB_STEP_LOCK = threading.Lock()
+# Configurable save interval and retention
 CHECKPOINT_DIR = "outputs/checkpoints"
-CHECKPOINT_RETENTION = None  # Number of checkpoints to keep
-CHECKPOINT_SAVE_EVERY = 3  # Save every N epochs (set to 1 for every epoch)
+CHECKPOINT_RETENTION = 3  # Number of checkpoints to keep
+CHECKPOINT_SAVE_EVERY = 1  # Save every N epochs (set to 1 for every epoch)
 BEST_MODEL_DIR = "outputs/best_model"
 BEST_MODEL_RETENTION = 1  # Keep only the best model
 
@@ -56,7 +52,6 @@ def register_handlers(
     arch_name = str(config.get("architecture", "model")).lower().replace("/", "_").replace(" ", "_")
     checkpoint_prefix = f"{arch_name}"
     best_model_prefix = f"{arch_name}_best"
-
     # Attach all event handlers to trainer/evaluator: logging, checkpoint, early stop, etc.
     if add_segmentation_metrics and seg_output_transform is not None:
         attach_segmentation_metrics(
@@ -135,7 +130,7 @@ def register_handlers(
 
     # Checkpoint Saving (Every N Epochs)
     import os
-    os.makedirs(CHECKPOINT_DIR, exist_ok=True)
+    os.makedirs('outputs/checkpoints', exist_ok=True)
 
     checkpoint_handler = ModelCheckpoint(
         dirname=CHECKPOINT_DIR,
@@ -143,6 +138,7 @@ def register_handlers(
         n_saved=CHECKPOINT_RETENTION,
         create_dir=True,
         require_empty=False,
+        # save_as_state_dict=True,
     )
 
     # Register handler to save every N epochs
@@ -157,7 +153,7 @@ def register_handlers(
     best_ckpt_handler = ModelCheckpoint(
         dirname=BEST_MODEL_DIR,
         filename_prefix=best_model_prefix,
-        n_saved=BEST_MODEL_RETENTION,
+        n_saved=1,
         score_function=lambda engine: engine.state.metrics.get("val_auc", 0.0),
         score_name="val_auc",
         global_step_transform=lambda e, _: e.state.epoch,
@@ -167,14 +163,7 @@ def register_handlers(
 
 
 def wandb_log_handler(engine):
-    """
-    Log all available metrics from engine.state.metrics to wandb,
-    handling types robustly and ensuring monotonic global step logging.
-    """
-    import logging
-    import torch
-    import wandb
-
+    """Log all available metrics from engine.state.metrics to wandb, handling types robustly."""
     log_data = {}
     for key, value in engine.state.metrics.items():
         try:
@@ -202,58 +191,8 @@ def wandb_log_handler(engine):
                 log_data[key] = float(value)
         except Exception as e:
             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
-
-    # Assign a monotonic global step for wandb logging
-    with _WANDB_STEP_LOCK:
-        step = next(_WANDB_GLOBAL_STEP)
-
-    log_data["wandb_global_step"] = step
-    if wandb.run is not None:
-        wandb.log(log_data, step=step)
-    else:
-        logging.warning("wandb_log_handler: Wandb is not initialized or logged in; skipping logging.")
-
-
-# def wandb_log_handler(engine):
-#     """ Log all available metrics from engine.state.metrics to wandb, handling types robustly and ensuring monotonic step logging. """
-#     log_data = {}
-#     for key, value in engine.state.metrics.items():
-#         try:
-#             # Handle MetaTensor (MONAI) to Tensor
-#             if hasattr(value, "as_tensor"):
-#                 value = value.as_tensor()
-#             # Handle torch.Tensor
-#             if isinstance(value, torch.Tensor):
-#                 value = value.cpu().detach()
-#                 if value.ndim == 2 and value.dtype in (torch.int32, torch.int64):  # Confusion matrix
-#                     for i in range(value.shape[0]):
-#                         for j in range(value.shape[1]):
-#                             log_data[f"{key}_{i}{j}"] = int(value[i, j])
-#                     log_data[key] = value.tolist()
-#                 elif value.numel() > 1:
-#                     log_data[key] = float(value.mean().item()) if value.dtype.is_floating_point else value.tolist()
-#                 elif value.numel() == 1:
-#                     log_data[key] = float(value.item())
-#                 else:
-#                     log_data[key] = value.tolist()
-#             # Handle numpy scalars
-#             elif hasattr(value, "item"):
-#                 log_data[key] = float(value.item())
-#             else:
-#                 log_data[key] = float(value)
-#         except Exception as e:
-#             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
-
-#     # Use integer epoch for step
-#     # log_data["epoch"] = int(engine.state.epoch)
-#     # wandb.log(log_data, step=int(engine.state.epoch))
-#     epoch = int(getattr(engine.state, "epoch", 0))
-#     log_data["epoch"] = epoch
-#     # Only log if wandb is initialized
-#     if wandb.run is not None:
-#         wandb.log(log_data, step=epoch)
-#     else:
-#         logging.warning("wandb_log_handler: Wandb is not initialized or logged in; skipping logging.")
+    log_data["epoch"] = engine.state.epoch
+    wandb.log(log_data)
 
 
 def image_log_handler(model, prepare_batch_fn, num_images=4):

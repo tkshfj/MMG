@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-07-30
+- Refactor handlers to ensure sweep runs log metrics to Wandb
+- Revert to commit deb3574 from 28 July
+
 # 2025-07-28
 - Fix: FileNotFoundError When Deleting Old Checkpoints
 - Refactor handlers to include the architecture name in checkpoint and best model filenames
