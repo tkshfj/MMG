@@ -191,9 +191,11 @@ def wandb_log_handler(engine):
                 log_data[key] = float(value)
         except Exception as e:
             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
-    epoch = engine.state.epoch if hasattr(engine.state, 'epoch') else 0
-    log_data["epoch"] = epoch
-    wandb.log(log_data, step=epoch)
+    log_data["epoch"] = engine.state.epoch
+    wandb.log(log_data)
+    # epoch = engine.state.epoch if hasattr(engine.state, 'epoch') else 0
+    # log_data["epoch"] = epoch
+    # wandb.log(log_data, step=epoch)
 
 
 def image_log_handler(model, prepare_batch_fn, num_images=4):
