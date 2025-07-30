@@ -65,7 +65,6 @@ def main(config=None):
             auc_output_transform=auc_output_transform,
             val_loader=val_loader
         )
-        # seg_output_transform=seg_output_transform
 
         register_handlers(
             trainer,
