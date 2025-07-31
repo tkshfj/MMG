@@ -311,6 +311,11 @@ def register_handlers(
     ).attach(evaluator)
 
     # # Validation after each epoch
+    def run_evaluator_with_epoch(engine):
+        evaluator.state.trainer_epoch = engine.state.epoch  # synchronize evaluator with global epoch
+        evaluator.run()
+    trainer.add_event_handler(Events.EPOCH_COMPLETED, run_evaluator_with_epoch)
+
     # # trainer.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: evaluator.run())
     # def run_evaluator_with_epoch(engine):
     #     # Run evaluator and pass the trainer's epoch as an argument
@@ -326,6 +331,7 @@ def register_handlers(
     if wandb_log_handler:
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
         # evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: wandb_log_handler(engine, epoch=engine.state.epoch))
+        # evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: wandb_log_handler(engine))
 
     def get_score_function():
         metric = config.get("early_stop", {}).get("metric", "val_auc")

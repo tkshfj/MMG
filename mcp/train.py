@@ -4,7 +4,6 @@ os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
 import torch
 import wandb
 from monai.utils import set_determinism
-
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_registry import MODEL_REGISTRY
@@ -89,16 +88,8 @@ def main(config=None):
             **handler_kwargs
         )
 
-        # Main training loop: alternate train/eval, sync epochs
-        total_epochs = config["epochs"]
-        for epoch in range(total_epochs):
-            print(f"\n[INFO] Starting epoch {epoch+1}/{total_epochs}")
-            trainer.state.max_epochs = 1
-            trainer.run()
-            # Sync evaluator's epoch to trainer's epoch for logging/step consistency
-            evaluator.state.epoch = trainer.state.epoch
-            evaluator.run()
-            # (Optionally: implement test evaluation, early stopping break, etc.)
+        # Main training loop (MONAI SupervisedTrainer controls epochs)
+        trainer.run()
 
         # Save final model checkpoint
         os.makedirs("outputs/best_model", exist_ok=True)
