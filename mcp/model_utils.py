@@ -12,19 +12,9 @@ from metrics_utils import (
 )
 
 
-# SimpleCNN
-class SimpleCNNModel(ModelContextProtocol):
-    def build_model(self, config: Any) -> Any:
-        in_channels = getattr(config, "in_channels", 1)
-        num_classes = getattr(config, "num_classes", 2)
-        return SimpleCNN(in_channels=in_channels, num_classes=num_classes)
-
-    # def get_output_transform(self) -> Callable:
-    #     def output_transform(output: Any) -> Any:
-    #         return output
-    #     return output_transform
-
+class BaseModel(ModelContextProtocol):
     def get_output_transform(self):
+        # Default: use classification output transform
         return self.get_cls_output_transform()
 
     def get_cls_output_transform(self):
@@ -33,14 +23,28 @@ class SimpleCNNModel(ModelContextProtocol):
     def get_auc_output_transform(self):
         return auc_output_transform
 
+    def get_seg_output_transform(self):
+        return seg_output_transform_for_confmat
+
+
+# SimpleCNN
+class SimpleCNNModel(BaseModel):
+    def build_model(self, config: Any) -> Any:
+        in_channels = getattr(config, "in_channels", 1)
+        num_classes = getattr(config, "num_classes", 2)
+        return SimpleCNN(in_channels=in_channels, num_classes=num_classes)
+
     def get_supported_tasks(self) -> List[str]:
         return ["classification"]
 
     def get_metrics(self) -> Dict[str, Any]:
-        from ignite.metrics import Accuracy, ROC_AUC
+        from ignite.metrics import Accuracy, ROC_AUC, ConfusionMatrix, Loss
+        num_classes = getattr(self, "num_class_labels", 2)
         return {
             "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
             "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
+            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
         }
 
     def get_loss_fn(self) -> Callable:
@@ -58,7 +62,7 @@ class SimpleCNNModel(ModelContextProtocol):
 
 
 # DenseNet121
-class DenseNet121Model(ModelContextProtocol):
+class DenseNet121Model(BaseModel):
     def build_model(self, config: Any) -> Any:
         return DenseNet121(
             spatial_dims=2,
@@ -67,29 +71,22 @@ class DenseNet121Model(ModelContextProtocol):
             pretrained=getattr(config, "pretrained", False),
         )
 
-    # def get_output_transform(self) -> Callable:
-    #     def output_transform(output: Any) -> Any:
-    #         return output
-    #     return output_transform
-
-    def get_output_transform(self):
-        return self.get_cls_output_transform()
-
-    def get_cls_output_transform(self):
-        return cls_output_transform
-
-    def get_auc_output_transform(self):
-        return auc_output_transform
-
     def get_supported_tasks(self) -> List[str]:
         return ["classification"]
 
     def get_metrics(self) -> Dict[str, Any]:
-        from ignite.metrics import Accuracy, ROC_AUC
+        from ignite.metrics import Accuracy, ROC_AUC, ConfusionMatrix, Loss
+        num_classes = getattr(self, "num_class_labels", 2)
         return {
             "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
             "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
+            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
         }
+
+    def get_output_transform(self):
+        # Use segmentation output transform
+        return self.get_seg_output_transform()
 
     def get_loss_fn(self) -> Callable:
         import torch.nn as nn
@@ -107,7 +104,7 @@ class DenseNet121Model(ModelContextProtocol):
 
 
 # UNet
-class UNetModel(ModelContextProtocol):
+class UNetModel(BaseModel):
     def build_model(self, config: Any) -> Any:
         return UNet(
             spatial_dims=2,
@@ -119,10 +116,8 @@ class UNetModel(ModelContextProtocol):
         )
 
     def get_output_transform(self):
+        # Use segmentation output transform
         return self.get_seg_output_transform()
-
-    def get_seg_output_transform(self):
-        return seg_output_transform_for_confmat
 
     def get_supported_tasks(self) -> List[str]:
         return ["segmentation"]
@@ -151,7 +146,7 @@ class UNetModel(ModelContextProtocol):
 
 
 # Multitask UNet
-class MultitaskUNetModel(ModelContextProtocol):
+class MultitaskUNetModel(BaseModel):
     def build_model(self, config: Any) -> Any:
         return MultiTaskUNet(
             in_channels=getattr(config, "in_channels", 1),
@@ -160,28 +155,20 @@ class MultitaskUNetModel(ModelContextProtocol):
             features=getattr(config, "features", (32, 64, 128, 256, 512)),
         )
 
-    def get_output_transform(self):
-        return self.get_cls_output_transform()
-
-    def get_cls_output_transform(self):
-        return cls_output_transform
-
-    def get_auc_output_transform(self):
-        return auc_output_transform
-
-    def get_seg_output_transform(self):
-        return seg_output_transform_for_confmat
-
     def get_supported_tasks(self) -> List[str]:
         return ["classification", "segmentation", "multitask"]
 
     def get_metrics(self) -> Dict[str, Any]:
-        from ignite.metrics import Accuracy, ROC_AUC, ConfusionMatrix, DiceCoefficient, JaccardIndex
+        from ignite.metrics import Accuracy, ROC_AUC, ConfusionMatrix, DiceCoefficient, JaccardIndex, Loss
+        # from eval_utils import get_classification_metrics
         num_classes = getattr(self, "num_class_labels", 2)
         cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=self.get_seg_output_transform())
         return {
             "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
             "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
+            # "val_loss": Loss(loss_fn=get_classification_metrics()["loss"], output_transform=self.get_cls_output_transform()),
+            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
             "dice": DiceCoefficient(cm=cm_metric),
             "iou": JaccardIndex(cm=cm_metric),
         }
@@ -201,7 +188,7 @@ class MultitaskUNetModel(ModelContextProtocol):
 
 
 # ViT
-class ViTModel(ModelContextProtocol):
+class ViTModel(BaseModel):
     def build_model(self, config: Any) -> Any:
         return ViT(
             in_channels=getattr(config, "in_channels", 1),
@@ -217,23 +204,17 @@ class ViTModel(ModelContextProtocol):
             dropout_rate=getattr(config, "dropout_rate", 0.1),
         )
 
-    def get_output_transform(self):
-        return self.get_cls_output_transform()
-
-    def get_cls_output_transform(self):
-        return cls_output_transform
-
-    def get_auc_output_transform(self):
-        return auc_output_transform
-
     def get_supported_tasks(self) -> List[str]:
         return ["classification"]
 
     def get_metrics(self) -> Dict[str, Any]:
-        from ignite.metrics import Accuracy, ROC_AUC
+        from ignite.metrics import Accuracy, ROC_AUC, ConfusionMatrix, Loss
+        num_classes = getattr(self, "num_class_labels", 2)
         return {
             "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
             "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
+            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
         }
 
     def get_loss_fn(self) -> Callable:
@@ -252,7 +233,7 @@ class ViTModel(ModelContextProtocol):
 
 
 # SwinUNETR
-class SwinUNETRModel(ModelContextProtocol):
+class SwinUNETRModel(BaseModel):
     def build_model(self, config: Any) -> Any:
         return SwinUNETR(
             in_channels=getattr(config, "in_channels", 1),
@@ -267,12 +248,6 @@ class SwinUNETRModel(ModelContextProtocol):
             mlp_ratio=getattr(config, "mlp_ratio", 4.0),
         )
 
-    def get_output_transform(self):
-        return self.get_seg_output_transform()
-
-    def get_seg_output_transform(self):
-        return seg_output_transform_for_confmat
-
     def get_supported_tasks(self) -> List[str]:
         return ["segmentation"]
 
@@ -284,6 +259,10 @@ class SwinUNETRModel(ModelContextProtocol):
             "dice": DiceCoefficient(cm=cm_metric),
             "iou": JaccardIndex(cm=cm_metric)
         }
+
+    def get_output_transform(self):
+        # Use segmentation output transform
+        return self.get_seg_output_transform()
 
     def get_loss_fn(self) -> Callable:
         from monai.losses import DiceLoss

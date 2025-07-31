@@ -80,9 +80,8 @@ def register_handlers(
     if image_log_handler and prepare_batch is not None:
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, image_log_handler(model, prepare_batch))
 
-    # wandb logging (optional)
+    # wandb logging
     if wandb_log_handler:
-        trainer.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
 
     def get_score_function():
@@ -136,8 +135,10 @@ def register_handlers(
 
 def wandb_log_handler(engine):
     """Log all available metrics from engine.state.metrics to wandb, handling types robustly."""
+    print("wandb_log_handler metrics:", engine.state.metrics)
     log_data = {}
     for key, value in engine.state.metrics.items():
+        print(f"[wandb_log_handler] key: {key}, value: {value}")
         try:
             if hasattr(value, "as_tensor"):
                 value = value.as_tensor()
