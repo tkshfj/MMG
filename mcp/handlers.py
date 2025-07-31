@@ -311,17 +311,17 @@ def register_handlers(
     ).attach(evaluator)
 
     # # Validation after each epoch
-    def run_evaluator_with_epoch(engine):
-        evaluator.state.trainer_epoch = engine.state.epoch  # synchronize evaluator with global epoch
-        evaluator.run()
-    trainer.add_event_handler(Events.EPOCH_COMPLETED, run_evaluator_with_epoch)
-
-    # # trainer.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: evaluator.run())
+    # trainer.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: evaluator.run())
     # def run_evaluator_with_epoch(engine):
     #     # Run evaluator and pass the trainer's epoch as an argument
-    #     evaluator.state.trainer_epoch = engine.state.epoch  # Save for use in logging
+    #     evaluator.state.trainer_epoch = engine.state.epoch  # synchronize evaluator with global epoch
     #     evaluator.run()
     # trainer.add_event_handler(Events.EPOCH_COMPLETED, run_evaluator_with_epoch)
+
+    # Print at EPOCH_COMPLETED before wandb_log_handler to see what's present
+    def debug_metrics_printer(engine):
+        print(f"[DEBUG] evaluator.state.metrics at EPOCH_COMPLETED: {engine.state.metrics}")
+    evaluator.add_event_handler(Events.EPOCH_COMPLETED, debug_metrics_printer)
 
     # Manual dice/image handlers (if provided)
     if manual_dice_handler and prepare_batch is not None:
@@ -382,9 +382,12 @@ def register_handlers(
     evaluator.add_event_handler(Events.EPOCH_COMPLETED, best_ckpt_handler, {"model": model})
 
 
-def wandb_log_handler(engine, epoch=None):
+def wandb_log_handler(engine):
     """Log all available metrics from engine.state.metrics to wandb, handling types robustly."""
-    print("wandb_log_handler metrics:", engine.state.metrics)
+    print("wandb_log_handler metrics (before logging):", engine.state.metrics)
+    # Just in case, print type and content for further diagnosis
+    print("wandb_log_handler engine.state.metrics.keys():", list(engine.state.metrics.keys()))
+
     # Try to get trainer's epoch if present, else fallback
     epoch = getattr(engine.state, "trainer_epoch", engine.state.epoch)
     log_data = {}
@@ -414,16 +417,17 @@ def wandb_log_handler(engine, epoch=None):
             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
 
     log_data["epoch"] = epoch
+    print(f"[wandb_log_handler] Final log_data dict: {log_data}")
     wandb.log(log_data, step=epoch)
+
+    # log_data["epoch"] = engine.state.epoch
+    # wandb.log(log_data)
 
     # log_data["epoch"] = epoch if epoch is not None else engine.state.epoch
     # wandb.log(log_data, step=log_data["epoch"])
 
     # log_data["epoch"] = engine.state.epoch
     # wandb.log(log_data, step=log_data["epoch"])
-
-    # # log_data["epoch"] = engine.state.epoch
-    # # wandb.log(log_data)
 
     # epoch = getattr(engine.state, "trainer_epoch", engine.state.epoch)
     # log_data["epoch"] = epoch
