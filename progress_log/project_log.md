@@ -2,6 +2,8 @@
 
 # 2025-07-31
 - Report: Model Context Protocol and Model Registry Refactoring
+- Report: Model Context Protocol (MCP) Integration in MONAI/Ignite Project
+- Issue: val_cls_confmat is not logged into wandb
 
 # 2025-07-30
 - Refactor handlers to ensure sweep runs log metrics to Wandb
