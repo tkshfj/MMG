@@ -89,8 +89,16 @@ def main(config=None):
             **handler_kwargs
         )
 
-        # Start training loop
-        trainer.run()
+        # Main training loop: alternate train/eval, sync epochs
+        total_epochs = config["epochs"]
+        for epoch in range(total_epochs):
+            print(f"\n[INFO] Starting epoch {epoch+1}/{total_epochs}")
+            trainer.state.max_epochs = 1
+            trainer.run()
+            # Sync evaluator's epoch to trainer's epoch for logging/step consistency
+            evaluator.state.epoch = trainer.state.epoch
+            evaluator.run()
+            # (Optionally: implement test evaluation, early stopping break, etc.)
 
         # Save final model checkpoint
         os.makedirs("outputs/best_model", exist_ok=True)
