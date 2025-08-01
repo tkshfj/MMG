@@ -166,7 +166,6 @@ class MultitaskUNetModel(BaseModel):
         return {
             "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
             "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
-            # "val_loss": Loss(loss_fn=get_classification_metrics()["loss"], output_transform=self.get_cls_output_transform()),
             "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
             "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
             "dice": DiceCoefficient(cm=cm_metric),
@@ -279,7 +278,7 @@ class SwinUNETRModel(BaseModel):
         }
 
 
-# MCP Model registry
+# Model registry
 MODEL_REGISTRY: Dict[str, ModelContextProtocol] = {
     "simple_cnn": SimpleCNNModel(),
     "densenet121": DenseNet121Model(),

@@ -207,33 +207,3 @@ def multitask_loss(y_pred, y_true):
         return get_classification_metrics()["loss"](y_pred, y_true)
     else:
         raise TypeError(f"Unsupported y_true type for multitask_loss: {type(y_true)}")
-
-
-# def multitask_loss(y_pred, y_true):
-#     """
-#     Combined segmentation + classification loss for multitask, segmentation-only, or classification-only tasks.
-#     Accepts:
-#         - y_pred: tuple or dict, model outputs (e.g., (class_logits, seg_out) or just logits/mask)
-#         - y_true: dict, must include 'label' and/or 'mask' as appropriate
-#     """
-#     if isinstance(y_pred, tuple):
-#         if len(y_pred) == 2:
-#             class_logits, seg_out = y_pred
-#         elif len(y_pred) == 1:
-#             class_logits, seg_out = y_pred[0], None
-#         else:
-#             class_logits, seg_out = y_pred, None
-#     elif isinstance(y_pred, dict):
-#         class_logits = y_pred.get("label", None)
-#         seg_out = y_pred.get("mask", None)
-#     else:
-#         class_logits, seg_out = y_pred, None
-
-#     loss = 0.0
-#     if "label" in y_true and class_logits is not None:
-#         loss += get_classification_metrics()["loss"](class_logits, y_true["label"])
-#     if "mask" in y_true and seg_out is not None:
-#         loss += get_segmentation_metrics()["loss"](seg_out, y_true["mask"])
-#     if loss == 0.0:
-#         raise ValueError(f"No valid targets found in y_true: keys={list(y_true.keys())}")
-#     return loss

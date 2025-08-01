@@ -15,10 +15,10 @@ def build_trainer(
     metrics: Optional[Dict[str, Any]] = None,
 ) -> SupervisedTrainer:
     """
-    Build a MONAI SupervisedTrainer using MCP-supplied components.
-    All arguments are protocol-driven, so this trainer is fully model/task agnostic.
-    - If metrics is supplied, will attach at construction (optional; often done externally).
-    - If output_transform is not supplied, uses default.
+    Build a MONAI SupervisedTrainer using configuration-supplied components.
+    All arguments are protocol-driven, so this trainer is fully model and task agnostic.
+    - If metrics are supplied, they will be attached at construction (optional; can also be attached externally).
+    - If output_transform is not supplied, the default will be used.
     """
     assert callable(loss_function), "loss_function must be callable"
     assert callable(prepare_batch), "prepare_batch must be callable"
@@ -42,9 +42,8 @@ def build_evaluator(
     output_transform: Optional[Callable] = None,
 ) -> SupervisedEvaluator:
     """
-    Build a MONAI SupervisedEvaluator using MCP-supplied components.
-    This function is fully protocol-driven; metrics and output_transform should always
-    be obtained from the MCP model class.
+    Build a MONAI SupervisedEvaluator using configuration-supplied components.
+    Metrics and output_transform should always be obtained from the model class.
     """
     assert callable(prepare_batch), "prepare_batch must be callable"
     evaluator = SupervisedEvaluator(
@@ -53,21 +52,11 @@ def build_evaluator(
         network=network,
         prepare_batch=prepare_batch,
     )
-    # Attach metrics after construction
+    # DEBUG: Attach metrics after construction
     if metrics:
         print("[DEBUG] Attaching metrics to evaluator:")
         for name, metric in metrics.items():
             print(f"  {name} -> {type(metric)}")
             metric.attach(evaluator, name)
         print("------")
-        # for name, metric in metrics.items():
-        #     metric.attach(evaluator, name)
-        # # DEBUG PRINT OF METRICS ATTACHED
-        # print("\n[DEBUG] Metrics attached to evaluator:")
-        # for k, v in evaluator.metrics.items():
-        #     print(f"  {k} -> {type(v)}")
-        # print("------")
-        # print(f"[DEBUG] evaluator._metrics keys after attachment: {list(evaluator.metrics.keys())}\n")
-    # else:
-    #     print("[DEBUG] No metrics were attached to evaluator.")
     return evaluator

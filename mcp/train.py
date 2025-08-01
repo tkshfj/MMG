@@ -34,14 +34,14 @@ def main(config=None):
             debug=False
         )
 
-        # MCP: Select model class and construct model
+        # Select model class and construct model
         architecture = config.get("architecture", "multitask_unet").lower()
         if architecture not in MODEL_REGISTRY:
             raise ValueError(f"Model '{architecture}' not found in MODEL_REGISTRY.")
         model_class = MODEL_REGISTRY[architecture]
         model = model_class.build_model(config).to(device)
 
-        # MCP: Get optimizer, loss, metrics, output_transform, handler kwargs
+        # Get optimizer, loss, metrics, output_transform, handler kwargs
         optimizer = get_optimizer(
             config["optimizer"],
             model.parameters(),
@@ -53,7 +53,7 @@ def main(config=None):
         output_transform = model_class.get_output_transform()
         handler_kwargs = model_class.get_handler_kwargs()
 
-        # Build trainer and evaluator (MCP-driven)
+        # Build trainer and evaluator
         trainer = build_trainer(
             device=device,
             max_epochs=config["epochs"],
