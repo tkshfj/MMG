@@ -14,7 +14,7 @@ parameters:
   run_cap:
     value: 20
   num_workers:
-    value: 4
+    value: 10
 
   # Fixed hyperparameters
   epochs:

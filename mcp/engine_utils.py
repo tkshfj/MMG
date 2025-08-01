@@ -55,6 +55,19 @@ def build_evaluator(
     )
     # Attach metrics after construction
     if metrics:
+        print("[DEBUG] Attaching metrics to evaluator:")
         for name, metric in metrics.items():
+            print(f"  {name} -> {type(metric)}")
             metric.attach(evaluator, name)
+        print("------")
+        # for name, metric in metrics.items():
+        #     metric.attach(evaluator, name)
+        # # DEBUG PRINT OF METRICS ATTACHED
+        # print("\n[DEBUG] Metrics attached to evaluator:")
+        # for k, v in evaluator.metrics.items():
+        #     print(f"  {k} -> {type(v)}")
+        # print("------")
+        # print(f"[DEBUG] evaluator._metrics keys after attachment: {list(evaluator.metrics.keys())}\n")
+    # else:
+    #     print("[DEBUG] No metrics were attached to evaluator.")
     return evaluator

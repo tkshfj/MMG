@@ -294,6 +294,12 @@ def register_handlers(
             iou_name=handler_kwargs.get("iou_name", "val_iou"),
         )
 
+    # DEBUG: What metrics are attached?
+    print("\n[DEBUG register_handlers] Metrics registered on evaluator at setup:")
+    for k in getattr(evaluator, "_metrics", {}).keys():
+        print(f"  {k}")
+    print("------")
+
     # Training loss stats
     StatsHandler(
         tag_name="train",
@@ -310,18 +316,28 @@ def register_handlers(
         iteration_log=False
     ).attach(evaluator)
 
+    # DEBUG: Print metrics every eval epoch
+    def debug_metrics_printer(engine):
+        print(f"[DEBUG @EPOCH_COMPLETED] engine.state.metrics: {engine.state.metrics}")
+    evaluator.add_event_handler(Events.EPOCH_COMPLETED, debug_metrics_printer)
+    # def debug_metrics_printer(engine):
+    #     print(f"\n[DEBUG @EPOCH_COMPLETED] evaluator._metrics: {list(engine._metrics.keys())}")
+    #     print(f"[DEBUG @EPOCH_COMPLETED] engine.state.metrics: {engine.state.metrics}\n")
+    # evaluator.add_event_handler(Events.EPOCH_COMPLETED, debug_metrics_printer)
+
     # # Validation after each epoch
     # trainer.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: evaluator.run())
-    # def run_evaluator_with_epoch(engine):
-    #     # Run evaluator and pass the trainer's epoch as an argument
-    #     evaluator.state.trainer_epoch = engine.state.epoch  # synchronize evaluator with global epoch
-    #     evaluator.run()
-    # trainer.add_event_handler(Events.EPOCH_COMPLETED, run_evaluator_with_epoch)
+    def run_evaluator_with_epoch(engine):
+        # Run evaluator and pass the trainer's epoch as an argument
+        print(f"[DEBUG] Calling evaluator.run() after epoch {engine.state.epoch}")
+        evaluator.state.trainer_epoch = engine.state.epoch  # synchronize evaluator with global epoch
+        evaluator.run()
+    trainer.add_event_handler(Events.EPOCH_COMPLETED, run_evaluator_with_epoch)
 
     # Print at EPOCH_COMPLETED before wandb_log_handler to see what's present
-    def debug_metrics_printer(engine):
-        print(f"[DEBUG] evaluator.state.metrics at EPOCH_COMPLETED: {engine.state.metrics}")
-    evaluator.add_event_handler(Events.EPOCH_COMPLETED, debug_metrics_printer)
+    # def debug_metrics_printer(engine):
+    #     print(f"[DEBUG] evaluator.state.metrics at EPOCH_COMPLETED: {engine.state.metrics}")
+    # evaluator.add_event_handler(Events.EPOCH_COMPLETED, debug_metrics_printer)
 
     # Manual dice/image handlers (if provided)
     if manual_dice_handler and prepare_batch is not None:
@@ -329,9 +345,9 @@ def register_handlers(
     if image_log_handler and prepare_batch is not None:
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, image_log_handler(model, prepare_batch))
     if wandb_log_handler:
-        evaluator.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
+        evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: wandb_log_handler(engine))
+        # evaluator.add_event_handler(Events.EPOCH_COMPLETED, wandb_log_handler)
         # evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: wandb_log_handler(engine, epoch=engine.state.epoch))
-        # evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: wandb_log_handler(engine))
 
     def get_score_function():
         metric = config.get("early_stop", {}).get("metric", "val_auc")
@@ -391,8 +407,9 @@ def wandb_log_handler(engine):
     # Try to get trainer's epoch if present, else fallback
     epoch = getattr(engine.state, "trainer_epoch", engine.state.epoch)
     log_data = {}
+    print("\n[wandb_log_handler] metrics dict:")
     for key, value in engine.state.metrics.items():
-        print(f"[wandb_log_handler] key: {key}, value: {value}")
+        print(f"[wandb_log_handler] key: {key}, value: {value}  (type={type(value)})")
         try:
             if hasattr(value, "as_tensor"):
                 value = value.as_tensor()
@@ -417,11 +434,10 @@ def wandb_log_handler(engine):
             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
 
     log_data["epoch"] = epoch
-    print(f"[wandb_log_handler] Final log_data dict: {log_data}")
-    wandb.log(log_data, step=epoch)
-
     # log_data["epoch"] = engine.state.epoch
-    # wandb.log(log_data)
+    print(f"[wandb_log_handler] Final log_data dict: {log_data}")
+    # wandb.log(log_data, step=epoch)
+    wandb.log(log_data)
 
     # log_data["epoch"] = epoch if epoch is not None else engine.state.epoch
     # wandb.log(log_data, step=log_data["epoch"])
