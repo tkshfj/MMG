@@ -4,7 +4,7 @@ from torch.optim import Adam, SGD, RMSprop, Optimizer
 from monai.networks.nets import DenseNet121, UNet, ViT, SwinUNETR
 from models.simple_cnn import SimpleCNN
 from models.multitask_unet import MultiTaskUNet
-from model_protocol import ModelContextProtocol
+from model_protocol import ModelRegistryProtocol
 from metrics_utils import (
     cls_output_transform,
     auc_output_transform,
@@ -12,7 +12,7 @@ from metrics_utils import (
 )
 
 
-class BaseModel(ModelContextProtocol):
+class BaseModel(ModelRegistryProtocol):
     def get_output_transform(self):
         # Default: use classification output transform
         return self.get_cls_output_transform()
@@ -279,7 +279,7 @@ class SwinUNETRModel(BaseModel):
 
 
 # Model registry
-MODEL_REGISTRY: Dict[str, ModelContextProtocol] = {
+MODEL_REGISTRY: Dict[str, ModelRegistryProtocol] = {
     "simple_cnn": SimpleCNNModel(),
     "densenet121": DenseNet121Model(),
     "unet": UNetModel(),

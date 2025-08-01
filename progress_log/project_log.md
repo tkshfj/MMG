@@ -5,6 +5,7 @@
 - Migrate to configuration-driven, modular MONAI/Ignite pipeline
 - Update all references to use "modular MONAI/Ignite pipeline" instead of "MCP"
   - Locate and replace all incorrect uses of "MCP" in reports and log entries
+  - Rename ModelContextProtocol to ModelRegistryProtocol in codebase
 
 # 2025-07-31
 - Report: Model Context Protocol and Model Registry Refactoring

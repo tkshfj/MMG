@@ -1,4 +1,4 @@
-from model_protocol import ModelContextProtocol
+from model_protocol import ModelRegistryProtocol
 from typing import Dict
 from model_utils import (
     SimpleCNNModel,
@@ -9,7 +9,7 @@ from model_utils import (
     SwinUNETRModel,
 )
 
-MODEL_REGISTRY: Dict[str, ModelContextProtocol] = {
+MODEL_REGISTRY: Dict[str, ModelRegistryProtocol] = {
     "simple_cnn": SimpleCNNModel(),
     "densenet121": DenseNet121Model(),
     "unet": UNetModel(),

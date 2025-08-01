@@ -3,7 +3,7 @@ from typing import Any, Callable, Dict, List
 from abc import ABC, abstractmethod
 
 
-class ModelContextProtocol(ABC):
+class ModelRegistryProtocol(ABC):
     @abstractmethod
     def build_model(self, config: Any) -> Any:
         pass
