@@ -1,6 +1,7 @@
 # metrics_utils.py
 import torch
 import logging
+from ignite.metrics import Accuracy, Loss, ConfusionMatrix, ROC_AUC, DiceCoefficient, JaccardIndex
 from eval_utils import get_classification_metrics, get_segmentation_metrics
 
 
@@ -139,71 +140,62 @@ def attach_metrics(
     """
     Attach classification and/or segmentation metrics to evaluator based on task,
     available output transforms, and actual presence of label/mask in validation loader.
-    Ensures all metrics use consistent Wandb keys.
     """
-    from ignite.metrics import Accuracy, Loss, ConfusionMatrix, ROC_AUC, DiceCoefficient, JaccardIndex
-    from eval_utils import get_classification_metrics  # get_segmentation_metrics
-
     task = config.get("task", "multitask") if config else "multitask"
     has_label = (val_loader is None) or _validate_key_in_dataset(val_loader, "label.label")
     has_mask = (val_loader is None) or _validate_key_in_dataset(val_loader, "label.mask")
 
-    # Classification Metrics
-    if task in ("classification", "multitask"):
-        if cls_output_transform is not None and has_label:
-            Accuracy(output_transform=cls_output_transform).attach(evaluator, "val_acc")
-            ROC_AUC(output_transform=auc_output_transform or cls_output_transform).attach(evaluator, "val_auc")
-            Loss(
-                loss_fn=get_classification_metrics()["loss"],
-                output_transform=cls_output_transform
-            ).attach(evaluator, "val_loss")
-            ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform).attach(evaluator, "val_cls_confmat")
-            logging.info("Attached classification metrics: val_acc, val_auc, val_loss, val_cls_confmat")
-        else:
-            logging.warning("No label data or output_transform found. Classification metrics not attached.")
+    # Attach classification metrics
+    if task in ("classification", "multitask") and cls_output_transform is not None and has_label:
+        Accuracy(output_transform=cls_output_transform).attach(evaluator, "val_acc")
+        ROC_AUC(output_transform=auc_output_transform or cls_output_transform).attach(evaluator, "val_auc")
+        Loss(
+            loss_fn=get_classification_metrics()["loss"],
+            output_transform=cls_output_transform
+        ).attach(evaluator, "val_loss")
+        ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform).attach(evaluator, "val_cls_confmat")
+        logging.info("Attached classification metrics: val_acc, val_auc, val_loss, val_cls_confmat")
+    elif task in ("classification", "multitask"):
+        logging.warning("No label data or output_transform found. Classification metrics not attached.")
 
-    # Segmentation Metrics
-    if task in ("segmentation", "multitask"):
-        if seg_output_transform_for_metrics is not None and has_mask:
-            cm = ConfusionMatrix(num_classes=num_classes, output_transform=seg_output_transform_for_metrics)
-            DiceCoefficient(cm).attach(evaluator, "val_dice")
-            JaccardIndex(cm).attach(evaluator, "val_iou")
-            logging.info("Attached segmentation metrics: val_dice, val_iou")
-        else:
-            logging.warning("No mask data or output_transform found. Segmentation metrics not attached.")
-
-    # Optional: Print attached metrics for debugging
-    print("[attach_metrics] Final attached metrics:", evaluator.state.metrics.keys() if hasattr(evaluator, 'state') else "not available")
+    # Attach segmentation metrics
+    if task in ("segmentation", "multitask") and seg_output_transform_for_metrics is not None and has_mask:
+        cm = ConfusionMatrix(num_classes=num_classes, output_transform=seg_output_transform_for_metrics)
+        # debug_transform = debug_output_transform(seg_output_transform_for_metrics)
+        # cm = ConfusionMatrix(num_classes=num_classes, output_transform=debug_transform)
+        DiceCoefficient(cm).attach(evaluator, "val_dice")
+        JaccardIndex(cm).attach(evaluator, "val_iou")
+        logging.info("Attached segmentation metrics: val_dice, val_iou")
+    elif task in ("segmentation", "multitask"):
+        logging.warning("No mask data or output_transform found. Segmentation metrics not attached.")
 
 
 # Multitask Loss
 def multitask_loss(y_pred, y_true):
-    """Handles both dict (training) and tensor (metric) cases."""
-    # If y_true is a dict (from training step)
-    if isinstance(y_true, dict):
-        class_logits, seg_out = None, None
-        if isinstance(y_pred, tuple):
-            if len(y_pred) == 2:
-                class_logits, seg_out = y_pred
-            elif len(y_pred) == 1:
-                class_logits, seg_out = y_pred[0], None
-        elif isinstance(y_pred, dict):
-            class_logits = y_pred.get("label", None)
-            seg_out = y_pred.get("mask", None)
+    """
+    Combined segmentation + classification loss for multitask, segmentation-only, or classification-only tasks.
+    Accepts:
+        - y_pred: tuple or dict, model outputs (e.g., (class_logits, seg_out) or just logits/mask)
+        - y_true: dict, must include 'label' and/or 'mask' as appropriate
+    """
+    if isinstance(y_pred, tuple):
+        if len(y_pred) == 2:
+            class_logits, seg_out = y_pred
+        elif len(y_pred) == 1:
+            class_logits, seg_out = y_pred[0], None
         else:
             class_logits, seg_out = y_pred, None
-
-        loss = 0.0
-        if "label" in y_true and class_logits is not None:
-            loss += get_classification_metrics()["loss"](class_logits, y_true["label"])
-        if "mask" in y_true and seg_out is not None:
-            loss += get_segmentation_metrics()["loss"](seg_out, y_true["mask"])
-        if loss == 0.0:
-            raise ValueError(f"No valid targets found in y_true: keys={list(y_true.keys())}")
-        return loss
-    # If y_true is a tensor (from Ignite metric)
-    elif torch.is_tensor(y_true):
-        # Assume classification-only, match y_pred shape
-        return get_classification_metrics()["loss"](y_pred, y_true)
+    elif isinstance(y_pred, dict):
+        class_logits = y_pred.get("label", None)
+        seg_out = y_pred.get("mask", None)
     else:
-        raise TypeError(f"Unsupported y_true type for multitask_loss: {type(y_true)}")
+        class_logits, seg_out = y_pred, None
+
+    loss = 0.0
+    if "label" in y_true and class_logits is not None:
+        loss += get_classification_metrics()["loss"](class_logits, y_true["label"])
+    if "mask" in y_true and seg_out is not None:
+        loss += get_segmentation_metrics()["loss"](seg_out, y_true["mask"])
+    if loss == 0.0:
+        raise ValueError(f"No valid targets found in y_true: keys={list(y_true.keys())}")
+    return loss

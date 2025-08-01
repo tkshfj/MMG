@@ -1,5 +1,11 @@
 # Project Log
 
+# 2025-08-01
+- Debug configuration-driven, modular MONAI/Ignite pipeline
+- Migrate to configuration-driven, modular MONAI/Ignite pipeline
+- Update all references to use "modular MONAI/Ignite pipeline" instead of "MCP"
+  - Locate and replace all incorrect uses of "MCP" in reports and log entries
+
 # 2025-07-31
 - Report: Model Context Protocol and Model Registry Refactoring
 - Report: Model Context Protocol (MCP) Integration in MONAI/Ignite Project
