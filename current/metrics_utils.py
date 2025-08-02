@@ -5,18 +5,9 @@ from eval_utils import get_classification_metrics, get_segmentation_metrics
 
 
 # Output Transforms for Accuracy, ConfusionMatrix
-
 def cls_output_transform(output):
-    """
-    Robust output transform for Ignite metrics.
-    Returns (y_pred, y), both as 1D tensors of shape (N,) if possible.
-    - Converts one-hot y to class indices.
-    - Squeezes y to 1D.
-    - Accepts tuple, list, or dict outputs.
-    """
     import torch
-
-    # Unpack common cases
+    # Unpack output
     if isinstance(output, (tuple, list)):
         if len(output) == 2:
             y_pred, y = output
@@ -31,8 +22,7 @@ def cls_output_transform(output):
             raise ValueError(f"Cannot extract y_pred and y from dict output: keys={output.keys()}")
     else:
         raise ValueError(f"Unexpected output type in metric output_transform: {type(output)}")
-
-    # Extract tensors from nested dicts (for y_pred/y)
+    # Handle nested dicts
     if isinstance(y_pred, dict):
         for k in ("logits", "pred", "output"):
             if k in y_pred:
@@ -47,25 +37,21 @@ def cls_output_transform(output):
                 break
         else:
             raise ValueError(f"Could not extract tensor from y dict: {y}")
-
-    # Convert to tensors if not already
-    y_pred = torch.as_tensor(y_pred)
-    y = torch.as_tensor(y)
-
-    # Convert one-hot to class indices if needed (for y)
+    # Handle list of tensors
+    if isinstance(y_pred, list):
+        y_pred = torch.stack([yy if isinstance(yy, torch.Tensor) else torch.as_tensor(yy) for yy in y_pred])
+    if isinstance(y, list):
+        y = torch.stack([yy if isinstance(yy, torch.Tensor) else torch.as_tensor(yy) for yy in y])
+    # Only convert if not already tensor
+    if not isinstance(y_pred, torch.Tensor):
+        y_pred = torch.as_tensor(y_pred)
+    if not isinstance(y, torch.Tensor):
+        y = torch.as_tensor(y)
+    # Convert one-hot y to indices
     if y.ndim == 2 and y.shape[1] > 1:
         y = torch.argmax(y, dim=1)
-    # Squeeze to 1D if shape is (N, 1)
     if y.ndim > 1:
         y = y.view(-1)
-
-    # Optionally, flatten y_pred as well if needed for your metrics
-    # (e.g. if shape is (N, 1), make it (N,))
-    # if y_pred.ndim > 1 and y_pred.shape[1] == 1:
-    #     y_pred = y_pred.view(-1)
-
-    # Debug prints if needed
-    # print(f"[cls_output_transform] y_pred shape: {y_pred.shape}, y shape: {y.shape}")
 
     return y_pred, y
 
