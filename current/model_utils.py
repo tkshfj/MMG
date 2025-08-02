@@ -1,38 +1,38 @@
 # model_utils.py
-from typing import Any, Callable, Dict, List  # Tuple, Type
+from typing import Any, Callable, Dict, List
 from torch.optim import Adam, SGD, RMSprop, Optimizer
-from monai.networks.nets import DenseNet121, UNet, ViT, SwinUNETR
-from models.simple_cnn import SimpleCNN
-from models.multitask_unet import MultiTaskUNet
 from model_protocol import ModelRegistryProtocol
-from metrics_utils import (
-    cls_output_transform,
-    auc_output_transform,
-    seg_output_transform_for_confmat,
-)
 
 
 class BaseModel(ModelRegistryProtocol):
+    from metrics_utils import (
+        cls_output_transform,
+        auc_output_transform,
+        seg_output_transform_for_confmat,
+    )
+
     def get_output_transform(self):
         # Default: use classification output transform
         return self.get_cls_output_transform()
 
     def get_cls_output_transform(self):
-        return cls_output_transform
+        return self.cls_output_transform
 
     def get_auc_output_transform(self):
-        return auc_output_transform
+        return self.auc_output_transform
 
     def get_seg_output_transform(self):
-        return seg_output_transform_for_confmat
+        return self.seg_output_transform_for_confmat
 
 
 # SimpleCNN
 class SimpleCNNModel(BaseModel):
+    from models.simple_cnn import SimpleCNN
+
     def build_model(self, config: Any) -> Any:
         in_channels = getattr(config, "in_channels", 1)
         num_classes = getattr(config, "num_classes", 2)
-        return SimpleCNN(in_channels=in_channels, num_classes=num_classes)
+        return self.SimpleCNN(in_channels=in_channels, num_classes=num_classes)
 
     def get_supported_tasks(self) -> List[str]:
         return ["classification"]
@@ -64,8 +64,10 @@ class SimpleCNNModel(BaseModel):
 
 # DenseNet121
 class DenseNet121Model(BaseModel):
+    from monai.networks.nets import DenseNet121
+
     def build_model(self, config: Any) -> Any:
-        return DenseNet121(
+        return self.DenseNet121(
             spatial_dims=2,
             in_channels=getattr(config, "in_channels", 1),
             out_channels=getattr(config, "out_channels", 1),
@@ -107,8 +109,10 @@ class DenseNet121Model(BaseModel):
 
 # UNet
 class UNetModel(BaseModel):
+    from monai.networks.nets import UNet
+
     def build_model(self, config: Any) -> Any:
-        return UNet(
+        return self.UNet(
             spatial_dims=2,
             in_channels=getattr(config, "in_channels", 1),
             out_channels=getattr(config, "out_channels", 1),
@@ -149,8 +153,10 @@ class UNetModel(BaseModel):
 
 # Multitask UNet
 class MultitaskUNetModel(BaseModel):
+    from models.multitask_unet import MultiTaskUNet
+
     def build_model(self, config: Any) -> Any:
-        return MultiTaskUNet(
+        return self.MultiTaskUNet(
             in_channels=getattr(config, "in_channels", 1),
             out_channels=getattr(config, "out_channels", 1),
             num_class_labels=getattr(config, "num_class_labels", 2),
@@ -191,6 +197,8 @@ class MultitaskUNetModel(BaseModel):
 
 # ViT
 class ViTModel(BaseModel):
+    from monai.networks.nets import ViT
+
     def build_model(self, config: Any) -> Any:
         img_size = tuple(getattr(config, "input_shape", (256, 256)))
         patch_size = getattr(config, "patch_size", 16)
@@ -198,7 +206,7 @@ class ViTModel(BaseModel):
         num_classes = getattr(config, "num_class_labels", 2)
         print(">>> ViT DEBUG:", {"img_size": img_size, "patch_size": patch_size, "in_channels": in_channels})
 
-        return ViT(
+        return self.ViT(
             in_channels=in_channels,
             img_size=img_size,
             patch_size=patch_size,
@@ -222,45 +230,48 @@ class ViTModel(BaseModel):
             return y_pred[0]
         return y_pred
 
-    def get_cls_output_transform(self):
-        def _output_transform(output):
-            # Accept tuple or list: treat both as (y_pred, y)
-            if isinstance(output, (tuple, list)):
-                if len(output) == 2:
-                    y_pred, y = output
-                elif len(output) > 2:
-                    y_pred, y = output[0], output[1]  # Take only the first two
-                else:
-                    raise ValueError(f"Output tuple/list too short: {output}")
-            elif isinstance(output, dict):
-                y_pred = output.get("y_pred") or output.get("pred") or output.get("logits")
-                y = output.get("y") or output.get("label") or output.get("classification")
-                if y_pred is None or y is None:
-                    raise ValueError(f"Cannot extract y_pred and y from dict output: keys={output.keys()}")
-            else:
-                raise ValueError(f"Unexpected output type in metric output_transform: {type(output)}")
-            # If y is still a dict, extract the classification label tensor
-            if isinstance(y, dict):
-                # Use the most likely key(s) for your label tensor
-                y = y.get("label") or y.get("classification") or y.get("class")
-                if y is None:
-                    raise ValueError(f"Could not extract tensor from y dict: {output}")
-            y_pred = self.extract_logits(y_pred)
-            # BEGIN: Ensure y is a torch.Tensor
-            import torch
-            if isinstance(y, int):
-                y = torch.tensor(y)
-            elif isinstance(y, list):
-                y = torch.tensor(y)
-            # You may want to ensure correct dtype as well:
-            if isinstance(y, torch.Tensor) and not torch.is_floating_point(y):
-                y = y.long()
-            return y_pred, y
-        return _output_transform
+    # def get_cls_output_transform(self):
+    #     def _output_transform(output):
+    #         # Accept tuple or list: treat both as (y_pred, y)
+    #         if isinstance(output, (tuple, list)):
+    #             if len(output) == 2:
+    #                 y_pred, y = output
+    #             elif len(output) > 2:
+    #                 y_pred, y = output[0], output[1]  # Take only the first two
+    #             else:
+    #                 raise ValueError(f"Output tuple/list too short: {output}")
+    #         elif isinstance(output, dict):
+    #             y_pred = output.get("y_pred") or output.get("pred") or output.get("logits")
+    #             y = output.get("y") or output.get("label") or output.get("classification")
+    #             if y_pred is None or y is None:
+    #                 raise ValueError(f"Cannot extract y_pred and y from dict output: keys={output.keys()}")
+    #         else:
+    #             raise ValueError(f"Unexpected output type in metric output_transform: {type(output)}")
+    #         # If y is still a dict, extract the classification label tensor
+    #         if isinstance(y, dict):
+    #             # Use the most likely key(s) for your label tensor
+    #             y = y.get("label") or y.get("classification") or y.get("class")
+    #             if y is None:
+    #                 raise ValueError(f"Could not extract tensor from y dict: {output}")
+    #         y_pred = self.extract_logits(y_pred)
+    #         # BEGIN: Ensure y is a torch.Tensor
+    #         import torch
+    #         if not isinstance(y, torch.Tensor):
+    #             y = torch.tensor(y)
+    #         return self.extract_logits(y_pred), y
+    #         # if isinstance(y, int):
+    #         #     y = torch.tensor(y)
+    #         # elif isinstance(y, list):
+    #         #     y = torch.tensor(y)
+    #         # # You may want to ensure correct dtype as well:
+    #         # if isinstance(y, torch.Tensor) and not torch.is_floating_point(y):
+    #         #     y = y.long()
+    #         # return y_pred, y
+    #     return _output_transform
 
-    def get_auc_output_transform(self):
-        # For AUC, identical to classification
-        return self.get_cls_output_transform()
+    # def get_auc_output_transform(self):
+    #     # For AUC, identical to classification
+    #     return self.get_cls_output_transform()
 
     def get_metrics(self) -> Dict[str, Any]:
         from ignite.metrics import Accuracy, ConfusionMatrix, Loss
@@ -311,8 +322,10 @@ class ViTModel(BaseModel):
 
 # SwinUNETR
 class SwinUNETRModel(BaseModel):
+    from monai.networks.nets import SwinUNETR
+
     def build_model(self, config: Any) -> Any:
-        return SwinUNETR(
+        return self.SwinUNETR(
             in_channels=getattr(config, "in_channels", 1),
             out_channels=getattr(config, "out_channels", 1),
             img_size=getattr(config, "img_size", (256, 256)),
