@@ -134,7 +134,30 @@ def auc_output_transform(output):
                 print("[ERROR] NoneType found in labels_list:", labels_list)
                 raise ValueError("One or more labels are None in auc_output_transform.")
 
-            logits = torch.stack([torch.as_tensor(logit) for logit in logits_list])
+            # Before stacking, inspect and convert if needed
+            for i, logit in enumerate(logits_list):
+                if isinstance(logit, list):
+                    logit = torch.tensor(logit)
+                    logits_list[i] = logit
+                elif not isinstance(logit, torch.Tensor):
+                    logit = torch.as_tensor(logit)
+                    logits_list[i] = logit
+                # If still not 1D or 2D, raise error
+                if logit.ndim not in (1, 2):
+                    print(f"[ERROR] Unexpected logit shape at idx {i}: {logit.shape}")
+                    raise ValueError(f"Logit at index {i} is not 1D/2D: shape {logit.shape}")
+            # Assert all shapes match
+            shapes = [logit.shape for logit in logits_list]
+            if len(set(shapes)) != 1:
+                print(f"[ERROR] Inconsistent shapes in logits_list: {shapes}")
+                raise ValueError(f"Inconsistent shapes in logits_list: {shapes}")
+
+            # DEBUG:
+            # for i, logit in enumerate(logits_list):
+            #     print(f"[DEBUG] logits_list[{i}]: type={type(logit)}, value={logit}, shape={getattr(logit, 'shape', None)}")
+            print("DEBUG logits_list shapes:", [getattr(logit, 'shape', None) for logit in logits_list])
+            logits = torch.stack(logits_list)
+            # logits = torch.stack([torch.as_tensor(logit) for logit in logits_list])
             labels = torch.tensor(labels_list, dtype=torch.long, device=logits.device)
 
         else:
