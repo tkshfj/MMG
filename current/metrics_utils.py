@@ -170,7 +170,7 @@ def auc_output_transform(output):
     # Use class 1 probability for binary
     if logits.shape[1] == 2:
         probs = torch.softmax(logits, dim=1)
-        prob_class1 = probs[:, 1]
+        prob_class1 = probs[:, 1]  # Probability of class 1; positive_class_probs
     elif logits.shape[1] == 1:
         # Single logit: use sigmoid, prob = torch.sigmoid(logits)
         prob_class1 = torch.sigmoid(logits.squeeze(1))

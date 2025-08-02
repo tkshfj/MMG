@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-08-03
+- Debug: AUC Output Transform
+
 # 2025-08-02
 - Refactor: Modular Model Registry Protocol Pipeline
 - Debug: Classification Output Transform
