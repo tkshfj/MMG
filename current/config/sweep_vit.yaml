@@ -6,21 +6,29 @@ metric:
   goal: maximize
 
 parameters:
-  # Experiment settings
+  # Core experiment settings
   architecture:
     value: vit
   task:
-    value: multitask
+    value: classification
   run_cap:
     value: 20
+
+  # Data settings
+  input_shape:
+    value: [256, 256]
+  in_channels:
+    value: 1
+  patch_size:
+    value: 16  # or [16, 16]
+  num_class_labels:
+    value: 2
   num_workers:
-    value: 12
+    value: 4
 
   # Fixed hyperparameters
   epochs:
     value: 40
-  input_shape:
-    value: [256, 256]
   base_learning_rate:
     value: 0.0002
 

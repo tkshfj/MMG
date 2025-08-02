@@ -141,7 +141,8 @@ def attach_metrics(
     available output transforms, and actual presence of label/mask in validation loader.
     Ensures all metrics use consistent Wandb keys.
     """
-    from ignite.metrics import Accuracy, Loss, ConfusionMatrix, ROC_AUC, DiceCoefficient, JaccardIndex
+    from ignite.metrics import Accuracy, Loss, ConfusionMatrix, DiceCoefficient, JaccardIndex
+    from ignite.metrics.roc_auc import ROC_AUC
     from eval_utils import get_classification_metrics  # get_segmentation_metrics
 
     task = config.get("task", "multitask") if config else "multitask"

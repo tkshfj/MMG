@@ -38,7 +38,8 @@ class SimpleCNNModel(BaseModel):
         return ["classification"]
 
     def get_metrics(self) -> Dict[str, Any]:
-        from ignite.metrics import Accuracy, ROC_AUC, ConfusionMatrix, Loss
+        from ignite.metrics import Accuracy, ConfusionMatrix, Loss
+        from ignite.metrics.roc_auc import ROC_AUC
         num_classes = getattr(self, "num_class_labels", 2)
         return {
             "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
@@ -75,7 +76,8 @@ class DenseNet121Model(BaseModel):
         return ["classification"]
 
     def get_metrics(self) -> Dict[str, Any]:
-        from ignite.metrics import Accuracy, ROC_AUC, ConfusionMatrix, Loss
+        from ignite.metrics import Accuracy, ConfusionMatrix, Loss
+        from ignite.metrics.roc_auc import ROC_AUC
         num_classes = getattr(self, "num_class_labels", 2)
         return {
             "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
@@ -159,7 +161,8 @@ class MultitaskUNetModel(BaseModel):
         return ["classification", "segmentation", "multitask"]
 
     def get_metrics(self) -> Dict[str, Any]:
-        from ignite.metrics import Accuracy, ROC_AUC, ConfusionMatrix, DiceCoefficient, JaccardIndex, Loss
+        from ignite.metrics import Accuracy, ConfusionMatrix, DiceCoefficient, JaccardIndex, Loss
+        from ignite.metrics.roc_auc import ROC_AUC
         # from eval_utils import get_classification_metrics
         num_classes = getattr(self, "num_class_labels", 2)
         cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=self.get_seg_output_transform())
@@ -189,13 +192,19 @@ class MultitaskUNetModel(BaseModel):
 # ViT
 class ViTModel(BaseModel):
     def build_model(self, config: Any) -> Any:
+        img_size = tuple(getattr(config, "input_shape", (256, 256)))
+        patch_size = getattr(config, "patch_size", 16)
+        in_channels = getattr(config, "in_channels", 1)
+        num_classes = getattr(config, "num_class_labels", 2)
+        print(">>> ViT DEBUG:", {"img_size": img_size, "patch_size": patch_size, "in_channels": in_channels})
+
         return ViT(
-            in_channels=getattr(config, "in_channels", 1),
-            img_size=getattr(config, "img_size", 224),
-            patch_size=getattr(config, "patch_size", 16),
-            pos_embed="conv",
+            in_channels=in_channels,
+            img_size=img_size,
+            patch_size=patch_size,
+            spatial_dims=getattr(config, "spatial_dims", 2),
             classification=True,
-            num_classes=getattr(config, "num_class_labels", 2),
+            num_classes=num_classes,
             hidden_size=getattr(config, "hidden_size", 768),
             mlp_dim=getattr(config, "mlp_dim", 3072),
             num_layers=getattr(config, "num_layers", 12),
@@ -206,8 +215,47 @@ class ViTModel(BaseModel):
     def get_supported_tasks(self) -> List[str]:
         return ["classification"]
 
+    @staticmethod
+    def extract_logits(y_pred):
+        """Extracts logits from ViT output (handles tuple or plain tensor)."""
+        if isinstance(y_pred, tuple):
+            return y_pred[0]
+        return y_pred
+
+    def get_cls_output_transform(self):
+        def _output_transform(output):
+            # Accept tuple or list: treat both as (y_pred, y)
+            if isinstance(output, (tuple, list)):
+                if len(output) == 2:
+                    y_pred, y = output
+                elif len(output) > 2:
+                    y_pred, y = output[0], output[1]  # Take only the first two
+                else:
+                    raise ValueError(f"Output tuple/list too short: {output}")
+            elif isinstance(output, dict):
+                y_pred = output.get("y_pred") or output.get("pred") or output.get("logits")
+                y = output.get("y") or output.get("label") or output.get("classification")
+                if y_pred is None or y is None:
+                    raise ValueError(f"Cannot extract y_pred and y from dict output: keys={output.keys()}")
+            else:
+                raise ValueError(f"Unexpected output type in metric output_transform: {type(output)}")
+            # If y is still a dict, extract the classification label tensor
+            if isinstance(y, dict):
+                # Use the most likely key(s) for your label tensor
+                y = y.get("label") or y.get("classification") or y.get("class")
+                if y is None:
+                    raise ValueError(f"Could not extract tensor from y dict: {output}")
+            y_pred = self.extract_logits(y_pred)
+            return y_pred, y
+        return _output_transform
+
+    def get_auc_output_transform(self):
+        # For AUC, identical to classification
+        return self.get_cls_output_transform()
+
     def get_metrics(self) -> Dict[str, Any]:
-        from ignite.metrics import Accuracy, ROC_AUC, ConfusionMatrix, Loss
+        from ignite.metrics import Accuracy, ConfusionMatrix, Loss
+        from ignite.metrics.roc_auc import ROC_AUC
         num_classes = getattr(self, "num_class_labels", 2)
         return {
             "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
@@ -218,17 +266,38 @@ class ViTModel(BaseModel):
 
     def get_loss_fn(self) -> Callable:
         import torch.nn as nn
-        return nn.CrossEntropyLoss()
+
+        def loss_fn(y_pred, y_true):
+            y_pred = self.extract_logits(y_pred)
+            # For classification, y_true might be a dict: {"label": ...}
+            if isinstance(y_true, dict):
+                # Try all possible keys in order of likelihood
+                for key in ["label", "classification", "class"]:
+                    if key in y_true:
+                        y_true = y_true[key]
+                        break
+                # If not found, raise an error
+                else:
+                    raise ValueError(f"Expected key 'label' or 'classification' in y_true dict, got keys: {list(y_true.keys())}")
+            # print(">>> LOSS DEBUG y_pred shape:", getattr(y_pred, "shape", None))
+            # print(">>> LOSS DEBUG y_true shape:", getattr(y_true, "shape", None))
+            return nn.CrossEntropyLoss()(y_pred, y_true)
+        return loss_fn
 
     def get_handler_kwargs(self) -> Dict[str, Any]:
-        # Classification: no segmentation metrics
         return {
             "add_segmentation_metrics": False,
-            "num_classes": getattr(self, "num_class_labels", 1),
+            "num_classes": getattr(self, "num_class_labels", 2),
             "seg_output_transform": self.get_seg_output_transform(),
             "dice_name": "val_dice",
             "iou_name": "val_iou",
         }
+
+    def get_seg_output_transform(self):
+        # No segmentation output for ViT, but keep signature consistent
+        def _noop_transform(output):
+            return output
+        return _noop_transform
 
 
 # SwinUNETR

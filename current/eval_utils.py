@@ -17,30 +17,51 @@ def get_classification_metrics():
 
 
 # Batch preparation function for engines
-def prepare_batch(batch, device=None, non_blocking=False):
+# def prepare_batch(batch, device=None, non_blocking=False):
+def prepare_batch(batch, device=None, non_blocking=False, task="multitask"):
     """
-    Prepare inputs and nested labels for multitask learning with MONAI/Ignite.
-    Supports nested label dictionaries: batch["label"]["mask"], batch["label"]["label"]
+    Prepare inputs and targets for multitask or classification-only learning.
+    Supports nested label dictionaries: batch["label"]["mask"], batch["label"]["label"].
+        - Returns (images, targets)
+    - If task=="classification", returns (images, class_label_tensor)
+    - If task=="segmentation", returns (images, mask_tensor)
+    - If task=="multitask", returns (images, {"mask": ..., "label": ...})
     """
     images = batch["image"].to(device, non_blocking=non_blocking)
     label_dict = batch.get("label", {})
+
+    # Defensive: allow both dict and tensor (for old/flat datasets)
     if not isinstance(label_dict, dict):
-        raise ValueError(f"Expected 'label' to be a dict, got {type(label_dict)} (batch keys: {list(batch.keys())})")
+        # Flat label case
+        raise ValueError(f"Expected label dict, got {type(label_dict)}")
     # Prepare target dictionary
-    target = {}
-    mask = label_dict.get("mask")
-    class_label = label_dict.get("label")
-    # Ensure mask and class_label are moved to the correct device
-    if mask is not None:
-        target["mask"] = mask.to(device, non_blocking=non_blocking)
-    if class_label is not None:
-        target["label"] = class_label.to(device, non_blocking=non_blocking).long()  # force integer class labels
-    # Ensure at least one target is present
-    if not target:
-        raise ValueError(
-            f"Batch label dictionary contains neither 'mask' nor 'label': keys={list(label_dict.keys())}"
-        )
-    return images, target
+    mask = label_dict.get("mask", None)
+    class_label = label_dict.get("label", None)
+    # mask = label_dict.get("mask")
+    # class_label = label_dict.get("label") or label_dict.get("classification")
+
+    # Prepare targets for different tasks
+    if task == "classification":
+        if class_label is None:
+            raise ValueError("No classification label found in batch['label']")
+        return images, class_label.to(device, non_blocking=non_blocking).long()
+    elif task == "segmentation":
+        if mask is None:
+            raise ValueError("No mask found in batch['label']")
+        return images, mask.to(device, non_blocking=non_blocking)
+    elif task == "multitask":
+        target = {}
+        # Ensure mask and class_label are moved to the correct device
+        if mask is not None:
+            target["mask"] = mask.to(device, non_blocking=non_blocking)
+        if class_label is not None:
+            target["label"] = class_label.to(device, non_blocking=non_blocking).long()  # force integer class labels
+        # Ensure at least one target is present
+        if not target:
+            raise ValueError("Batch label dict contains neither 'mask' nor 'label'")
+        return images, target
+    else:
+        raise ValueError(f"Unknown task type: {task}")
 
 
 # Metric Computation Functions

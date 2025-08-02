@@ -41,6 +41,12 @@ def main(config=None):
         model_class = MODEL_REGISTRY[architecture]
         model = model_class.build_model(config).to(device)
 
+        #  DEBUG
+        x = torch.randn(2, 1, 256, 256)
+        out = model(x)
+        logits = out[0] if isinstance(out, tuple) else out
+        print("DEBUG: logits shape:", logits.shape)
+
         # Get optimizer, loss, metrics, output_transform, handler kwargs
         optimizer = get_optimizer(
             config["optimizer"],
@@ -53,6 +59,16 @@ def main(config=None):
         output_transform = model_class.get_output_transform()
         handler_kwargs = model_class.get_handler_kwargs()
 
+        # Dynamically create a prepare_batch with the correct task argument
+        task = config.get("task", None)
+        if not task:
+            # Try to auto-infer from model_class if not specified
+            task = model_class.get_supported_tasks()[0]
+        assert task in ["classification", "segmentation", "multitask"], f"Unknown task: {task}"
+
+        def task_prepare_batch(batch, device=None, non_blocking=False):
+            return prepare_batch(batch, device=device, non_blocking=non_blocking, task=task)
+
         # Build trainer and evaluator
         trainer = build_trainer(
             device=device,
@@ -61,14 +77,14 @@ def main(config=None):
             network=model,
             optimizer=optimizer,
             loss_function=loss_fn,
-            prepare_batch=prepare_batch
+            prepare_batch=task_prepare_batch
         )
 
         evaluator = build_evaluator(
             device=device,
             val_data_loader=val_loader,
             network=model,
-            prepare_batch=prepare_batch,
+            prepare_batch=task_prepare_batch,
             metrics=metrics,
             output_transform=output_transform
         )
@@ -84,7 +100,7 @@ def main(config=None):
             manual_dice_handler=manual_dice_handler,
             image_log_handler=image_log_handler,
             wandb_log_handler=wandb_log_handler,
-            prepare_batch=prepare_batch,
+            prepare_batch=task_prepare_batch,
             **handler_kwargs
         )
 

@@ -1,13 +1,16 @@
+# requirements.txt
+einops==0.8.1
 matplotlib==3.10.3
-monai==1.5.0
+monai[all]==1.5.0         # ViT, SwinUNETR, etc., needs >=1.2
 numpy==1.26.4
 opencv-python==4.11.0.86
 pandas==2.2.3
 pydicom==3.0.1
-pytorch-ignite==0.5.2
+pytorch-ignite==0.5.2      # ROC_AUC needs >=0.4.0 (use >=0.5.2 for full compatibility)
 scikit-learn==1.6.1
 seaborn==0.13.2
 tensorflow==2.15.0
 # tensorflow-macos==2.15.0
-torch==2.6.0
+torch==2.6.0               # Compatible with MONAI 1.5.0
 wandb
+# torchvision>=0.15.2      # Uncomment if you use TorchVisionViTWrapper
