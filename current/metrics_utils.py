@@ -141,6 +141,10 @@ def auc_output_transform(output):
     else:
         raise ValueError(f"Unexpected output type in auc_output_transform: {type(output)}")
 
+    # DEBUG:
+    # print(f"DEBUG AUC: logits shape {logits.shape}, labels shape {labels.shape}")
+    # print(f"DEBUG AUC: logits {logits}, labels {labels}")
+
     # At this point, logits should be [B, C] or [C], labels [B] or []
     if not isinstance(logits, torch.Tensor):
         logits = torch.as_tensor(logits)
