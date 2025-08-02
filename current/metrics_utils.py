@@ -81,63 +81,58 @@ def cls_output_transform(output):
 
 
 # for ROC AUC
-# def auc_output_transform(output):
-#     """For binary ROC AUC: returns (prob_class1, true_class)"""
-#     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
-#         logits = torch.stack([x['pred'][0] for x in output])   # [B, 2]
-#         labels = torch.tensor(
-#             [x['label'].get('label') for x in output if 'label' in x['label']],
-#             dtype=torch.long, device=logits.device
-#         )
-#         # Convert logits to probability for class 1
-#         probs = torch.softmax(logits, dim=1)   # [B, 2]
-#         prob_class1 = probs[:, 1]              # [B]
-#         labels = labels.view(-1)
-#         return prob_class1, labels
-#     raise ValueError("auc_output_transform expects a list of dicts with 'pred' and 'label' keys.")
 def auc_output_transform(output):
     """
     Extracts (prob_class1, class_idx) from model output for ROC_AUC metric.
-    Handles tuple/list, dict, and nested dict structures robustly.
+    Handles tuple/list, dict, multitask (tuple/list) and nested dict structures robustly.
     """
     import torch
 
-    def unwrap(obj, keys=("y_pred", "pred", "logits", "output")):
+    def extract_logits(obj):
+        # For multitask (tuple/list): pick first (classification) head
+        if isinstance(obj, (tuple, list)):
+            return extract_logits(obj[0])
+        # For dict: unwrap by known keys recursively
         while isinstance(obj, dict):
-            for k in keys:
+            for k in ("logits", "pred", "output", "y_pred"):
                 if k in obj:
                     obj = obj[k]
                     break
             else:
-                # If dict but none of the keys match, fail
                 raise ValueError(f"Cannot extract tensor from dict: {obj}")
         return obj
 
-    # Unpack the output: handle tuple, list, dict, or raw tensor
-    if isinstance(output, (tuple, list)):
-        # If list of dicts, old collate format
-        if all(isinstance(x, dict) for x in output):
-            # Each x in output should have "pred" and "label"
-            logits = torch.stack([unwrap(x.get("pred", x.get("logits")), ("logits", "pred")) for x in output])
-            labels = []
-            for x in output:
-                lbl = x.get("label")
-                if isinstance(lbl, dict):
-                    # Try to extract "label" or "class" key
-                    for key in ("label", "classification", "class"):
-                        if key in lbl:
-                            lbl = lbl[key]
-                            break
-                labels.append(lbl)
-            labels = torch.tensor(labels, dtype=torch.long, device=logits.device)
-        else:
-            # Modern collate: output = (y_pred, y)
-            if len(output) < 2:
-                raise ValueError(f"Output tuple/list too short for auc_output_transform: {output}")
-            logits, labels = output[0], output[1]
+    def extract_label(obj):
+        # For dict: unwrap by known keys recursively
+        while isinstance(obj, dict):
+            for k in ("label", "classification", "class", "value"):
+                if k in obj:
+                    obj = obj[k]
+                    break
+            else:
+                raise ValueError(f"Cannot extract label tensor from dict: {obj}")
+        return obj
+
+    # Handle list of dicts (DataLoader collate style)
+    if isinstance(output, list) and all(isinstance(x, dict) for x in output):
+        logits_list = []
+        labels_list = []
+        for x in output:
+            logits = extract_logits(x.get("pred") or x.get("logits"))
+            labels = extract_label(x.get("label") or x.get("y") or x.get("classification"))
+            logits_list.append(logits)
+            labels_list.append(labels)
+        # Ensure all logits are tensors
+        logits = torch.stack([logit if isinstance(logit, torch.Tensor) else torch.as_tensor(logit) for logit in logits_list])
+        labels = torch.tensor(labels_list, dtype=torch.long, device=logits.device)
+    # Handle tuple/list (modern, batched): output = (y_pred, y)
+    elif isinstance(output, (tuple, list)) and len(output) >= 2:
+        logits = extract_logits(output[0])
+        labels = extract_label(output[1])
+    # Handle dict (single sample)
     elif isinstance(output, dict):
-        logits = unwrap(output.get("y_pred") or output.get("pred") or output.get("logits"), ("logits", "pred", "output"))
-        labels = unwrap(output.get("y") or output.get("label") or output.get("classification"), ("label", "classification", "class", "value"))
+        logits = extract_logits(output.get("y_pred") or output.get("pred") or output.get("logits"))
+        labels = extract_label(output.get("y") or output.get("label") or output.get("classification"))
     else:
         raise ValueError(f"Unexpected output type in auc_output_transform: {type(output)}")
 
@@ -145,32 +140,29 @@ def auc_output_transform(output):
     # print(f"DEBUG AUC: logits shape {logits.shape}, labels shape {labels.shape}")
     # print(f"DEBUG AUC: logits {logits}, labels {labels}")
 
-    # At this point, logits should be [B, C] or [C], labels [B] or []
+    # Make sure both logits and labels are tensors
     if not isinstance(logits, torch.Tensor):
         logits = torch.as_tensor(logits)
     if not isinstance(labels, torch.Tensor):
         labels = torch.as_tensor(labels)
 
-    # AUC expects: (prob_class1, labels) for binary, (B, C), (B,)
-    if logits.ndim == 1:  # [C]
+    # Ensure correct shapes
+    if logits.ndim == 1:
         logits = logits.unsqueeze(0)
     if labels.ndim == 0:
         labels = labels.unsqueeze(0)
     if labels.ndim == 2 and labels.shape[1] > 1:
         labels = torch.argmax(labels, dim=1)
 
-    # Use class 1 probability for binary
+    # For ROC AUC (binary): use probability of class 1
     if logits.shape[1] == 2:
         probs = torch.softmax(logits, dim=1)
         prob_class1 = probs[:, 1]
     elif logits.shape[1] == 1:
-        # Single logit: use sigmoid, prob = torch.sigmoid(logits)
         prob_class1 = torch.sigmoid(logits.squeeze(1))
     else:
-        # Multi-class: just use softmax as probs
-        prob_class1 = torch.softmax(logits, dim=1)
+        prob_class1 = torch.softmax(logits, dim=1)  # multiclass
 
-    # For ignite.ROC_AUC, expected: (probs, labels)
     return prob_class1, labels
 
 
