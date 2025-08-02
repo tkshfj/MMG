@@ -7,6 +7,8 @@ from eval_utils import get_classification_metrics, get_segmentation_metrics
 # Output Transforms for Accuracy, ConfusionMatrix
 def cls_output_transform(output):
     import torch
+    # DEBUG: print the output structure to help debugging!
+    # print("DEBUG output to cls_output_transform:", type(output), output)
     # Unpack output
     if isinstance(output, (tuple, list)):
         if len(output) == 2:
@@ -22,7 +24,7 @@ def cls_output_transform(output):
             raise ValueError(f"Cannot extract y_pred and y from dict output: keys={output.keys()}")
     else:
         raise ValueError(f"Unexpected output type in metric output_transform: {type(output)}")
-    # Handle nested dicts
+    # Handle nested dicts (common for y_pred, y)
     if isinstance(y_pred, dict):
         for k in ("logits", "pred", "output"):
             if k in y_pred:
@@ -37,17 +39,27 @@ def cls_output_transform(output):
                 break
         else:
             raise ValueError(f"Could not extract tensor from y dict: {y}")
-    # Handle list of tensors
+
+    # If y_pred or y is a list, filter out non-classification tensors (e.g., ignore 3D/4D tensors)
+    def is_classification_tensor(t):
+        return isinstance(t, torch.Tensor) and (t.ndim <= 2)
+
     if isinstance(y_pred, list):
-        y_pred = torch.stack([yy if isinstance(yy, torch.Tensor) else torch.as_tensor(yy) for yy in y_pred])
+        filtered = [yy for yy in y_pred if is_classification_tensor(yy)]
+        if not filtered:
+            raise ValueError(f"No valid classification logits in y_pred list: {[getattr(yy,'shape',None) for yy in y_pred]}")
+        y_pred = torch.stack(filtered)
     if isinstance(y, list):
-        y = torch.stack([yy if isinstance(yy, torch.Tensor) else torch.as_tensor(yy) for yy in y])
-    # Only convert if not already tensor
+        filtered = [yy for yy in y if is_classification_tensor(yy)]
+        if not filtered:
+            raise ValueError(f"No valid class labels in y list: {[getattr(yy,'shape',None) for yy in y]}")
+        y = torch.stack(filtered)
+    # Convert to tensor if not already
     if not isinstance(y_pred, torch.Tensor):
         y_pred = torch.as_tensor(y_pred)
     if not isinstance(y, torch.Tensor):
         y = torch.as_tensor(y)
-    # Convert one-hot y to indices
+    # Convert one-hot y to indices if necessary
     if y.ndim == 2 and y.shape[1] > 1:
         y = torch.argmax(y, dim=1)
     if y.ndim > 1:
