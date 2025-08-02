@@ -246,6 +246,15 @@ class ViTModel(BaseModel):
                 if y is None:
                     raise ValueError(f"Could not extract tensor from y dict: {output}")
             y_pred = self.extract_logits(y_pred)
+            # BEGIN: Ensure y is a torch.Tensor
+            import torch
+            if isinstance(y, int):
+                y = torch.tensor(y)
+            elif isinstance(y, list):
+                y = torch.tensor(y)
+            # You may want to ensure correct dtype as well:
+            if isinstance(y, torch.Tensor) and not torch.is_floating_point(y):
+                y = y.long()
             return y_pred, y
         return _output_transform
 

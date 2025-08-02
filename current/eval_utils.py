@@ -29,7 +29,6 @@ def prepare_batch(batch, device=None, non_blocking=False, task="multitask"):
     """
     images = batch["image"].to(device, non_blocking=non_blocking)
     label_dict = batch.get("label", {})
-
     # Defensive: allow both dict and tensor (for old/flat datasets)
     if not isinstance(label_dict, dict):
         # Flat label case
@@ -37,26 +36,42 @@ def prepare_batch(batch, device=None, non_blocking=False, task="multitask"):
     # Prepare target dictionary
     mask = label_dict.get("mask", None)
     class_label = label_dict.get("label", None)
-    # mask = label_dict.get("mask")
-    # class_label = label_dict.get("label") or label_dict.get("classification")
 
     # Prepare targets for different tasks
+    import torch
     if task == "classification":
         if class_label is None:
             raise ValueError("No classification label found in batch['label']")
-        return images, class_label.to(device, non_blocking=non_blocking).long()
+        # return images, class_label.to(device, non_blocking=non_blocking).long()
+        if isinstance(class_label, int):
+            class_label = torch.tensor(class_label)
+        elif isinstance(class_label, list):
+            class_label = torch.tensor(class_label)
+        class_label = class_label.to(device, non_blocking=non_blocking).long()
+        return images, class_label
     elif task == "segmentation":
         if mask is None:
             raise ValueError("No mask found in batch['label']")
-        return images, mask.to(device, non_blocking=non_blocking)
+        if isinstance(mask, int):
+            mask = torch.tensor(mask)
+        elif isinstance(mask, list):
+            mask = torch.tensor(mask)
+        mask = mask.to(device, non_blocking=non_blocking)
+        return images, mask
     elif task == "multitask":
         target = {}
-        # Ensure mask and class_label are moved to the correct device
         if mask is not None:
+            if isinstance(mask, int):
+                mask = torch.tensor(mask)
+            elif isinstance(mask, list):
+                mask = torch.tensor(mask)
             target["mask"] = mask.to(device, non_blocking=non_blocking)
         if class_label is not None:
-            target["label"] = class_label.to(device, non_blocking=non_blocking).long()  # force integer class labels
-        # Ensure at least one target is present
+            if isinstance(class_label, int):
+                class_label = torch.tensor(class_label)
+            elif isinstance(class_label, list):
+                class_label = torch.tensor(class_label)
+            target["label"] = class_label.to(device, non_blocking=non_blocking).long()
         if not target:
             raise ValueError("Batch label dict contains neither 'mask' nor 'label'")
         return images, target
