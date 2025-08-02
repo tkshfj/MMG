@@ -2,27 +2,25 @@
 from typing import Any, Callable, Dict, List
 from torch.optim import Adam, SGD, RMSprop, Optimizer
 from model_protocol import ModelRegistryProtocol
+from metrics_utils import (
+    cls_output_transform,
+    auc_output_transform,
+    seg_output_transform_for_confmat,
+)
 
 
 class BaseModel(ModelRegistryProtocol):
-    from metrics_utils import (
-        cls_output_transform,
-        auc_output_transform,
-        seg_output_transform_for_confmat,
-    )
-
     def get_output_transform(self):
-        # Default: use classification output transform
-        return self.get_cls_output_transform()
+        return cls_output_transform
 
     def get_cls_output_transform(self):
-        return self.cls_output_transform
+        return cls_output_transform
 
     def get_auc_output_transform(self):
-        return self.auc_output_transform
+        return auc_output_transform
 
     def get_seg_output_transform(self):
-        return self.seg_output_transform_for_confmat
+        return seg_output_transform_for_confmat
 
 
 # SimpleCNN
@@ -40,12 +38,15 @@ class SimpleCNNModel(BaseModel):
     def get_metrics(self) -> Dict[str, Any]:
         from ignite.metrics import Accuracy, ConfusionMatrix, Loss
         from ignite.metrics.roc_auc import ROC_AUC
+        # Consistent reference for transforms
+        cls_output_transform = self.get_cls_output_transform()
+        auc_output_transform = self.get_auc_output_transform()
         num_classes = getattr(self, "num_class_labels", 2)
         return {
-            "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
-            "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
-            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
-            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
+            "val_acc": Accuracy(output_transform=cls_output_transform),
+            "val_auc": ROC_AUC(output_transform=auc_output_transform),
+            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=cls_output_transform),
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform),
         }
 
     def get_loss_fn(self) -> Callable:
@@ -80,17 +81,16 @@ class DenseNet121Model(BaseModel):
     def get_metrics(self) -> Dict[str, Any]:
         from ignite.metrics import Accuracy, ConfusionMatrix, Loss
         from ignite.metrics.roc_auc import ROC_AUC
+        # Consistent reference for transforms
+        cls_output_transform = self.get_cls_output_transform()
+        auc_output_transform = self.get_auc_output_transform()
         num_classes = getattr(self, "num_class_labels", 2)
         return {
-            "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
-            "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
-            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
-            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
+            "val_acc": Accuracy(output_transform=cls_output_transform),
+            "val_auc": ROC_AUC(output_transform=auc_output_transform),
+            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=cls_output_transform),
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform),
         }
-
-    def get_output_transform(self):
-        # Use segmentation output transform
-        return self.get_seg_output_transform()
 
     def get_loss_fn(self) -> Callable:
         import torch.nn as nn
@@ -130,12 +130,23 @@ class UNetModel(BaseModel):
 
     def get_metrics(self) -> Dict[str, Any]:
         from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
-        num_classes = getattr(self, "out_channels", 1)
-        cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=self.get_seg_output_transform())
+        num_classes = getattr(self, "out_channels", getattr(self, "num_classes", 1))
+        seg_output_transform = self.get_seg_output_transform()
+        cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=seg_output_transform)
         return {
             "dice": DiceCoefficient(cm=cm_metric),
-            "iou": JaccardIndex(cm=cm_metric)
+            "iou": JaccardIndex(cm=cm_metric),
+            # "confmat": cm_metric,  # (optional)
         }
+
+    # def get_metrics(self) -> Dict[str, Any]:
+    #     from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
+    #     num_classes = getattr(self, "out_channels", 1)
+    #     cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=self.get_seg_output_transform())
+    #     return {
+    #         "dice": DiceCoefficient(cm=cm_metric),
+    #         "iou": JaccardIndex(cm=cm_metric)
+    #     }
 
     def get_loss_fn(self) -> Callable:
         from monai.losses import DiceLoss
@@ -169,17 +180,37 @@ class MultitaskUNetModel(BaseModel):
     def get_metrics(self) -> Dict[str, Any]:
         from ignite.metrics import Accuracy, ConfusionMatrix, DiceCoefficient, JaccardIndex, Loss
         from ignite.metrics.roc_auc import ROC_AUC
-        # from eval_utils import get_classification_metrics
+        # Consistent reference for transforms
+        cls_output_transform = self.get_cls_output_transform()
+        auc_output_transform = self.get_auc_output_transform()
+        seg_output_transform = self.get_seg_output_transform()
         num_classes = getattr(self, "num_class_labels", 2)
-        cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=self.get_seg_output_transform())
-        return {
-            "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
-            "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
-            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
-            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
+        # Confusion matrix for segmentation
+        cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=seg_output_transform)
+        metrics = {
+            "val_acc": Accuracy(output_transform=cls_output_transform),
+            "val_auc": ROC_AUC(output_transform=auc_output_transform),
+            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=cls_output_transform),
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform),
             "dice": DiceCoefficient(cm=cm_metric),
             "iou": JaccardIndex(cm=cm_metric),
         }
+        return metrics
+
+    # def get_metrics(self) -> Dict[str, Any]:
+    #     from ignite.metrics import Accuracy, ConfusionMatrix, DiceCoefficient, JaccardIndex, Loss
+    #     from ignite.metrics.roc_auc import ROC_AUC
+    #     # from eval_utils import get_classification_metrics
+    #     num_classes = getattr(self, "num_class_labels", 2)
+    #     cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=self.get_seg_output_transform())
+    #     return {
+    #         "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
+    #         "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
+    #         "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
+    #         "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
+    #         "dice": DiceCoefficient(cm=cm_metric),
+    #         "iou": JaccardIndex(cm=cm_metric),
+    #     }
 
     def get_loss_fn(self) -> Callable:
         from metrics_utils import multitask_loss
@@ -276,12 +307,15 @@ class ViTModel(BaseModel):
     def get_metrics(self) -> Dict[str, Any]:
         from ignite.metrics import Accuracy, ConfusionMatrix, Loss
         from ignite.metrics.roc_auc import ROC_AUC
+        # Consistent reference for transforms
+        cls_output_transform = self.get_cls_output_transform()
+        auc_output_transform = self.get_auc_output_transform()
         num_classes = getattr(self, "num_class_labels", 2)
         return {
-            "val_acc": Accuracy(output_transform=self.get_cls_output_transform()),
-            "val_auc": ROC_AUC(output_transform=self.get_auc_output_transform()),
-            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_cls_output_transform()),
-            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=self.get_cls_output_transform()),
+            "val_acc": Accuracy(output_transform=cls_output_transform),
+            "val_auc": ROC_AUC(output_transform=auc_output_transform),
+            "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=cls_output_transform),
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform),
         }
 
     def get_loss_fn(self) -> Callable:
@@ -343,12 +377,26 @@ class SwinUNETRModel(BaseModel):
 
     def get_metrics(self) -> Dict[str, Any]:
         from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
-        num_classes = getattr(self, "out_channels", 1)
-        cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=self.get_seg_output_transform())
+        num_classes = getattr(self, "out_channels", getattr(self, "num_classes", 1))
+        seg_output_transform = self.get_seg_output_transform()
+        cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=seg_output_transform)
         return {
             "dice": DiceCoefficient(cm=cm_metric),
-            "iou": JaccardIndex(cm=cm_metric)
+            "iou": JaccardIndex(cm=cm_metric),
+            # "confmat": cm_metric,  # (optional)
         }
+
+    # def get_metrics(self) -> Dict[str, Any]:
+    #     from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
+    #     num_classes = getattr(self, "out_channels", 1)
+    #     cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=self.get_seg_output_transform())
+    #     return {
+    #         "dice": DiceCoefficient(cm=cm_metric),
+    #         "iou": JaccardIndex(cm=cm_metric),
+    #         # "confmat": cm_metric,
+    #         # or, add loss if you want to monitor validation loss
+    #         # "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=self.get_seg_output_transform()),
+    #     }
 
     def get_output_transform(self):
         # Use segmentation output transform

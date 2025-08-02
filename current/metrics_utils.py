@@ -5,13 +5,18 @@ from eval_utils import get_classification_metrics, get_segmentation_metrics
 
 
 # Output Transforms for Accuracy, ConfusionMatrix
+
 def cls_output_transform(output):
     """
-    Robust classification output transform: always returns (logits, class indices) as torch.Tensor.
-    Handles output as tuple/list, dict, or common output formats.
+    Robust output transform for Ignite metrics.
+    Returns (y_pred, y), both as 1D tensors of shape (N,) if possible.
+    - Converts one-hot y to class indices.
+    - Squeezes y to 1D.
+    - Accepts tuple, list, or dict outputs.
     """
     import torch
-    # Accept tuple or list: treat both as (y_pred, y)
+
+    # Unpack common cases
     if isinstance(output, (tuple, list)):
         if len(output) == 2:
             y_pred, y = output
@@ -27,24 +32,125 @@ def cls_output_transform(output):
     else:
         raise ValueError(f"Unexpected output type in metric output_transform: {type(output)}")
 
-    # If y is a dict, extract the class label
+    # Extract tensors from nested dicts (for y_pred/y)
+    if isinstance(y_pred, dict):
+        for k in ("logits", "pred", "output"):
+            if k in y_pred:
+                y_pred = y_pred[k]
+                break
+        else:
+            raise ValueError(f"Could not extract tensor from y_pred dict: {y_pred}")
     if isinstance(y, dict):
-        y = y.get("label") or y.get("classification") or y.get("class")
-        if y is None:
-            raise ValueError(f"Could not extract tensor from y dict: {output}")
+        for k in ("label", "classification", "class"):
+            if k in y:
+                y = y[k]
+                break
+        else:
+            raise ValueError(f"Could not extract tensor from y dict: {y}")
 
-    # Coerce to tensor if needed
-    if not isinstance(y, torch.Tensor):
-        y = torch.as_tensor(y)
-    if not isinstance(y_pred, torch.Tensor):
-        y_pred = torch.as_tensor(y_pred)
+    # Convert to tensors if not already
+    y_pred = torch.as_tensor(y_pred)
+    y = torch.as_tensor(y)
 
-    # If labels are accidentally one-hot, convert to class indices
-    if y.ndim == 2 and y.shape[1] == y_pred.shape[1]:
+    # Convert one-hot to class indices if needed (for y)
+    if y.ndim == 2 and y.shape[1] > 1:
         y = torch.argmax(y, dim=1)
-    # Ensure 1D labels, e.g. [B]
-    y = y.view(-1)
+    # Squeeze to 1D if shape is (N, 1)
+    if y.ndim > 1:
+        y = y.view(-1)
+
+    # Optionally, flatten y_pred as well if needed for your metrics
+    # (e.g. if shape is (N, 1), make it (N,))
+    # if y_pred.ndim > 1 and y_pred.shape[1] == 1:
+    #     y_pred = y_pred.view(-1)
+
+    # Debug prints if needed
+    # print(f"[cls_output_transform] y_pred shape: {y_pred.shape}, y shape: {y.shape}")
+
     return y_pred, y
+
+
+# def cls_output_transform(output):
+#     import torch
+#     # Accept tuple or list: treat both as (y_pred, y)
+#     if isinstance(output, (tuple, list)):
+#         if len(output) == 2:
+#             y_pred, y = output
+#         elif len(output) > 2:
+#             y_pred, y = output[0], output[1]
+#         else:
+#             raise ValueError(f"Output tuple/list too short: {output}")
+#     elif isinstance(output, dict):
+#         y_pred = output.get("y_pred") or output.get("pred") or output.get("logits")
+#         y = output.get("y") or output.get("label") or output.get("classification")
+#         if y_pred is None or y is None:
+#             raise ValueError(f"Cannot extract y_pred and y from dict output: keys={output.keys()}")
+#     else:
+#         raise ValueError(f"Unexpected output type in metric output_transform: {type(output)}")
+#     # Handle y_pred: if dict, must extract underlying tensor
+#     if isinstance(y_pred, dict):
+#         # Common: {'logits': tensor, ...}
+#         for k in ("logits", "pred", "output"):
+#             if k in y_pred:
+#                 y_pred = y_pred[k]
+#                 break
+#         else:
+#             raise ValueError(f"Could not extract tensor from y_pred dict: {y_pred}")
+#     if isinstance(y, dict):
+#         for k in ("label", "classification", "class"):
+#             if k in y:
+#                 y = y[k]
+#                 break
+#         else:
+#             raise ValueError(f"Could not extract tensor from y dict: {y}")
+#     # Coerce to tensor if not already
+#     if not isinstance(y_pred, torch.Tensor):
+#         y_pred = torch.as_tensor(y_pred)
+#     if not isinstance(y, torch.Tensor):
+#         y = torch.as_tensor(y)
+#     return y_pred, y
+
+
+# def cls_output_transform(output):
+#     """
+#     Robust classification output transform: always returns (logits, class indices) as torch.Tensor.
+#     Handles output as tuple/list, dict, or common output formats.
+#     """
+#     import torch
+#     # Accept tuple or list: treat both as (y_pred, y)
+#     if isinstance(output, (tuple, list)):
+#         if len(output) == 2:
+#             y_pred, y = output
+#         elif len(output) > 2:
+#             y_pred, y = output[0], output[1]
+#         else:
+#             raise ValueError(f"Output tuple/list too short: {output}")
+#     elif isinstance(output, dict):
+#         y_pred = output.get("y_pred") or output.get("pred") or output.get("logits")
+#         y = output.get("y") or output.get("label") or output.get("classification")
+#         if y_pred is None or y is None:
+#             raise ValueError(f"Cannot extract y_pred and y from dict output: keys={output.keys()}")
+#     else:
+#         raise ValueError(f"Unexpected output type in metric output_transform: {type(output)}")
+
+#     # If y is a dict, extract the class label
+#     if isinstance(y, dict):
+#         y = y.get("label") or y.get("classification") or y.get("class")
+#         if y is None:
+#             raise ValueError(f"Could not extract tensor from y dict: {output}")
+
+#     # Coerce to tensor if needed
+#     if not isinstance(y, torch.Tensor):
+#         y = torch.as_tensor(y)
+#     if not isinstance(y_pred, torch.Tensor):
+#         y_pred = torch.as_tensor(y_pred)
+
+#     # If labels are accidentally one-hot, convert to class indices
+#     if y.ndim == 2 and y.shape[1] == y_pred.shape[1]:
+#         y = torch.argmax(y, dim=1)
+#     # Ensure 1D labels, e.g. [B]
+#     y = y.view(-1)
+#     return y_pred, y
 
 
 # def cls_output_transform(output):
