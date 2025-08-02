@@ -9,6 +9,20 @@ def cls_output_transform(output):
     import torch
     # DEBUG: print the output structure to help debugging!
     # print("DEBUG output to cls_output_transform:", type(output), output)
+
+    def unwrap_dict_to_tensor(obj, keys=("label", "classification", "class", "value")):
+        # Recursively unwrap nested dicts
+        while isinstance(obj, dict):
+            found = False
+            for k in keys:
+                if k in obj:
+                    obj = obj[k]
+                    found = True
+                    break
+            if not found:
+                raise ValueError(f"Could not extract tensor from nested dict: {obj}")
+        return obj
+
     # Unpack output
     if isinstance(output, (tuple, list)):
         if len(output) == 2:
@@ -32,13 +46,18 @@ def cls_output_transform(output):
                 break
         else:
             raise ValueError(f"Could not extract tensor from y_pred dict: {y_pred}")
-    if isinstance(y, dict):
-        for k in ("label", "classification", "class"):
-            if k in y:
-                y = y[k]
-                break
-        else:
-            raise ValueError(f"Could not extract tensor from y dict: {y}")
+
+    # Recursively unwrap if still dict
+    y_pred = unwrap_dict_to_tensor(y_pred, keys=("logits", "pred", "output"))
+    y = unwrap_dict_to_tensor(y, keys=("label", "classification", "class", "value"))
+
+    # if isinstance(y, dict):
+    #     for k in ("label", "classification", "class"):
+    #         if k in y:
+    #             y = y[k]
+    #             break
+    #     else:
+    #         raise ValueError(f"Could not extract tensor from y dict: {y}")
 
     # If y_pred or y is a list, filter out non-classification tensors (e.g., ignore 3D/4D tensors)
     def is_classification_tensor(t):
@@ -62,6 +81,8 @@ def cls_output_transform(output):
     # Convert one-hot y to indices if necessary
     if y.ndim == 2 and y.shape[1] > 1:
         y = torch.argmax(y, dim=1)
+    if y.ndim == 0:
+        y = y.unsqueeze(0)
     if y.ndim > 1:
         y = y.view(-1)
 
