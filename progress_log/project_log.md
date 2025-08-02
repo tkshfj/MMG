@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-08-02
+- Refactor: Modular Model Registry Protocol Pipeline
+- Debug: Classification Output Transform
+
 # 2025-08-01
 - Debug configuration-driven, modular MONAI/Ignite pipeline
 - Migrate to configuration-driven, modular MONAI/Ignite pipeline
