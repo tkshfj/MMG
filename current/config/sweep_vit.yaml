@@ -24,7 +24,7 @@ parameters:
   num_class_labels:
     value: 2
   num_workers:
-    value: 4
+    value: 12
 
   # Fixed hyperparameters
   epochs:
