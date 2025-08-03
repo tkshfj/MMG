@@ -197,7 +197,8 @@ def image_log_handler(model, prepare_batch_fn, num_images=4):
             all_pred_masks = []
             for batch in engine.state.dataloader:
                 images, targets = prepare_batch_fn(batch, device)
-                if "mask" not in targets:
+                # handle as classification-only or skip
+                if not (isinstance(targets, dict) and "mask" in targets):
                     continue
                 if isinstance(model(images), (tuple, list)) and len(model(images)) > 1:
                     _, seg_logits = model(images)

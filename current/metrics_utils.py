@@ -2,6 +2,11 @@
 import torch
 import logging
 from eval_utils import get_classification_metrics, get_segmentation_metrics
+import os
+
+
+def _debug_enabled():
+    return os.environ.get("DEBUG_OUTPUT_TRANSFORMS", "0") in ("1", "true", "True", "yes", "YES")
 
 
 # Output Transforms for Accuracy, ConfusionMatrix
@@ -101,7 +106,8 @@ def auc_output_transform(output):
         return obj
 
     # DEBUG: print the incoming output for analysis
-    print("[DEBUG] auc_output_transform raw output:", type(output), output)
+    if _debug_enabled():
+        print(f"[DEBUG] auc_output_transform raw output: {type(output)}, {output}")
 
     if isinstance(output, (tuple, list)):
         # If list of dicts, old collate format
@@ -113,7 +119,8 @@ def auc_output_transform(output):
                 try:
                     logits_val = unwrap(x.get("pred", x.get("logits")), ("logits", "pred"))
                 except Exception:
-                    print(f"[ERROR] Failed to extract logits at entry {idx}: {x}")
+                    if _debug_enabled():
+                        print(f"[ERROR] Failed to extract logits at entry {idx}: {x}")
                     raise
                 logits_list.append(logits_val)
 
@@ -125,7 +132,8 @@ def auc_output_transform(output):
                             lbl = lbl[key]
                             break
                 if lbl is None:
-                    print(f"[ERROR] Label missing or None at entry {idx}: {x}")
+                    if _debug_enabled():
+                        print(f"[ERROR] Label missing or None at entry {idx}: {x}")
                     raise ValueError(f"Label not found in output entry {idx}: {x}")
                 labels_list.append(lbl)
 
@@ -136,26 +144,84 @@ def auc_output_transform(output):
 
             # Before stacking, inspect and convert if needed
             for i, logit in enumerate(logits_list):
-                if isinstance(logit, list):
-                    logit = torch.tensor(logit)
+                if _debug_enabled():
+                    print(f"[DEBUG] Before tensor conversion: logits_list[{i}] type={type(logit)}, value={logit}")
+                # Now, more robust: flatten or select just the classification output if tuple/list
+                if isinstance(logit, (list, tuple)):
+                    # If tuple/list of tensors, pick the first tensor (usually the classifier head)
+                    # Optionally: add checks for what each element is
+                    if _debug_enabled():
+                        print(f"[DEBUG] logits_list[{i}] is list/tuple, length={len(logit)}")
+                    # Let's check all elements:
+                    for j, elem in enumerate(logit):
+                        if _debug_enabled():
+                            print(f"    [DEBUG] logits_list[{i}][{j}] type={type(elem)}, shape={getattr(elem, 'shape', None)}")
+                    # Try to select the "most likely" tensor: pick the first tensor with 1D/2D shape
+                    found = False
+                    for elem in logit:
+                        if isinstance(elem, torch.Tensor) and elem.ndim in (1, 2):
+                            logits_list[i] = elem
+                            found = True
+                            break
+                    if not found:
+                        raise ValueError(f"[ERROR] Could not find a 1D/2D tensor in logits_list[{i}]: {logit}")
+                    continue
+                elif isinstance(logit, torch.Tensor):
                     logits_list[i] = logit
-                elif not isinstance(logit, torch.Tensor):
-                    logit = torch.as_tensor(logit)
-                    logits_list[i] = logit
-                # If still not 1D or 2D, raise error
-                if logit.ndim not in (1, 2):
-                    print(f"[ERROR] Unexpected logit shape at idx {i}: {logit.shape}")
-                    raise ValueError(f"Logit at index {i} is not 1D/2D: shape {logit.shape}")
-            # Assert all shapes match
+                elif isinstance(logit, (int, float)):
+                    logits_list[i] = torch.tensor([logit])
+                else:
+                    # Try as_tensor for numpy
+                    try:
+                        import numpy as np
+                        if isinstance(logit, np.ndarray):
+                            logits_list[i] = torch.as_tensor(logit)
+                            continue
+                    except ImportError:
+                        pass
+                    raise ValueError(f"[ERROR] Unrecognized logit type at index {i}: {type(logit)}: {logit}")
+
+            #     if isinstance(logit, torch.Tensor):
+            #         # Already a tensor; nothing to do
+            #         logits_list[i] = logit
+            #     elif isinstance(logit, (list, tuple)):
+            #         # List or tuple of tensors or numbers
+            #         if all(isinstance(xx, torch.Tensor) for xx in logit):
+            #             # Stack if all are tensors
+            #             if len(logit) == 1:
+            #                 logits_list[i] = logit[0]
+            #             else:
+            #                 try:
+            #                     logits_list[i] = torch.stack(logit)
+            #                 except Exception:
+            #                     print(f"[ERROR] Could not stack logit at idx {i}: {logit}")
+            #                     raise
+            #         else:
+            #             logits_list[i] = torch.as_tensor(logit)
+            #     else:
+            #         logits_list[i] = torch.as_tensor(logit)
+
+            #     # If still not 1D or 2D, raise error
+            #     if logit.ndim not in (1, 2):
+            #         print(f"[ERROR] Unexpected logit shape at idx {i}: {logit.shape}")
+            #         raise ValueError(f"Logit at index {i} is not 1D/2D: shape {logit.shape}")
+
+            #     print(f"[DEBUG] logit[{i}] type: {type(logit)}, value: {logit}, shape: {getattr(logit, 'shape', None)}")
+
             shapes = [logit.shape for logit in logits_list]
+            if _debug_enabled():
+                print("[DEBUG] Final logits_list shapes before stack:", shapes)
             if len(set(shapes)) != 1:
-                print(f"[ERROR] Inconsistent shapes in logits_list: {shapes}")
+                if _debug_enabled():
+                    print("[ERROR] Inconsistent shapes in logits_list:", shapes)
                 raise ValueError(f"Inconsistent shapes in logits_list: {shapes}")
 
             # DEBUG:
             # for i, logit in enumerate(logits_list):
             #     print(f"[DEBUG] logits_list[{i}]: type={type(logit)}, value={logit}, shape={getattr(logit, 'shape', None)}")
-            print("DEBUG logits_list shapes:", [getattr(logit, 'shape', None) for logit in logits_list])
+            if _debug_enabled():
+                print("DEBUG logits_list shapes:", [getattr(logit, 'shape', None) for logit in logits_list])
+
             logits = torch.stack(logits_list)
             # logits = torch.stack([torch.as_tensor(logit) for logit in logits_list])
             labels = torch.tensor(labels_list, dtype=torch.long, device=logits.device)
@@ -163,18 +229,21 @@ def auc_output_transform(output):
         else:
             # Modern collate: output = (y_pred, y)
             if len(output) < 2:
-                print("[ERROR] Output tuple/list too short for auc_output_transform:", output)
+                if _debug_enabled():
+                    print("[ERROR] Output tuple/list too short for auc_output_transform:", output)
                 raise ValueError(f"Output tuple/list too short for auc_output_transform: {output}")
             logits, labels = output[0], output[1]
     elif isinstance(output, dict):
         logits = unwrap(output.get("y_pred") or output.get("pred") or output.get("logits"), ("logits", "pred", "output"))
         labels = unwrap(output.get("y") or output.get("label") or output.get("classification"), ("label", "classification", "class", "value"))
     else:
-        print("[ERROR] Unexpected output type in auc_output_transform:", type(output))
+        if _debug_enabled():
+            print("[ERROR] Unexpected output type in auc_output_transform:", type(output))
         raise ValueError(f"Unexpected output type in auc_output_transform: {type(output)}")
 
     # DEBUG: print the processed logits and labels
-    print("[DEBUG] auc_output_transform: logits shape", getattr(logits, 'shape', None), "labels", labels)
+    if _debug_enabled():
+        print("[DEBUG] auc_output_transform: logits shape", getattr(logits, 'shape', None), "labels", labels)
 
     # At this point, logits should be [B, C] or [C], labels [B] or []
     if not isinstance(logits, torch.Tensor):
@@ -201,7 +270,8 @@ def auc_output_transform(output):
         # Multi-class: just use softmax as probs
         prob_class1 = torch.softmax(logits, dim=1)
 
-    print("[DEBUG] auc_output_transform: final prob_class1", prob_class1, "labels", labels)
+    if _debug_enabled():
+        print("[DEBUG] auc_output_transform: final prob_class1", prob_class1, "labels", labels)
     # For ignite.ROC_AUC, expected: (probs, labels)
     return prob_class1, labels
 
