@@ -14,7 +14,7 @@ class MultiTaskUNet(nn.Module):
         seg_mask: Segmentation mask output.
         cls_logits: Classification logits.
     """
-    def __init__(self, spatial_dims=2, in_channels=1, out_channels=1, num_class_labels=1, features=(32, 64, 128, 256, 512)):
+    def __init__(self, spatial_dims=2, in_channels=1, out_channels=1, num_classes=1, features=(32, 64, 128, 256, 512)):
         super().__init__()
         self.unet = UNet(
             spatial_dims=spatial_dims,
@@ -25,7 +25,7 @@ class MultiTaskUNet(nn.Module):
             num_res_units=2,
         )
         self.gap = nn.AdaptiveAvgPool2d(1)
-        self.classifier = nn.Linear(features[-1], num_class_labels)
+        self.classifier = nn.Linear(features[-1], num_classes)
         self._bottleneck = None
 
         # Automatically register a hook on the correct (deepest) encoder Conv2d layer

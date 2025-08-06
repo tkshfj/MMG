@@ -1,7 +1,6 @@
 # metrics_utils.py
 import torch
 import logging
-from eval_utils import get_classification_metrics, get_segmentation_metrics
 import os
 
 
@@ -9,12 +8,55 @@ def _debug_enabled():
     return os.environ.get("DEBUG_OUTPUT_TRANSFORMS", "0") in ("1", "true", "True", "yes", "YES")
 
 
+# Metric/Handler/Config Factories
+def get_segmentation_metrics():
+    import torch.nn as nn
+    return {"loss": nn.BCEWithLogitsLoss()}
+
+
+def get_classification_metrics(loss_fn=None):
+    import torch.nn as nn
+    return {
+        "loss": nn.CrossEntropyLoss(),
+    }
+
+
+def make_metrics(
+    tasks,
+    num_classes,
+    loss_fn=None,
+    cls_output_transform=None,
+    auc_output_transform=None,
+    seg_confmat_output_transform=None,
+    multitask=False,
+):
+    from ignite.metrics import Accuracy, ConfusionMatrix, Loss, DiceCoefficient, JaccardIndex
+    from ignite.metrics.roc_auc import ROC_AUC
+    metrics = {}
+
+    if "classification" in tasks or multitask:
+        # For multitask, we often want separate "val_acc", "val_auc" etc
+        metrics.update({
+            "val_acc": Accuracy(output_transform=cls_output_transform),
+            "val_auc": ROC_AUC(output_transform=auc_output_transform),
+            "val_loss": Loss(loss_fn=loss_fn, output_transform=cls_output_transform),
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform),
+        })
+
+    if "segmentation" in tasks or multitask:
+        seg_cm = ConfusionMatrix(num_classes=num_classes, output_transform=seg_confmat_output_transform)
+        metrics.update({
+            "val_dice": DiceCoefficient(cm=seg_cm),
+            "val_iou": JaccardIndex(cm=seg_cm),
+            "val_seg_confmat": seg_cm,
+        })
+    return metrics
+
+
 # Output Transforms for Accuracy, ConfusionMatrix
 def cls_output_transform(output):
-    import torch
     # DEBUG: print the output structure to help debugging!
     # print("DEBUG output to cls_output_transform:", type(output), output)
-
     def unwrap_dict_to_tensor(obj, keys=("label", "classification", "class", "value")):
         # Recursively unwrap nested dicts
         while isinstance(obj, dict):
@@ -82,6 +124,27 @@ def cls_output_transform(output):
     if y.ndim > 1:
         y = y.view(-1)
 
+    # print(f"[DEBUG] y_pred.shape after extraction: {y_pred.shape}, y.shape: {y.shape}")
+    print(f"[DEBUG Confmat Transform] y_pred.shape: {y_pred.shape}, y.shape: {y.shape}, y_pred: {y_pred}, y: {y}")
+
+    return y_pred, y
+
+
+def cls_confmat_output_transform(output):
+    """
+    Output transform for classification confusion matrix.
+    Returns (predicted_class, true_class) 1D tensors.
+    """
+    y_pred, y = cls_output_transform(output)
+    # y_pred should be [B, 2], y should be [B]
+    assert y_pred.shape[0] == y.shape[0], f"Shape mismatch: {y_pred.shape}, {y.shape}"
+    # Convert logits/probs to class indices if needed
+    if y_pred.ndim > 1:
+        y_pred = y_pred.argmax(dim=1)
+    # Make sure both are 1D and long dtype
+    y_pred = y_pred.long().view(-1)
+    y = y.long().view(-1)
+    print(f"[DEBUG] Confmat Transform - y_pred.shape: {y_pred.shape}, y.shape: {y.shape}")
     return y_pred, y
 
 
@@ -92,8 +155,6 @@ def auc_output_transform(output):
     Handles tuple/list, dict, and nested dict structures robustly.
     Hardened: prints input and fails clearly if label is missing or None.
     """
-    import torch
-
     def unwrap(obj, keys=("y_pred", "pred", "logits", "output")):
         while isinstance(obj, dict):
             for k in keys:
@@ -181,33 +242,6 @@ def auc_output_transform(output):
                         pass
                     raise ValueError(f"[ERROR] Unrecognized logit type at index {i}: {type(logit)}: {logit}")
 
-            #     if isinstance(logit, torch.Tensor):
-            #         # Already a tensor; nothing to do
-            #         logits_list[i] = logit
-            #     elif isinstance(logit, (list, tuple)):
-            #         # List or tuple of tensors or numbers
-            #         if all(isinstance(xx, torch.Tensor) for xx in logit):
-            #             # Stack if all are tensors
-            #             if len(logit) == 1:
-            #                 logits_list[i] = logit[0]
-            #             else:
-            #                 try:
-            #                     logits_list[i] = torch.stack(logit)
-            #                 except Exception:
-            #                     print(f"[ERROR] Could not stack logit at idx {i}: {logit}")
-            #                     raise
-            #         else:
-            #             logits_list[i] = torch.as_tensor(logit)
-            #     else:
-            #         logits_list[i] = torch.as_tensor(logit)
-
-            #     # If still not 1D or 2D, raise error
-            #     if logit.ndim not in (1, 2):
-            #         print(f"[ERROR] Unexpected logit shape at idx {i}: {logit.shape}")
-            #         raise ValueError(f"Logit at index {i} is not 1D/2D: shape {logit.shape}")
-
-            #     print(f"[DEBUG] logit[{i}] type: {type(logit)}, value: {logit}, shape: {getattr(logit, 'shape', None)}")
-
             shapes = [logit.shape for logit in logits_list]
             if _debug_enabled():
                 print("[DEBUG] Final logits_list shapes before stack:", shapes)
@@ -216,9 +250,6 @@ def auc_output_transform(output):
                     print("[ERROR] Inconsistent shapes in logits_list:", shapes)
                 raise ValueError(f"Inconsistent shapes in logits_list: {shapes}")
 
-            # DEBUG:
-            # for i, logit in enumerate(logits_list):
-            #     print(f"[DEBUG] logits_list[{i}]: type={type(logit)}, value={logit}, shape={getattr(logit, 'shape', None)}")
             if _debug_enabled():
                 print("DEBUG logits_list shapes:", [getattr(logit, 'shape', None) for logit in logits_list])
 
@@ -276,94 +307,6 @@ def auc_output_transform(output):
     return prob_class1, labels
 
 
-# def auc_output_transform(output):
-#     """
-#     Extracts (prob_class1, class_idx) from model output for ROC_AUC metric.
-#     Handles tuple/list, dict, multitask (tuple/list) and nested dict structures robustly.
-#     """
-#     import torch
-
-#     def extract_logits(obj):
-#         # For multitask (tuple/list): pick first (classification) head
-#         if isinstance(obj, (tuple, list)):
-#             return extract_logits(obj[0])
-#         # For dict: unwrap by known keys recursively
-#         while isinstance(obj, dict):
-#             for k in ("logits", "pred", "output", "y_pred"):
-#                 if k in obj:
-#                     obj = obj[k]
-#                     break
-#             else:
-#                 raise ValueError(f"Cannot extract tensor from dict: {obj}")
-#         return obj
-
-#     def extract_label(obj):
-#         # For dict: unwrap by known keys recursively
-#         while isinstance(obj, dict):
-#             for k in ("label", "classification", "class", "value"):
-#                 if k in obj:
-#                     obj = obj[k]
-#                     break
-#             else:
-#                 raise ValueError(f"Cannot extract label tensor from dict: {obj}")
-#         return obj
-
-#     # Handle list of dicts (DataLoader collate style)
-#     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
-#         logits_list = []
-#         labels_list = []
-#         for x in output:
-#             logits = extract_logits(x.get("pred") or x.get("logits"))
-#             labels = extract_label(x.get("label") or x.get("y") or x.get("classification"))
-#             logits_list.append(logits)
-#             labels_list.append(labels)
-#         # DEBUG:
-#         print("DEBUG: labels_list", labels_list)
-
-#         # Ensure all logits are tensors
-#         logits = torch.stack([logit if isinstance(logit, torch.Tensor) else torch.as_tensor(logit) for logit in logits_list])
-#         labels = torch.tensor(labels_list, dtype=torch.long, device=logits.device)
-#     # Handle tuple/list (modern, batched): output = (y_pred, y)
-#     elif isinstance(output, (tuple, list)) and len(output) >= 2:
-#         logits = extract_logits(output[0])
-#         labels = extract_label(output[1])
-#     # Handle dict (single sample)
-#     elif isinstance(output, dict):
-#         logits = extract_logits(output.get("y_pred") or output.get("pred") or output.get("logits"))
-#         labels = extract_label(output.get("y") or output.get("label") or output.get("classification"))
-#     else:
-#         raise ValueError(f"Unexpected output type in auc_output_transform: {type(output)}")
-
-#     # DEBUG:
-#     # print(f"DEBUG AUC: logits shape {logits.shape}, labels shape {labels.shape}")
-#     # print(f"DEBUG AUC: logits {logits}, labels {labels}")
-
-#     # Make sure both logits and labels are tensors
-#     if not isinstance(logits, torch.Tensor):
-#         logits = torch.as_tensor(logits)
-#     if not isinstance(labels, torch.Tensor):
-#         labels = torch.as_tensor(labels)
-
-#     # Ensure correct shapes
-#     if logits.ndim == 1:
-#         logits = logits.unsqueeze(0)
-#     if labels.ndim == 0:
-#         labels = labels.unsqueeze(0)
-#     if labels.ndim == 2 and labels.shape[1] > 1:
-#         labels = torch.argmax(labels, dim=1)
-
-#     # For ROC AUC (binary): use probability of class 1
-#     if logits.shape[1] == 2:
-#         probs = torch.softmax(logits, dim=1)
-#         prob_class1 = probs[:, 1]
-#     elif logits.shape[1] == 1:
-#         prob_class1 = torch.sigmoid(logits.squeeze(1))
-#     else:
-#         prob_class1 = torch.softmax(logits, dim=1)  # multiclass
-
-#     return prob_class1, labels
-
-
 def seg_output_transform(output):
     """
     Extracts predicted and true segmentation masks for segmentation metrics.
@@ -371,17 +314,16 @@ def seg_output_transform(output):
         - pred_masks: [B, 1, H, W] or [B, H, W]
         - true_masks: [B, 1, H, W] or [B, H, W]
     """
+    print("[DEBUG] seg_output_transform CALLED. type(output):", type(output))
     if isinstance(output, list) and all(isinstance(x, dict) for x in output):
         pred_masks, true_masks = [], []
         for i, x in enumerate(output):
-            # Check nested structure for pred[1] and label["mask"]
             if not isinstance(x.get("pred", None), (list, tuple)) or len(x["pred"]) < 2:
                 raise ValueError(f"seg_output_transform: Missing or malformed 'pred' at index {i}: {x.get('pred')}")
             if "label" not in x or "mask" not in x["label"]:
                 raise ValueError(f"seg_output_transform: Missing 'label' or 'label.mask' at index {i}: {x.get('label')}")
             pred = x["pred"][1]  # segmentation logits or mask
             mask = x["label"]["mask"]
-            # Optionally squeeze singleton channels, if present
             if pred.ndim == 4 and pred.shape[1] == 1:
                 pred = pred.squeeze(1)
             if mask.ndim == 4 and mask.shape[1] == 1:
@@ -394,139 +336,125 @@ def seg_output_transform(output):
     raise ValueError("seg_output_transform expects a list of dicts with 'pred' (as tuple/list) and nested 'label.mask' key.")
 
 
-def seg_output_transform_for_confmat(output):
-    # output: list of dicts per sample
-    seg_logits = torch.stack([x["pred"][1] for x in output])      # [B, 1, H, W] or [B, num_classes, H, W]
-    true_mask = torch.stack([x["label"]["mask"] for x in output])  # [B, 1, H, W] or [B, H, W]
+def seg_confmat_output_transform(output):
+    """
+    Transform output for Ignite ConfusionMatrix (segmentation).
+    Converts logits to probabilities with 2 channels for binary, or softmax for multiclass.
+    Expects output: list of dicts, each with keys 'pred' and 'label'.
+      - sample['pred'][1]: logits, shape [C, H, W] (C=1 or 2)
+      - sample['label']['mask']: mask, shape [1, H, W] or [H, W]
+    Returns:
+        probs: [B, 2, H, W] (float, probabilities)
+        mask:  [B, H, W]    (long, ground truth)
+    """
+    print("[DEBUG] seg_output_transform CALLED. type(output):", type(output))
+    if not (isinstance(output, list) and all(isinstance(x, dict) for x in output)):
+        raise ValueError("seg_confmat_output_transform expected list of dicts")
 
-    # For binary: [B, 1, H, W] → [B, 2, H, W] (foreground/background)
-    if seg_logits.shape[1] == 1:
-        # Use sigmoid for binary, create background channel
-        probs_bg = 1 - torch.sigmoid(seg_logits)      # background probability
-        probs_fg = torch.sigmoid(seg_logits)           # foreground probability
-        probs = torch.cat([probs_bg, probs_fg], dim=1)  # [B, 2, H, W]
-    else:
-        # Use softmax for multiclass
-        probs = torch.softmax(seg_logits, dim=1)
+    probs_list = []
+    masks_list = []
+    for sample in output:
+        seg_logits = sample['pred'][1]  # [C, H, W]
+        # Handle binary case
+        if seg_logits.shape[0] == 1:
+            prob_fg = torch.sigmoid(seg_logits)              # [1, H, W]
+            prob_bg = 1.0 - prob_fg                         # [1, H, W]
+            probs = torch.cat([prob_bg, prob_fg], dim=0)     # [2, H, W]
+        else:  # Multiclass
+            probs = torch.softmax(seg_logits, dim=0)         # [C, H, W]
+            assert probs.shape[0] >= 2, "Expected at least 2 channels for multiclass"
+        probs_list.append(probs.unsqueeze(0))                # [1, C, H, W]
 
-    # Remove channel dim from mask if needed
-    if true_mask.ndim == 4 and true_mask.shape[1] == 1:
-        true_mask = true_mask.squeeze(1)
-    return probs, true_mask.long()
+        mask = sample['label']['mask']                       # [1, H, W] or [H, W]
+        if mask.ndim == 3 and mask.shape[0] == 1:
+            mask = mask.squeeze(0)
+        masks_list.append(mask.unsqueeze(0))                 # [1, H, W]
 
+    probs_batch = torch.cat(probs_list, dim=0)               # [B, C, H, W]
+    masks_batch = torch.cat(masks_list, dim=0).long()        # [B, H, W]
 
-# Key Presence Utility
-def _validate_key_in_dataset(loader, key, num_batches=3):
-    """Return True if dotted key is present in any of the first num_batches of loader."""
-    def get_nested(d, keys):
-        for k in keys:
-            if isinstance(d, dict) and k in d:
-                d = d[k]
-            else:
-                return None
-        return d
+    print("[DEBUG] seg_confmat_output_transform: probs_batch shape:", probs_batch.shape, "masks_batch shape:", masks_batch.shape)
+    print("[DEBUG] seg_confmat_output_transform: probs_batch dtype:", probs_batch.dtype, "masks_batch dtype:", masks_batch.dtype)
 
-    keys = key.split('.')
-    try:
-        for i, batch in enumerate(loader):
-            items = batch if isinstance(batch, (list, tuple)) else [batch]
-            if any(get_nested(item, keys) is not None for item in items if isinstance(item, dict)):
-                return True
-            if i + 1 >= num_batches:
-                break
-    except Exception as e:
-        logging.warning(f"Could not inspect loader for key '{key}': {e}")
-    return False
+    return probs_batch, masks_batch
 
 
-def debug_output_transform(orig_transform):
-    def wrapped(output):
-        y_pred, y = orig_transform(output)
-        print("DEBUG:", "y_pred.shape", y_pred.shape, "y_pred.dtype", y_pred.dtype)
-        print("DEBUG:", "y.shape", y.shape, "y.dtype", y.dtype)
-        return y_pred, y
-    return wrapped
+# def seg_confmat_output_transform(output):
+#     """
+#     Output transform for segmentation confusion matrix metrics (Ignite expects):
+#       - probs: [B, num_classes, H, W] (float)
+#       - true_mask: [B, H, W] (long)
+#     """
+#     # Use the canonical extraction
+#     seg_logits, true_mask = seg_output_transform(output)  # shapes: [B, C, H, W] or [B, H, W]
+
+#     # Ensure seg_logits has 4 dims [B, C, H, W]
+#     if seg_logits.ndim == 3:
+#         seg_logits = seg_logits.unsqueeze(1)  # [B, 1, H, W]
+#     # For binary: [B, 1, H, W] -> [B, 2, H, W] (background/foreground)
+#     if seg_logits.shape[1] == 1:
+#         probs_bg = 1 - torch.sigmoid(seg_logits)
+#         probs_fg = torch.sigmoid(seg_logits)
+#         probs = torch.cat([probs_bg, probs_fg], dim=1)  # [B, 2, H, W]
+#     else:
+#         probs = torch.softmax(seg_logits, dim=1)  # [B, C, H, W]
+
+#     # Remove channel dim from mask if needed
+#     if true_mask.ndim == 4 and true_mask.shape[1] == 1:
+#         true_mask = true_mask.squeeze(1)
+#     print("[DEBUG] seg_confmat_output_transform: probs.shape:", probs.shape, "true_mask.shape:", true_mask.shape)
+#     return probs, true_mask.long()
 
 
 # Attach Metrics
-def attach_metrics(
-    evaluator,
-    config=None,
-    seg_output_transform_for_metrics=None,
-    cls_output_transform=None,
-    auc_output_transform=None,
-    num_classes=2,
-    val_loader=None
-):
-    """
-    Attach classification and/or segmentation metrics to evaluator based on task,
-    available output transforms, and actual presence of label/mask in validation loader.
-    Ensures all metrics use consistent Wandb keys.
-    """
-    from ignite.metrics import Accuracy, Loss, ConfusionMatrix, DiceCoefficient, JaccardIndex
-    from ignite.metrics.roc_auc import ROC_AUC
-    from eval_utils import get_classification_metrics  # get_segmentation_metrics
-
-    task = config.get("task", "multitask") if config else "multitask"
-    has_label = (val_loader is None) or _validate_key_in_dataset(val_loader, "label.label")
-    has_mask = (val_loader is None) or _validate_key_in_dataset(val_loader, "label.mask")
-
-    # Classification Metrics
-    if task in ("classification", "multitask"):
-        if cls_output_transform is not None and has_label:
-            Accuracy(output_transform=cls_output_transform).attach(evaluator, "val_acc")
-            ROC_AUC(output_transform=auc_output_transform or cls_output_transform).attach(evaluator, "val_auc")
-            Loss(
-                loss_fn=get_classification_metrics()["loss"],
-                output_transform=cls_output_transform
-            ).attach(evaluator, "val_loss")
-            ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform).attach(evaluator, "val_cls_confmat")
-            logging.info("Attached classification metrics: val_acc, val_auc, val_loss, val_cls_confmat")
-        else:
-            logging.warning("No label data or output_transform found. Classification metrics not attached.")
-
-    # Segmentation Metrics
-    if task in ("segmentation", "multitask"):
-        if seg_output_transform_for_metrics is not None and has_mask:
-            cm = ConfusionMatrix(num_classes=num_classes, output_transform=seg_output_transform_for_metrics)
-            DiceCoefficient(cm).attach(evaluator, "val_dice")
-            JaccardIndex(cm).attach(evaluator, "val_iou")
-            logging.info("Attached segmentation metrics: val_dice, val_iou")
-        else:
-            logging.warning("No mask data or output_transform found. Segmentation metrics not attached.")
-
-    # Optional: Print attached metrics for debugging
-    print("[attach_metrics] Final attached metrics:", evaluator.state.metrics.keys() if hasattr(evaluator, 'state') else "not available")
+def attach_metrics(evaluator, model, config=None, val_loader=None):
+    """Attach metrics to evaluator using model registry's get_metrics() method."""
+    # Get metrics dictionary from the model registry
+    metrics = model.get_metrics()
+    # Attach each metric by key
+    attached = []
+    for name, metric in metrics.items():
+        metric.attach(evaluator, name)
+        attached.append(name)
+    # Debug/Info logs
+    logging.info(f"Attached metrics: {', '.join(attached)}")
+    if hasattr(evaluator, "metrics"):
+        print("[attach_metrics] Registered metrics:", list(evaluator.metrics.keys()))
+    elif hasattr(evaluator, "_metrics"):
+        print("[attach_metrics] Registered metrics:", list(evaluator._metrics.keys()))
+    else:
+        print("[attach_metrics] Registered metrics not available.")
+    return attached
 
 
 # Multitask Loss
-def multitask_loss(y_pred, y_true):
-    """Handles both dict (training) and tensor (metric) cases."""
-    # If y_true is a dict (from training step)
-    if isinstance(y_true, dict):
-        class_logits, seg_out = None, None
-        if isinstance(y_pred, tuple):
-            if len(y_pred) == 2:
-                class_logits, seg_out = y_pred
-            elif len(y_pred) == 1:
-                class_logits, seg_out = y_pred[0], None
-        elif isinstance(y_pred, dict):
-            class_logits = y_pred.get("label", None)
-            seg_out = y_pred.get("mask", None)
-        else:
-            class_logits, seg_out = y_pred, None
+# def multitask_loss(y_pred, y_true):
+#     """Handles both dict (training) and tensor (metric) cases."""
+#     # If y_true is a dict (from training step)
+#     if isinstance(y_true, dict):
+#         class_logits, seg_out = None, None
+#         if isinstance(y_pred, tuple):
+#             if len(y_pred) == 2:
+#                 class_logits, seg_out = y_pred
+#             elif len(y_pred) == 1:
+#                 class_logits, seg_out = y_pred[0], None
+#         elif isinstance(y_pred, dict):
+#             class_logits = y_pred.get("label", None)
+#             seg_out = y_pred.get("mask", None)
+#         else:
+#             class_logits, seg_out = y_pred, None
 
-        loss = 0.0
-        if "label" in y_true and class_logits is not None:
-            loss += get_classification_metrics()["loss"](class_logits, y_true["label"])
-        if "mask" in y_true and seg_out is not None:
-            loss += get_segmentation_metrics()["loss"](seg_out, y_true["mask"])
-        if loss == 0.0:
-            raise ValueError(f"No valid targets found in y_true: keys={list(y_true.keys())}")
-        return loss
-    # If y_true is a tensor (from Ignite metric)
-    elif torch.is_tensor(y_true):
-        # Assume classification-only, match y_pred shape
-        return get_classification_metrics()["loss"](y_pred, y_true)
-    else:
-        raise TypeError(f"Unsupported y_true type for multitask_loss: {type(y_true)}")
+#         loss = 0.0
+#         if "label" in y_true and class_logits is not None:
+#             loss += get_classification_metrics()["loss"](class_logits, y_true["label"])
+#         if "mask" in y_true and seg_out is not None:
+#             loss += get_segmentation_metrics()["loss"](seg_out, y_true["mask"])
+#         if loss == 0.0:
+#             raise ValueError(f"No valid targets found in y_true: keys={list(y_true.keys())}")
+#         return loss
+#     # If y_true is a tensor (from Ignite metric)
+#     elif torch.is_tensor(y_true):
+#         # Assume classification-only, match y_pred shape
+#         return get_classification_metrics()["loss"](y_pred, y_true)
+#     else:
+#         raise TypeError(f"Unsupported y_true type for multitask_loss: {type(y_true)}")

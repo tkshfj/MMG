@@ -5,6 +5,7 @@ import wandb
 from monai.handlers import EarlyStopHandler, StatsHandler, from_engine
 from ignite.engine import Events
 from ignite.handlers import ModelCheckpoint, DiskSaver
+# from metrics_utils import attach_metrics
 
 CHECKPOINT_DIR = "outputs/checkpoints"
 CHECKPOINT_RETENTION = 3
@@ -21,13 +22,6 @@ class SafeDiskSaver(DiskSaver):
             print(f"WARNING: Checkpoint file not found for deletion: {filename}")
 
 
-def attach_segmentation_metrics(evaluator, num_classes=2, output_transform=None, dice_name="val_dice", iou_name="val_iou"):
-    from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
-    cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=output_transform)
-    DiceCoefficient(cm=cm_metric).attach(evaluator, dice_name)
-    JaccardIndex(cm=cm_metric).attach(evaluator, iou_name)
-
-
 def register_handlers(
     trainer,
     evaluator,
@@ -39,21 +33,11 @@ def register_handlers(
     image_log_handler=None,
     wandb_log_handler=None,
     prepare_batch=None,
-    **handler_kwargs  # Everything from model_class.get_handler_kwargs()
+    **handler_kwargs
 ):
     arch_name = str(config.get("architecture", "model")).lower().replace("/", "_").replace(" ", "_")
     checkpoint_prefix = f"{arch_name}"
     best_model_prefix = f"{arch_name}_best"
-
-    # Segmentation metrics
-    if handler_kwargs.get("add_segmentation_metrics", False) and handler_kwargs.get("seg_output_transform", None) is not None:
-        attach_segmentation_metrics(
-            evaluator,
-            num_classes=handler_kwargs.get("num_classes", 2),
-            output_transform=handler_kwargs["seg_output_transform"],
-            dice_name=handler_kwargs.get("dice_name", "val_dice"),
-            iou_name=handler_kwargs.get("iou_name", "val_iou"),
-        )
 
     # DEBUG: What metrics are attached?
     print("\n[DEBUG register_handlers] Metrics registered on evaluator at setup:")
@@ -181,6 +165,11 @@ def wandb_log_handler(engine):
                 log_data[key] = float(value)
         except Exception as e:
             logging.warning(f"[wandb_log_handler] Could not log {key}: {value} - {e}")
+
+    val_confmat = engine.state.metrics.get("val_cls_confmat", None)
+    if val_confmat is not None:
+        print("[DEBUG] val_cls_confmat value:", val_confmat)
+        print("[DEBUG] sum of confmat entries:", sum([sum(row) for row in val_confmat.tolist()]))
 
     log_data["epoch"] = epoch
     print(f"[wandb_log_handler] Final log_data dict: {log_data}")

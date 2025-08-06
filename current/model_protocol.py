@@ -9,7 +9,23 @@ class ModelRegistryProtocol(ABC):
         pass
 
     @abstractmethod
-    def get_output_transform(self) -> Callable:
+    def get_cls_output_transform(self) -> Callable:
+        pass
+
+    @abstractmethod
+    def get_seg_output_transform(self) -> Callable:
+        pass
+
+    @abstractmethod
+    def get_auc_output_transform(self) -> Callable:
+        pass
+
+    @abstractmethod
+    def get_cls_confmat_output_transform(self) -> Callable:
+        pass
+
+    @abstractmethod
+    def get_seg_confmat_output_transform(self) -> Callable:
         pass
 
     @abstractmethod

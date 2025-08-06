@@ -21,7 +21,7 @@ parameters:
     value: 1
   patch_size:
     value: 16  # or [16, 16]
-  num_class_labels:
+  num_classes:
     value: 2
   num_workers:
     value: 12

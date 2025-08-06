@@ -11,10 +11,11 @@ from model_utils import get_optimizer
 from engine_utils import build_trainer, build_evaluator
 from eval_utils import prepare_batch
 from handlers import register_handlers, wandb_log_handler, image_log_handler, manual_dice_handler
+from metrics_utils import attach_metrics
 
 
 def main(config=None):
-    # Initialize Weights & Biases run (config passed from sweep or CLI)
+    # Initialize Weights & Biases run (config passed from sweep)
     with wandb.init(config=config, dir="outputs"):
         # Load and validate config
         config = load_and_validate_config(wandb.config)
@@ -34,18 +35,17 @@ def main(config=None):
             debug=False
         )
 
+        print(f"Number of training samples: {len(train_loader.dataset)}")
+        print(f"Number of validation samples: {len(val_loader.dataset)}")
+        print(f"Number of test samples: {len(test_loader.dataset)}")
+
         # Select model class and construct model
         architecture = config.get("architecture", "multitask_unet").lower()
         if architecture not in MODEL_REGISTRY:
             raise ValueError(f"Model '{architecture}' not found in MODEL_REGISTRY.")
-        model_class = MODEL_REGISTRY[architecture]
-        model = model_class.build_model(config).to(device)
-
-        #  DEBUG
-        x = torch.randn(2, 1, 256, 256)
-        out = model(x)
-        logits = out[0] if isinstance(out, tuple) else out
-        print("DEBUG: logits shape:", logits.shape)
+        model_cls = MODEL_REGISTRY[architecture]
+        wrapper = model_cls()  # Create model instance
+        model = wrapper.build_model(config).to(device)  # Get the nn.Module for training/inference
 
         # Get optimizer, loss, metrics, output_transform, handler kwargs
         optimizer = get_optimizer(
@@ -54,16 +54,15 @@ def main(config=None):
             lr=config.get("learning_rate", config.get("base_learning_rate", 2e-4)),
             weight_decay=config.get("weight_decay", config.get("l2_reg", 1e-4)),
         )
-        loss_fn = model_class.get_loss_fn()
-        metrics = model_class.get_metrics()
-        output_transform = model_class.get_output_transform()
-        handler_kwargs = model_class.get_handler_kwargs()
+        loss_fn = wrapper.get_loss_fn()
+        metrics = wrapper.get_metrics()
+        handler_kwargs = wrapper.get_handler_kwargs()
 
         # Dynamically create a prepare_batch with the correct task argument
         task = config.get("task", None)
         if not task:
-            # Try to auto-infer from model_class if not specified
-            task = model_class.get_supported_tasks()[0]
+            # Try to auto-infer from model if not specified
+            task = wrapper.get_supported_tasks()[0]
         assert task in ["classification", "segmentation", "multitask"], f"Unknown task: {task}"
 
         def task_prepare_batch(batch, device=None, non_blocking=False):
@@ -86,8 +85,24 @@ def main(config=None):
             network=model,
             prepare_batch=task_prepare_batch,
             metrics=metrics,
-            output_transform=output_transform
         )
+
+        # ADD DEBUG HANDLER
+        from ignite.engine import Events
+
+        def debug_model_output(engine):
+            output = engine.state.output
+            print("[DEBUG] model output type:", type(output))
+            if isinstance(output, (tuple, list)):
+                print("[DEBUG] output[0] shape:", getattr(output[0], "shape", type(output[0])))
+            elif isinstance(output, dict):
+                for k, v in output.items():
+                    print(f"[DEBUG] output['{k}'] shape: {getattr(v, 'shape', type(v))}")
+
+        evaluator.add_event_handler(Events.ITERATION_COMPLETED, debug_model_output)
+
+        # Metric Attachment
+        attach_metrics(evaluator, wrapper, config, val_loader)
 
         # Register handlers (fully model-agnostic)
         register_handlers(
@@ -104,7 +119,7 @@ def main(config=None):
             **handler_kwargs
         )
 
-        # Main training loop (MONAI SupervisedTrainer controls epochs)
+        # Main training loop
         trainer.run()
 
         # Save final model checkpoint
