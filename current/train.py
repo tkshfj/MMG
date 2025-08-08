@@ -38,10 +38,9 @@ def main(config=None):
         )
 
         # Print dataset sizes
-        print("[Sample Counts]")
-        print(f"Number of training samples: {len(train_loader.dataset)}")
-        print(f"Number of validation samples: {len(val_loader.dataset)}")
-        print(f"Number of test samples: {len(test_loader.dataset)}")
+        print(f"[DEBUG] Number of training samples: {len(train_loader.dataset)}")
+        print(f"[DEBUG] Number of validation samples: {len(val_loader.dataset)}")
+        print(f"[DEBUG] Number of test samples: {len(test_loader.dataset)}")
 
         # DEBUG: Check batch structure before passing to prepare_batch
         for batch in val_loader:

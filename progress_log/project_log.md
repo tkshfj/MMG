@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-08-09
+- refactor(model): use sweep-defined alpha/beta in multitask get_loss_fn
+
 # 2025-08-08
 - Fix: Standardize metrics, fix AUC/confmat, refactor W&B image logging (engine.state.output) and clean up config/handlers
 - WIP: Add weighted multitask loss

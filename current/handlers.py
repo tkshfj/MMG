@@ -3,7 +3,6 @@ import logging
 import torch
 import wandb
 from monai.handlers import EarlyStopHandler, StatsHandler, from_engine
-# from monai.data.meta_tensor import MetaTensor
 from ignite.engine import Events
 from ignite.handlers import ModelCheckpoint, DiskSaver
 # from metrics_utils import attach_metrics

@@ -1,4 +1,5 @@
 # model_utils.py
+import torch
 from typing import Any, Callable, Dict, List
 from torch.optim import Adam, SGD, RMSprop, Optimizer
 from model_protocol import ModelRegistryProtocol
@@ -160,6 +161,8 @@ class MultitaskUNetModel(BaseModel):
     from models.multitask_unet import MultiTaskUNet
 
     def build_model(self, config: Any) -> Any:
+        self.cls_loss_weight = float(getattr(config, "cls_loss_weight", 1.0))
+        self.seg_loss_weight = float(getattr(config, "seg_loss_weight", 1.0))
         return self.MultiTaskUNet(
             in_channels=getattr(config, "in_channels", 1),
             out_channels=getattr(config, "out_channels", 1),
@@ -171,18 +174,43 @@ class MultitaskUNetModel(BaseModel):
         return ["classification", "segmentation", "multitask"]
 
     def get_loss_fn(self) -> Callable:
-        from metrics_utils import get_classification_metrics, get_segmentation_metrics
-        # import torch
+        """Weighted multitask loss: alpha * CE(cls) + beta * (BCE/CE)(seg)."""
+        import torch.nn as nn
+        from monai.data.meta_tensor import MetaTensor
 
-        def multitask_loss(output, target):
-            # output: dict with class_logits, seg_out
-            # target: dict with label, mask
-            class_logits = output["class_logits"]
-            seg_out = output["seg_out"]
-            labels = target["label"]
-            masks = target["mask"]
-            return get_classification_metrics()["loss"](class_logits, labels) + get_segmentation_metrics()["loss"](seg_out, masks)
+        def _to_tensor(x):
+            return x.as_tensor() if isinstance(x, MetaTensor) else x
 
+        ce_cls = nn.CrossEntropyLoss()
+        bce_seg = nn.BCEWithLogitsLoss()
+        ce_seg = nn.CrossEntropyLoss()
+
+        alpha = float(getattr(self, "cls_loss_weight", 1.0))
+        beta = float(getattr(self, "seg_loss_weight", 1.0))
+
+        def multitask_loss(pred: Dict[str, torch.Tensor], target: Dict[str, torch.Tensor]) -> torch.Tensor:
+            # unpack & normalize types
+            class_logits = _to_tensor(pred["class_logits"]).float()     # (B, C_cls)
+            seg_out = _to_tensor(pred["seg_out"]).float()          # (B, C_seg, H, W) or (B,1,H,W)
+            labels = _to_tensor(target["label"]).long()           # (B,)
+            masks = _to_tensor(target["mask"])                   # (B,H,W) or (B,1,H,W)
+
+            # classification
+            cls_loss = ce_cls(class_logits, labels)
+
+            # segmentation: binary vs multiclass
+            if seg_out.ndim == 4 and seg_out.shape[1] == 1:
+                if masks.ndim == 3:
+                    masks = masks.unsqueeze(1)       # -> (B,1,H,W)
+                seg_loss = bce_seg(seg_out, masks.float())
+            else:
+                if masks.ndim == 4 and masks.shape[1] == 1:
+                    masks = masks.squeeze(1)         # -> (B,H,W)
+                seg_loss = ce_seg(seg_out, masks.long())
+
+            return alpha * cls_loss + beta * seg_loss
+
+        print(f"[DEBUG] alpha={alpha}, beta={beta}")
         return multitask_loss
 
     def get_handler_kwargs(self) -> Dict[str, Any]:
@@ -193,6 +221,16 @@ class MultitaskUNetModel(BaseModel):
             "dice_name": "val_dice",
             "iou_name": "val_iou",
         }
+
+        # def multitask_loss(output, target):
+        #     from metrics_utils import get_classification_metrics, get_segmentation_metrics
+        #     # output: dict with class_logits, seg_out
+        #     # target: dict with label, mask
+        #     class_logits = output["class_logits"]
+        #     seg_out = output["seg_out"]
+        #     labels = target["label"]
+        #     masks = target["mask"]
+        #     return get_classification_metrics()["loss"](class_logits, labels) + get_segmentation_metrics()["loss"](seg_out, masks)
 
         # def multitask_loss(y_pred, y_true):
         #     """Handles both dict (training) and tensor (metric) cases."""
