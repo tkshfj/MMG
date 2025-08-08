@@ -8,9 +8,9 @@ from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_registry import MODEL_REGISTRY
 from model_utils import get_optimizer
-from engine_utils import build_trainer, build_evaluator
-from eval_utils import prepare_batch
-from handlers import register_handlers, wandb_log_handler, image_log_handler, manual_dice_handler
+from engine_utils import build_trainer, build_evaluator, make_prepare_batch
+from handlers import register_handlers, wandb_log_handler
+# image_log_handler, manual_dice_handler
 from metrics_utils import attach_metrics
 
 
@@ -23,6 +23,8 @@ def main(config=None):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         config["device"] = device
         run_id = wandb.run.id
+        # alpha = float(wandb.config["alpha"])
+        # beta  = float(wandb.config["beta"])
 
         # Build data loaders
         train_loader, val_loader, test_loader = build_dataloaders(
@@ -32,12 +34,24 @@ def main(config=None):
             task=config.get("task", "multitask"),
             split=config.get("split", (0.7, 0.15, 0.15)),
             num_workers=config.get("num_workers", 32),
-            debug=False
+            debug=True
         )
 
+        # Print dataset sizes
+        print("[Sample Counts]")
         print(f"Number of training samples: {len(train_loader.dataset)}")
         print(f"Number of validation samples: {len(val_loader.dataset)}")
         print(f"Number of test samples: {len(test_loader.dataset)}")
+
+        # DEBUG: Check batch structure before passing to prepare_batch
+        for batch in val_loader:
+            print("[DEBUG] Loader batch type:", type(batch))
+            print("[DEBUG] Loader batch keys:", batch.keys() if isinstance(batch, dict) else "not dict")
+            # Optionally: print sample shapes
+            if isinstance(batch, dict):
+                for k in batch:
+                    print(f"  - {k}: type={type(batch[k])}, shape={getattr(batch[k], 'shape', 'N/A')}")
+            break  # Only check the first batch
 
         # Select model class and construct model
         architecture = config.get("architecture", "multitask_unet").lower()
@@ -46,6 +60,21 @@ def main(config=None):
         model_cls = MODEL_REGISTRY[architecture]
         wrapper = model_cls()  # Create model instance
         model = wrapper.build_model(config).to(device)  # Get the nn.Module for training/inference
+
+        # DEBUG
+        batch = next(iter(train_loader))
+        print(batch["image"].shape)  # torch.Size([B, 1, H, W])
+        print(batch["mask"].shape)   # torch.Size([B, 1, H, W]), if segmentation
+        print(batch["label"].shape)  # torch.Size([B]), for classification/multitask
+
+        # print(f"[DEBUG batch] type: {type(batch)}, keys: {getattr(batch, 'keys', lambda: None)()}")
+        # images = batch["image"]
+        # print(f"[DEBUG images] type: {type(images)}")
+        # batch = next(iter(val_loader))
+        # print(type(batch))
+        # print(batch.keys())
+        # print(type(batch["image"]))  # Should be torch.Tensor
+        # print(type(batch["label"]))  # Should be dict for multitask
 
         # Get optimizer, loss, metrics, output_transform, handler kwargs
         optimizer = get_optimizer(
@@ -65,8 +94,7 @@ def main(config=None):
             task = wrapper.get_supported_tasks()[0]
         assert task in ["classification", "segmentation", "multitask"], f"Unknown task: {task}"
 
-        def task_prepare_batch(batch, device=None, non_blocking=False):
-            return prepare_batch(batch, device=device, non_blocking=non_blocking, task=task)
+        prepare_batch_fn = make_prepare_batch(task)
 
         # Build trainer and evaluator
         trainer = build_trainer(
@@ -76,15 +104,18 @@ def main(config=None):
             network=model,
             optimizer=optimizer,
             loss_function=loss_fn,
-            prepare_batch=task_prepare_batch
+            prepare_batch=prepare_batch_fn
         )
 
         evaluator = build_evaluator(
             device=device,
             val_data_loader=val_loader,
             network=model,
-            prepare_batch=task_prepare_batch,
+            prepare_batch=prepare_batch_fn,
             metrics=metrics,
+            decollate=False,
+            postprocessing=None,
+            inferer=None,
         )
 
         # ADD DEBUG HANDLER
@@ -93,11 +124,15 @@ def main(config=None):
         def debug_model_output(engine):
             output = engine.state.output
             print("[DEBUG] model output type:", type(output))
+            print("[DEBUG] model output:", output)
             if isinstance(output, (tuple, list)):
-                print("[DEBUG] output[0] shape:", getattr(output[0], "shape", type(output[0])))
+                for i, item in enumerate(output):
+                    print(f"[DEBUG] output[{i}] type:", type(item))
+                    if isinstance(item, dict):
+                        print(f"   keys: {item.keys()}")
             elif isinstance(output, dict):
                 for k, v in output.items():
-                    print(f"[DEBUG] output['{k}'] shape: {getattr(v, 'shape', type(v))}")
+                    print(f"[DEBUG] output['{k}'] type: {type(v)}")
 
         evaluator.add_event_handler(Events.ITERATION_COMPLETED, debug_model_output)
 
@@ -112,12 +147,41 @@ def main(config=None):
             config,
             train_loader=train_loader,
             val_loader=val_loader,
-            manual_dice_handler=manual_dice_handler,
-            image_log_handler=image_log_handler,
+            # image_log_handler=image_log_handler,
             wandb_log_handler=wandb_log_handler,
-            prepare_batch=task_prepare_batch,
+            prepare_batch=prepare_batch_fn,
             **handler_kwargs
         )
+
+        # DEBUG: Check model output shape
+        b = next(iter(train_loader))
+        prep_fn = make_prepare_batch("multitask")  # or "classification"/"segmentation"
+        pb_out = prep_fn(b, device=device, non_blocking=True)
+
+        if isinstance(pb_out, tuple) and len(pb_out) == 4:
+            x, targets, args, kwargs = pb_out
+            print("[PREP CHECK] tuple(4) OK")
+            print("  x:", tuple(x.shape), x.dtype, x.device)
+            if isinstance(targets, dict):
+                for k, v in targets.items():
+                    try:
+                        print(f"  targets[{k}]:", tuple(v.shape), v.dtype)
+                    except Exception:
+                        print(f"  targets[{k}]:", type(v))
+            else:
+                try:
+                    print("  targets:", tuple(targets.shape), targets.dtype)
+                except Exception:
+                    print("  targets type:", type(targets))
+        elif isinstance(pb_out, dict):
+            print("[PREP CHECK] legacy dict path")
+            for k, v in pb_out.items():
+                try:
+                    print(f"  {k}:", tuple(v.shape), v.dtype)
+                except Exception:
+                    print(f"  {k} type:", type(v))
+        else:
+            raise TypeError(f"Unexpected prepare_batch output: {type(pb_out)}")
 
         # Main training loop
         trainer.run()

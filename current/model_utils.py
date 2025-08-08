@@ -64,18 +64,6 @@ class SimpleCNNModel(BaseModel):
     def get_supported_tasks(self) -> List[str]:
         return ["classification"]
 
-    # def get_metrics(self) -> Dict[str, Any]:
-    #     from ignite.metrics import Accuracy, ConfusionMatrix, Loss
-    #     from ignite.metrics.roc_auc import ROC_AUC
-    #     from metrics_utils import cls_output_transform, auc_output_transform
-    #     num_classes = getattr(self, "num_classes", 2)
-    #     return {
-    #         "val_acc": Accuracy(output_transform=cls_output_transform),
-    #         "val_auc": ROC_AUC(output_transform=auc_output_transform),
-    #         "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=cls_output_transform),
-    #         "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform),
-    #     }
-
     def get_loss_fn(self) -> Callable:
         import torch.nn as nn
         return nn.CrossEntropyLoss()
@@ -105,18 +93,6 @@ class DenseNet121Model(BaseModel):
     def get_supported_tasks(self) -> List[str]:
         return ["classification"]
 
-    # def get_metrics(self) -> Dict[str, Any]:
-    #     from ignite.metrics import Accuracy, ConfusionMatrix, Loss
-    #     from ignite.metrics.roc_auc import ROC_AUC
-    #     from metrics_utils import cls_output_transform, auc_output_transform
-    #     num_classes = getattr(self, "num_classes", 2)
-    #     return {
-    #         "val_acc": Accuracy(output_transform=cls_output_transform),
-    #         "val_auc": ROC_AUC(output_transform=auc_output_transform),
-    #         "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=cls_output_transform),
-    #         "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform),
-    #     }
-
     def get_loss_fn(self) -> Callable:
         import torch.nn as nn
         return nn.CrossEntropyLoss()
@@ -130,6 +106,12 @@ class DenseNet121Model(BaseModel):
             "dice_name": "val_dice",
             "iou_name": "val_iou",
         }
+
+    def forward(self, x):
+        logits = super().forward(x)
+        assert logits.ndim == 2, f"DenseNet121: expected [B, num_classes], got {logits.shape}"
+        print(f"[DenseNet121] logits shape: {logits.shape}")
+        return logits
 
 
 # UNet
@@ -153,17 +135,6 @@ class UNetModel(BaseModel):
     def get_supported_tasks(self) -> List[str]:
         return ["segmentation"]
 
-    # def get_metrics(self) -> Dict[str, Any]:
-    #     from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
-    #     from metrics_utils import seg_confmat_output_transform
-    #     num_classes = getattr(self, "num_classes", getattr(self, "out_channels", 1))
-    #     cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=seg_confmat_output_transform)
-    #     return {
-    #         "dice": DiceCoefficient(cm=cm_metric),
-    #         "iou": JaccardIndex(cm=cm_metric),
-    #         # "confmat": cm_metric,  # (optional)
-    #     }
-
     def get_loss_fn(self) -> Callable:
         from monai.losses import DiceLoss
         return DiceLoss(to_onehot_y=True, softmax=True)
@@ -176,6 +147,12 @@ class UNetModel(BaseModel):
             "dice_name": "val_dice",
             "iou_name": "val_iou",
         }
+
+    def forward(self, x):
+        seg_out = super().forward(x)
+        assert seg_out.ndim == 4, f"UNet: expected [B, C, H, W], got {seg_out.shape}"
+        print(f"[UNet] seg_out shape: {seg_out.shape}")
+        return seg_out
 
 
 # Multitask UNet
@@ -193,61 +170,20 @@ class MultitaskUNetModel(BaseModel):
     def get_supported_tasks(self) -> List[str]:
         return ["classification", "segmentation", "multitask"]
 
-    # def get_metrics(self) -> Dict[str, Any]:
-    #     from ignite.metrics import Accuracy, ConfusionMatrix, DiceCoefficient, JaccardIndex, Loss
-    #     from ignite.metrics.roc_auc import ROC_AUC
-    #     from metrics_utils import cls_output_transform, auc_output_transform, seg_confmat_output_transform
-    #     num_classes = getattr(self, "num_classes", 2)
-    #     # Segmentation confusion matrix for Dice/IoU
-    #     seg_cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=seg_confmat_output_transform)
-    #     return {
-    #         "val_acc": Accuracy(output_transform=cls_output_transform),
-    #         "val_auc": ROC_AUC(output_transform=auc_output_transform),
-    #         "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=cls_output_transform),
-    #         "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform),
-    #         "val_dice": DiceCoefficient(cm=seg_cm_metric),
-    #         "val_iou": JaccardIndex(cm=seg_cm_metric),
-    #     }
-
     def get_loss_fn(self) -> Callable:
         from metrics_utils import get_classification_metrics, get_segmentation_metrics
-        import torch
+        # import torch
 
-        def multitask_loss(y_pred, y_true):
-            """Handles both dict (training) and tensor (metric) cases."""
-            # If y_true is a dict (from training step)
-            if isinstance(y_true, dict):
-                class_logits, seg_out = None, None
-                if isinstance(y_pred, tuple):
-                    if len(y_pred) == 2:
-                        class_logits, seg_out = y_pred
-                    elif len(y_pred) == 1:
-                        class_logits, seg_out = y_pred[0], None
-                elif isinstance(y_pred, dict):
-                    class_logits = y_pred.get("label", None)
-                    seg_out = y_pred.get("mask", None)
-                else:
-                    class_logits, seg_out = y_pred, None
+        def multitask_loss(output, target):
+            # output: dict with class_logits, seg_out
+            # target: dict with label, mask
+            class_logits = output["class_logits"]
+            seg_out = output["seg_out"]
+            labels = target["label"]
+            masks = target["mask"]
+            return get_classification_metrics()["loss"](class_logits, labels) + get_segmentation_metrics()["loss"](seg_out, masks)
 
-                loss = 0.0
-                if "label" in y_true and class_logits is not None:
-                    loss += get_classification_metrics()["loss"](class_logits, y_true["label"])
-                if "mask" in y_true and seg_out is not None:
-                    loss += get_segmentation_metrics()["loss"](seg_out, y_true["mask"])
-                if loss == 0.0:
-                    raise ValueError(f"No valid targets found in y_true: keys={list(y_true.keys())}")
-                return loss
-            # If y_true is a tensor (from Ignite metric)
-            elif torch.is_tensor(y_true):
-                # Assume classification-only, match y_pred shape
-                return get_classification_metrics()["loss"](y_pred, y_true)
-            else:
-                raise TypeError(f"Unsupported y_true type for multitask_loss: {type(y_true)}")
         return multitask_loss
-
-    # def get_loss_fn(self) -> Callable:
-    #     from metrics_utils import multitask_loss
-    #     return multitask_loss
 
     def get_handler_kwargs(self) -> Dict[str, Any]:
         return {
@@ -257,6 +193,41 @@ class MultitaskUNetModel(BaseModel):
             "dice_name": "val_dice",
             "iou_name": "val_iou",
         }
+
+        # def multitask_loss(y_pred, y_true):
+        #     """Handles both dict (training) and tensor (metric) cases."""
+        #     # If y_true is a dict (from training step)
+        #     if isinstance(y_true, dict):
+        #         class_logits, seg_out = None, None
+        #         if isinstance(y_pred, tuple):
+        #             if len(y_pred) == 2:
+        #                 class_logits, seg_out = y_pred
+        #             elif len(y_pred) == 1:
+        #                 class_logits, seg_out = y_pred[0], None
+        #         elif isinstance(y_pred, dict):
+        #             class_logits = y_pred.get("label", None)
+        #             seg_out = y_pred.get("mask", None)
+        #         else:
+        #             class_logits, seg_out = y_pred, None
+
+        #         loss = 0.0
+        #         if "label" in y_true and class_logits is not None:
+        #             loss += get_classification_metrics()["loss"](class_logits, y_true["label"])
+        #         if "mask" in y_true and seg_out is not None:
+        #             loss += get_segmentation_metrics()["loss"](seg_out, y_true["mask"])
+        #         if loss == 0.0:
+        #             raise ValueError(f"No valid targets found in y_true: keys={list(y_true.keys())}")
+        #         return loss
+        #     # If y_true is a tensor (from Ignite metric)
+        #     elif torch.is_tensor(y_true):
+        #         # Assume classification-only, match y_pred shape
+        #         return get_classification_metrics()["loss"](y_pred, y_true)
+        #     else:
+        #         raise TypeError(f"Unsupported y_true type for multitask_loss: {type(y_true)}")
+
+    # def get_loss_fn(self) -> Callable:
+    #     from metrics_utils import multitask_loss
+    #     return multitask_loss
 
 
 # ViT
@@ -294,18 +265,6 @@ class ViTModel(BaseModel):
             return y_pred[0]
         return y_pred
 
-    # def get_metrics(self) -> Dict[str, Any]:
-    #     from ignite.metrics import Accuracy, ConfusionMatrix, Loss
-    #     from ignite.metrics.roc_auc import ROC_AUC
-    #     from metrics_utils import cls_output_transform, auc_output_transform
-    #     num_classes = getattr(self, "num_classes", 2)
-    #     return {
-    #         "val_acc": Accuracy(output_transform=cls_output_transform),
-    #         "val_auc": ROC_AUC(output_transform=auc_output_transform),
-    #         "val_loss": Loss(loss_fn=self.get_loss_fn(), output_transform=cls_output_transform),
-    #         "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_output_transform),
-    #     }
-
     def get_loss_fn(self) -> Callable:
         import torch.nn as nn
 
@@ -333,11 +292,11 @@ class ViTModel(BaseModel):
             "iou_name": "val_iou",
         }
 
-    def get_seg_output_transform(self):
-        # No segmentation output for ViT, but keep signature consistent
-        def _noop_transform(output):
-            return output
-        return _noop_transform
+    # def get_seg_output_transform(self):
+    #     # No segmentation output for ViT, but keep signature consistent
+    #     def _noop_transform(output):
+    #         return output
+    #     return _noop_transform
 
 
 # SwinUNETR
@@ -365,17 +324,6 @@ class SwinUNETRModel(BaseModel):
         # Use segmentation output transform
         return self.get_seg_output_transform()
 
-    # def get_metrics(self) -> Dict[str, Any]:
-    #     from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
-    #     from metrics_utils import seg_confmat_output_transform
-    #     num_classes = getattr(self, "out_channels", getattr(self, "num_classes", 1))
-    #     cm_metric = ConfusionMatrix(num_classes=num_classes, output_transform=seg_confmat_output_transform)
-    #     return {
-    #         "val_dice": DiceCoefficient(cm=cm_metric),
-    #         "val_iou": JaccardIndex(cm=cm_metric),
-    #         # "confmat": cm_metric,  # (optional)
-    #     }
-
     def get_loss_fn(self) -> Callable:
         from monai.losses import DiceLoss
         return DiceLoss(to_onehot_y=True, softmax=True)
@@ -389,6 +337,12 @@ class SwinUNETRModel(BaseModel):
             "dice_name": "val_dice",
             "iou_name": "val_iou",
         }
+
+    def forward(self, x):
+        seg_out = super().forward(x)
+        assert seg_out.ndim == 4, f"SwinUNETR: expected [B, C, H, W], got {seg_out.shape}"
+        print(f"[SwinUNETR] seg_out shape: {seg_out.shape}")
+        return seg_out
 
 
 # Model registry

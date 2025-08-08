@@ -3,6 +3,7 @@ import logging
 import torch
 import wandb
 from monai.handlers import EarlyStopHandler, StatsHandler, from_engine
+# from monai.data.meta_tensor import MetaTensor
 from ignite.engine import Events
 from ignite.handlers import ModelCheckpoint, DiskSaver
 # from metrics_utils import attach_metrics
@@ -29,8 +30,8 @@ def register_handlers(
     config,
     train_loader=None,
     val_loader=None,
-    manual_dice_handler=None,
-    image_log_handler=None,
+    # manual_dice_handler=None,
+    # image_log_handler=None,
     wandb_log_handler=None,
     prepare_batch=None,
     **handler_kwargs
@@ -75,10 +76,12 @@ def register_handlers(
     trainer.add_event_handler(Events.EPOCH_COMPLETED, run_evaluator_with_epoch)
 
     # Manual dice/image handlers (if provided)
-    if manual_dice_handler and prepare_batch is not None:
-        evaluator.add_event_handler(Events.EPOCH_COMPLETED, manual_dice_handler(model, prepare_batch))
-    if image_log_handler and prepare_batch is not None:
-        evaluator.add_event_handler(Events.EPOCH_COMPLETED, image_log_handler(model, prepare_batch))
+    # if manual_dice_handler and prepare_batch is not None:
+    #     evaluator.add_event_handler(Events.EPOCH_COMPLETED, manual_dice_handler(model, prepare_batch))
+    # if image_log_handler and prepare_batch is not None:
+    #     evaluator.add_event_handler(Events.EPOCH_COMPLETED, image_log_handler(model, prepare_batch))
+    attach_image_logger = make_image_logger(num_images=4, threshold=0.5)
+    attach_image_logger(evaluator)
     if wandb_log_handler:
         evaluator.add_event_handler(Events.EPOCH_COMPLETED, lambda engine: wandb_log_handler(engine))
 
@@ -176,70 +179,338 @@ def wandb_log_handler(engine):
     wandb.log(log_data)
 
 
-def image_log_handler(model, prepare_batch_fn, num_images=4):
-    def _handler(engine):
-        model.eval()
-        device = next(model.parameters()).device
-        with torch.no_grad():
-            all_images = []
-            all_gt_masks = []
-            all_pred_masks = []
-            for batch in engine.state.dataloader:
-                images, targets = prepare_batch_fn(batch, device)
-                # handle as classification-only or skip
-                if not (isinstance(targets, dict) and "mask" in targets):
-                    continue
-                if isinstance(model(images), (tuple, list)) and len(model(images)) > 1:
-                    _, seg_logits = model(images)
-                else:
-                    seg_logits = model(images)
-                pred_mask = (torch.sigmoid(seg_logits) > 0.5).float()
-                gt_mask = targets["mask"]
-                for i in range(len(images)):
-                    all_images.append(images[i].cpu())
-                    all_gt_masks.append(gt_mask[i].cpu())
-                    all_pred_masks.append(pred_mask[i].cpu())
-                    if len(all_images) >= num_images:
-                        break
-                if len(all_images) >= num_images:
-                    break
-            if len(all_images) == 0:
-                return
-            for i in range(min(len(all_images), num_images)):
-                wandb.log({
-                    "image": wandb.Image(all_images[i], caption="GT vs Pred"),
-                    "gt_mask": wandb.Image(all_gt_masks[i]),
-                    "pred_mask": wandb.Image(all_pred_masks[i]),
-                })
-    return _handler
+def make_image_logger(num_images: int = 4, threshold: float = 0.5):
+    """Collect (image, gt_mask, pred_mask) from engine.state.output and log to W&B."""
+    import torch
+    import numpy as np
+    import wandb
+    from ignite.engine import Events
+    from monai.data.meta_tensor import MetaTensor
 
+    buf_imgs, buf_gt, buf_pred = [], [], []
 
-def manual_dice_handler(model, prepare_batch_fn):
-    logger = logging.getLogger(__name__)
+    def _as_tensor(x):
+        return x.as_tensor() if isinstance(x, MetaTensor) else x
 
-    def handler(engine):
-        val_loader = engine.state.dataloader
-        device = engine.state.device
-        model.eval()
-        dice_scores = []
-        with torch.no_grad():
-            for batch in val_loader:
-                inputs, targets = prepare_batch_fn(batch, device=device, non_blocking=False)
-                label = batch.get("label", {})
-                if not isinstance(label, dict) or "mask" not in label:
-                    logger.warning("Skipping batch without 'mask' in nested label dict (classification-only batch).")
-                    continue
-                outputs = model(inputs)
-                _, seg_output = outputs
-                pred_mask = (torch.sigmoid(seg_output) > 0.5).float()
-                true_mask = targets["mask"]
-                intersection = (pred_mask * true_mask).sum(dim=(1, 2, 3))
-                union = pred_mask.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3))
-                dice = (2.0 * intersection + 1e-7) / (union + 1e-7)
-                dice_scores.extend(dice.cpu().tolist())
-        if dice_scores:
-            avg_dice = sum(dice_scores) / len(dice_scores)
-            wandb.log({"val_dice_manual": avg_dice}, step=engine.state.epoch)
+    def _squeeze01(x):
+        # [B,1,H,W] -> [B,H,W]
+        return x[:, 0] if (x.ndim == 4 and x.shape[1] == 1) else x
+
+    def _to_numpy_image(x: torch.Tensor) -> np.ndarray:
+        """
+        Accepts [C,H,W] or [H,W] torch tensor, returns HxW or HxWx3 numpy float in [0,1].
+        We convert to numpy FIRST so wandb.Image won't try to permute a 2D torch tensor.
+        """
+        t = x.detach().cpu()
+        if t.ndim == 3:  # CHW
+            c, h, w = t.shape
+            if c == 1:
+                arr = t[0]  # HxW (grayscale)
+            else:
+                arr = t[:3].permute(1, 2, 0)  # HWC (RGB-ish)
+        elif t.ndim == 2:  # HxW
+            arr = t
         else:
-            logger.warning("No masks found for manual dice calculation.")
-    return handler
+            # Fallback: pick first channel then treat as HxW
+            arr = t.view(-1, *t.shape[-2:])[0]
+
+        arr = arr.float()
+        mn, mx = float(arr.min()), float(arr.max())
+        if mx > mn:
+            arr = (arr - mn) / (mx - mn)
+        else:
+            arr = arr * 0.0
+        return arr.numpy()
+
+    def _to_numpy_mask(x: torch.Tensor) -> np.ndarray:
+        """Accepts [H,W] (float 0/1 or logits). Returns uint8 HxW in {0,1}."""
+        t = x.detach().cpu()
+        if t.ndim == 3:
+            t = t[0]  # CHW->HW if needed
+        # ensure binary 0/1 for logging; keep as numpy 2D so W&B won't permute
+        t = (t > 0.5).to(torch.uint8)
+        return t.numpy()
+
+    def _collect_from_output(out):
+        if not isinstance(out, dict):
+            return None
+
+        images = _as_tensor(out.get("image"))
+        label = out.get("label", {})
+        pred = out.get("pred", {})
+
+        if not (isinstance(label, dict) and isinstance(pred, dict)):
+            return None
+        if "mask" not in label or "seg_out" not in pred:
+            return None
+
+        masks = _as_tensor(label["mask"])
+        logits = _as_tensor(pred["seg_out"])
+
+        # Pred mask: binary or multiclass -> [B,H,W] float 0/1 or class ids
+        if logits.ndim == 4 and logits.shape[1] == 1:
+            pmask = (torch.sigmoid(logits) > threshold).float()[:, 0]
+        elif logits.ndim == 4 and logits.shape[1] > 1:
+            pmask = torch.softmax(logits, dim=1).argmax(dim=1).float()
+        elif logits.ndim == 3:
+            pmask = (torch.sigmoid(logits) > threshold).float()
+        else:
+            return None
+
+        masks = _squeeze01(masks)  # [B,H,W]
+        return images, masks, pmask
+
+    def on_iteration(engine):
+        nonlocal buf_imgs, buf_gt, buf_pred
+        if len(buf_imgs) >= num_images:
+            return
+
+        pack = _collect_from_output(engine.state.output)
+        if pack is None:
+            return
+        images, masks, pmask = pack
+
+        b = min(images.shape[0], num_images - len(buf_imgs))
+        for i in range(b):
+            buf_imgs.append(images[i])
+            buf_gt.append(masks[i])
+            buf_pred.append(pmask[i])
+
+    def on_epoch_completed(engine):
+        nonlocal buf_imgs, buf_gt, buf_pred
+        if not buf_imgs:
+            return
+
+        for i in range(len(buf_imgs)):
+            img_np = _to_numpy_image(buf_imgs[i])
+            gt_np = _to_numpy_mask(buf_gt[i])
+            pr_np = _to_numpy_mask(buf_pred[i])
+
+            wandb.log(
+                {
+                    "image": wandb.Image(img_np, caption="input"),
+                    "gt_mask": wandb.Image(gt_np),
+                    "pred_mask": wandb.Image(pr_np),
+                },
+                step=engine.state.iteration,
+            )
+
+        buf_imgs.clear()
+        buf_gt.clear()
+        buf_pred.clear()
+
+    def attach(evaluator):
+        evaluator.add_event_handler(Events.ITERATION_COMPLETED, on_iteration)
+        evaluator.add_event_handler(Events.EPOCH_COMPLETED, on_epoch_completed)
+        return evaluator
+
+    return attach
+
+
+# def make_image_logger(num_images: int = 4, threshold: float = 0.5):
+#     """
+#     Accumulates a few (image, gt_mask, pred_mask) pairs from engine.state.output
+#     during evaluation and logs them to W&B at EPOCH_COMPLETED.
+
+#     Assumes engine.state.output is a dict like:
+#       {
+#         "image": Tensor|MetaTensor [B, C, H, W],
+#         "label": {"mask": Tensor|MetaTensor [B, 1, H, W] or [B, H, W], ...},
+#         "pred":  {"seg_out": Tensor [B, C', H, W]},  # C'==1 (binary) or >1 (multiclass)
+#       }
+#     """
+
+#     buf_imgs, buf_gt, buf_pred = [], [], []
+
+#     def _as_tensor(x):
+#         return x.as_tensor() if isinstance(x, MetaTensor) else x
+
+#     def _squeeze01(x):
+#         # [B,1,H,W] -> [B,H,W]
+#         return x[:, 0] if (x.ndim == 4 and x.shape[1] == 1) else x
+
+#     def _collect_from_output(out):
+#         if not isinstance(out, dict):
+#             return None
+
+#         images = _as_tensor(out.get("image"))
+#         label = out.get("label", {})
+#         pred = out.get("pred", {})
+
+#         if not (isinstance(label, dict) and isinstance(pred, dict)):
+#             return None
+#         if "mask" not in label or "seg_out" not in pred:
+#             return None
+
+#         masks = _as_tensor(label["mask"])
+#         logits = _as_tensor(pred["seg_out"])
+
+#         # Pred mask: binary or multiclass
+#         if logits.ndim == 4 and logits.shape[1] == 1:
+#             pmask = (torch.sigmoid(logits) > threshold).float()  # [B,1,H,W]
+#             pmask = pmask[:, 0]  # [B,H,W]
+#         elif logits.ndim == 4 and logits.shape[1] > 1:
+#             pmask = torch.softmax(logits, dim=1).argmax(dim=1).float()  # [B,H,W]
+#         elif logits.ndim == 3:
+#             pmask = (torch.sigmoid(logits) > threshold).float()         # [B,H,W]
+#         else:
+#             return None
+
+#         masks = _squeeze01(masks)  # [B,H,W]
+#         return images, masks, pmask
+
+#     def on_iteration(engine):
+#         nonlocal buf_imgs, buf_gt, buf_pred
+#         if len(buf_imgs) >= num_images:
+#             return  # already full for this epoch
+
+#         pack = _collect_from_output(engine.state.output)
+#         if pack is None:
+#             return
+#         images, masks, pmask = pack
+
+#         b = min(images.shape[0], num_images - len(buf_imgs))
+#         for i in range(b):
+#             buf_imgs.append(images[i].detach().cpu())
+#             buf_gt.append(masks[i].detach().cpu())
+#             buf_pred.append(pmask[i].detach().cpu())
+
+#     def on_epoch_completed(engine):
+#         nonlocal buf_imgs, buf_gt, buf_pred
+#         if not buf_imgs:
+#             return
+#         # Log each triplet
+#         for i in range(len(buf_imgs)):
+#             wandb.log(
+#                 {
+#                     "image": wandb.Image(buf_imgs[i], caption="GT vs Pred"),
+#                     "gt_mask": wandb.Image(buf_gt[i]),
+#                     "pred_mask": wandb.Image(buf_pred[i]),
+#                 },
+#                 step=engine.state.iteration,
+#             )
+#         # reset for next epoch
+#         buf_imgs.clear()
+#         buf_gt.clear()
+#         buf_pred.clear()
+
+#     def attach(evaluator):
+#         evaluator.add_event_handler(Events.ITERATION_COMPLETED, on_iteration)
+#         evaluator.add_event_handler(Events.EPOCH_COMPLETED, on_epoch_completed)
+#         return evaluator
+
+#     return attach
+
+
+# def image_log_handler(model, prepare_batch, num_images=4):
+#     def _handler(engine):
+#         model.eval()
+#         device = next(model.parameters()).device
+#         with torch.no_grad():
+#             all_images = []
+#             all_gt_masks = []
+#             all_pred_masks = []
+#             for batch in engine.state.dataloader:
+#                 batch_data = prepare_batch(batch, device)
+#                 images = batch_data["image"]
+#                 # Only log if a mask is present
+#                 if "mask" not in batch_data:
+#                     continue
+#                 gt_mask = batch_data["mask"]
+#                 # Support model outputs (class_logits, seg_logits)
+#                 model_output = model(images)
+#                 if isinstance(model_output, (tuple, list)) and len(model_output) > 1:
+#                     seg_logits = model_output[1]
+#                 else:
+#                     seg_logits = model_output
+#                 pred_mask = (torch.sigmoid(seg_logits) > 0.5).float()
+#                 for i in range(len(images)):
+#                     all_images.append(images[i].cpu())
+#                     all_gt_masks.append(gt_mask[i].cpu())
+#                     all_pred_masks.append(pred_mask[i].cpu())
+#                     if len(all_images) >= num_images:
+#                         break
+#                 if len(all_images) >= num_images:
+#                     break
+#             if len(all_images) == 0:
+#                 return
+#             for i in range(min(len(all_images), num_images)):
+#                 wandb.log({
+#                     "image": wandb.Image(all_images[i], caption="GT vs Pred"),
+#                     "gt_mask": wandb.Image(all_gt_masks[i]),
+#                     "pred_mask": wandb.Image(all_pred_masks[i]),
+#                 })
+#     return _handler
+
+    # def _handler(engine):
+    #     model.eval()
+    #     device = next(model.parameters()).device
+    #     with torch.no_grad():
+    #         all_images = []
+    #         all_gt_masks = []
+    #         all_pred_masks = []
+    #         for batch in engine.state.dataloader:
+    #             # images, targets = prepare_batch(batch, device)
+    #             batch_data = prepare_batch(batch, device)
+    #             images = batch_data["image"]
+    #             targets = batch_data  # targets are in batch_data['mask'], batch_data['label'], etc.
+    #             # gt_mask = batch_data.get("mask")
+    #             # label = batch_data.get("label")
+
+    #             # handle as classification-only or skip
+    #             if not (isinstance(targets, dict) and "mask" in targets):
+    #                 continue
+    #             if isinstance(model(images), (tuple, list)) and len(model(images)) > 1:
+    #                 _, seg_logits = model(images)
+    #             else:
+    #                 seg_logits = model(images)
+    #             pred_mask = (torch.sigmoid(seg_logits) > 0.5).float()
+    #             gt_mask = targets["mask"]
+    #             for i in range(len(images)):
+    #                 all_images.append(images[i].cpu())
+    #                 all_gt_masks.append(gt_mask[i].cpu())
+    #                 all_pred_masks.append(pred_mask[i].cpu())
+    #                 if len(all_images) >= num_images:
+    #                     break
+    #             if len(all_images) >= num_images:
+    #                 break
+    #         if len(all_images) == 0:
+    #             return
+    #         for i in range(min(len(all_images), num_images)):
+    #             wandb.log({
+    #                 "image": wandb.Image(all_images[i], caption="GT vs Pred"),
+    #                 "gt_mask": wandb.Image(all_gt_masks[i]),
+    #                 "pred_mask": wandb.Image(all_pred_masks[i]),
+    #             })
+    # return _handler
+
+
+# def manual_dice_handler(model, prepare_batch):
+#     logger = logging.getLogger(__name__)
+
+#     def handler(engine):
+#         val_loader = engine.state.dataloader
+#         device = engine.state.device
+#         model.eval()
+#         dice_scores = []
+#         with torch.no_grad():
+#             for batch in val_loader:
+#                 inputs, targets = prepare_batch(batch, device=device, non_blocking=False)
+#                 label = batch.get("label", {})
+#                 if not isinstance(label, dict) or "mask" not in label:
+#                     logger.warning("Skipping batch without 'mask' in nested label dict (classification-only batch).")
+#                     continue
+#                 outputs = model(inputs)
+#                 _, seg_output = outputs
+#                 pred_mask = (torch.sigmoid(seg_output) > 0.5).float()
+#                 true_mask = targets["mask"]
+#                 intersection = (pred_mask * true_mask).sum(dim=(1, 2, 3))
+#                 union = pred_mask.sum(dim=(1, 2, 3)) + true_mask.sum(dim=(1, 2, 3))
+#                 dice = (2.0 * intersection + 1e-7) / (union + 1e-7)
+#                 dice_scores.extend(dice.cpu().tolist())
+#         if dice_scores:
+#             avg_dice = sum(dice_scores) / len(dice_scores)
+#             wandb.log({"val_dice_manual": avg_dice}, step=engine.state.epoch)
+#         else:
+#             logger.warning("No masks found for manual dice calculation.")
+#     return handler

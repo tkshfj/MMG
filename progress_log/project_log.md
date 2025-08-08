@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-08-08
+- Fix: Standardize metrics, fix AUC/confmat, refactor W&B image logging (engine.state.output) and clean up config/handlers
+- WIP: Add weighted multitask loss
+
 # 2025-08-03
 - Debug: AUC Output Transform
 
