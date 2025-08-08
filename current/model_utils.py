@@ -222,51 +222,6 @@ class MultitaskUNetModel(BaseModel):
             "iou_name": "val_iou",
         }
 
-        # def multitask_loss(output, target):
-        #     from metrics_utils import get_classification_metrics, get_segmentation_metrics
-        #     # output: dict with class_logits, seg_out
-        #     # target: dict with label, mask
-        #     class_logits = output["class_logits"]
-        #     seg_out = output["seg_out"]
-        #     labels = target["label"]
-        #     masks = target["mask"]
-        #     return get_classification_metrics()["loss"](class_logits, labels) + get_segmentation_metrics()["loss"](seg_out, masks)
-
-        # def multitask_loss(y_pred, y_true):
-        #     """Handles both dict (training) and tensor (metric) cases."""
-        #     # If y_true is a dict (from training step)
-        #     if isinstance(y_true, dict):
-        #         class_logits, seg_out = None, None
-        #         if isinstance(y_pred, tuple):
-        #             if len(y_pred) == 2:
-        #                 class_logits, seg_out = y_pred
-        #             elif len(y_pred) == 1:
-        #                 class_logits, seg_out = y_pred[0], None
-        #         elif isinstance(y_pred, dict):
-        #             class_logits = y_pred.get("label", None)
-        #             seg_out = y_pred.get("mask", None)
-        #         else:
-        #             class_logits, seg_out = y_pred, None
-
-        #         loss = 0.0
-        #         if "label" in y_true and class_logits is not None:
-        #             loss += get_classification_metrics()["loss"](class_logits, y_true["label"])
-        #         if "mask" in y_true and seg_out is not None:
-        #             loss += get_segmentation_metrics()["loss"](seg_out, y_true["mask"])
-        #         if loss == 0.0:
-        #             raise ValueError(f"No valid targets found in y_true: keys={list(y_true.keys())}")
-        #         return loss
-        #     # If y_true is a tensor (from Ignite metric)
-        #     elif torch.is_tensor(y_true):
-        #         # Assume classification-only, match y_pred shape
-        #         return get_classification_metrics()["loss"](y_pred, y_true)
-        #     else:
-        #         raise TypeError(f"Unsupported y_true type for multitask_loss: {type(y_true)}")
-
-    # def get_loss_fn(self) -> Callable:
-    #     from metrics_utils import multitask_loss
-    #     return multitask_loss
-
 
 # ViT
 class ViTModel(BaseModel):
