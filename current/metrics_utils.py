@@ -267,49 +267,6 @@ def seg_confmat_output_transform_default(output):
     raise ValueError("seg_confmat_output_transform_default expects dict or list[dict]")
 
 
-# def seg_confmat_output_transform(output):
-#     """
-#     Transform output for Ignite ConfusionMatrix (segmentation).
-#     Converts logits to probabilities with 2 channels for binary, or softmax for multiclass.
-#     Expects output: list of dicts, each with keys 'pred' and 'label'.
-#       - sample['pred'][1]: logits, shape [C, H, W] (C=1 or 2)
-#       - sample['label']['mask']: mask, shape [1, H, W] or [H, W]
-#     Returns:
-#         probs: [B, 2, H, W] (float, probabilities)
-#         mask:  [B, H, W]    (long, ground truth)
-#     """
-#     print("[DEBUG] seg_output_transform CALLED. type(output):", type(output))
-#     if not (isinstance(output, list) and all(isinstance(x, dict) for x in output)):
-#         raise ValueError("seg_confmat_output_transform expected list of dicts")
-
-#     probs_list = []
-#     masks_list = []
-#     for sample in output:
-#         seg_logits = sample['pred'][1]  # [C, H, W]
-#         # Handle binary case
-#         if seg_logits.shape[0] == 1:
-#             prob_fg = torch.sigmoid(seg_logits)              # [1, H, W]
-#             prob_bg = 1.0 - prob_fg                         # [1, H, W]
-#             probs = torch.cat([prob_bg, prob_fg], dim=0)     # [2, H, W]
-#         else:  # Multiclass
-#             probs = torch.softmax(seg_logits, dim=0)         # [C, H, W]
-#             assert probs.shape[0] >= 2, "Expected at least 2 channels for multiclass"
-#         probs_list.append(probs.unsqueeze(0))                # [1, C, H, W]
-
-#         mask = sample['label']['mask']                       # [1, H, W] or [H, W]
-#         if mask.ndim == 3 and mask.shape[0] == 1:
-#             mask = mask.squeeze(0)
-#         masks_list.append(mask.unsqueeze(0))                 # [1, H, W]
-
-#     probs_batch = torch.cat(probs_list, dim=0)               # [B, C, H, W]
-#     masks_batch = torch.cat(masks_list, dim=0).long()        # [B, H, W]
-
-#     print("[DEBUG] seg_confmat_output_transform: probs_batch shape:", probs_batch.shape, "masks_batch shape:", masks_batch.shape)
-#     print("[DEBUG] seg_confmat_output_transform: probs_batch dtype:", probs_batch.dtype, "masks_batch dtype:", masks_batch.dtype)
-
-#     return probs_batch, masks_batch
-
-
 # Attach Metrics
 def attach_metrics(evaluator, model, config=None, val_loader=None):
     """Attach metrics to evaluator using model registry's get_metrics() method."""

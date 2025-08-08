@@ -9,7 +9,6 @@ logger = logging.getLogger(__name__)
 
 import os
 import ast
-# from ast import literal_eval
 import glob
 import cv2
 import numpy as np
@@ -215,73 +214,6 @@ class MammoSegmentationDataset(Dataset):
 
         return sample
 
-        # # Prepare labels
-        # label_tensor = torch.tensor(int(row['label'])) if self.task in ['classification', 'multitask'] else None
-        # # label_dict = {}
-        # if self.task in ['segmentation', 'multitask']:
-        #     mask_paths = self.resolve_mask_paths(row)
-        #     if not mask_paths:
-        #         raise IndexError(f"No valid mask for idx={idx}")
-        #     mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
-        #     mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
-        #     mask = np.expand_dims(mask, axis=0)
-        #     mask_tensor = torch.as_tensor(mask, dtype=torch.float32)
-        # else:
-        #     mask_tensor = None
-
-        # # Always convert image to tensor
-        # image_tensor = torch.as_tensor(img, dtype=torch.float32)
-
-        # # Return a FLAT dict, not nested
-        # sample = {"image": image_tensor}
-        # if label_tensor is not None:
-        #     sample["label"] = label_tensor
-        # if mask_tensor is not None:
-        #     sample["mask"] = mask_tensor
-
-        # if self.transform:
-        #     sample = self.transform(sample)
-        #     # (Optionally ensure everything is a tensor)
-        #     for k in sample:
-        #         if not isinstance(sample[k], torch.Tensor):
-        #             sample[k] = torch.as_tensor(sample[k])
-
-        # return sample
-
-        # if self.task in ['classification', 'multitask']:
-        #     label_dict["label"] = int(row['label'])
-        # if self.task in ['segmentation', 'multitask']:
-        #     mask_value = row['roi_mask_path']
-        #     if isinstance(mask_value, str):
-        #         if mask_value.strip().startswith("[") and mask_value.strip().endswith("]"):
-        #             mask_paths = literal_eval(mask_value)
-        #         else:
-        #             mask_paths = [mask_value]
-        #     elif isinstance(mask_value, list):
-        #         mask_paths = mask_value
-        #     else:
-        #         raise ValueError(f"Unexpected type for mask paths: {type(mask_value)} (value: {mask_value})")
-        #     mask_paths = self.resolve_mask_paths(row)
-        #     if not mask_paths:
-        #         logger.warning(f"Skipping sample idx={idx} (no mask paths): {row.to_dict()}")
-        #         # Optionally, raise or return a dummy/empty sample
-        #         raise IndexError(f"No valid mask for idx={idx}")
-        #     mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
-        #     mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
-        #     mask = np.expand_dims(mask, axis=0)
-        #     label_dict["mask"] = mask
-        # sample = {"image": img, "label": label_dict if label_dict else None}
-
-        # if self.transform:
-        #     sample = self.transform(sample)
-        #     # print(f"[DEBUG after transform] type: {type(sample)}, sample: {sample}")
-        #     if not isinstance(sample, dict):
-        #         raise TypeError(f"Transform returned a non-dict: {type(sample)}, value: {sample}")
-        # if 'label_transforms' in sample:
-        #     sample.pop('label_transforms')
-        # # print(f"[DEBUG returning sample] type: {type(sample)}, sample keys: {list(sample.keys())}")
-        # return sample
-
 
 # Custom Transform for Nested Labels
 def to_long_nested_label(label):
@@ -325,39 +257,6 @@ def nested_dict_collate(batch):
     """
     import torch
     elem = batch[0]
-    # batch: list of samples (each is dict)
-    # if isinstance(elem, torch.Tensor):
-    #     for i, item in enumerate(batch):
-    #         if not isinstance(item, torch.Tensor):
-    #             print(f"[FATAL] Collate: Non-tensor in batch at idx {i}: type={type(item)}, value={item}")
-    #     return torch.stack(batch, dim=0)
-    # elif isinstance(elem, dict):
-    #     # Print for debug
-    #     # print("[nested_dict_collate] Collating dict with keys:", elem.keys())
-    #     # for k in elem.keys():
-    #     #     print(f"  - Key '{k}': type={type(elem[k])}, example={elem[k]}")
-    #     # Remove metadata keys before recursing
-    #     filtered = {k: v for k, v in elem.items() if not k.endswith("_transforms")}
-    #     return {k: nested_dict_collate([d[k] for d in batch]) for k in filtered}
-    #     # return {k: nested_dict_collate([d[k] for d in batch]) for k in elem}
-    # elif isinstance(elem, (int, float)):
-    #     return torch.tensor(batch)
-    # elif elem is None:
-    #     return None
-    # elif isinstance(elem, list):
-    #     if all(isinstance(x, torch.Tensor) for x in elem):
-    #         return torch.stack(batch, dim=0)
-    #     elif all(isinstance(x, (int, float)) for x in elem):
-    #         return torch.tensor(batch)
-    #     elif all(isinstance(x, dict) for x in elem):
-    #         # If this happens at top-level, it's a bug.
-    #         # Try to collapse it: assume all dicts have the same keys.
-    #         keys = elem.keys()
-    #         return {k: nested_dict_collate([d[k] for d in batch]) for k in keys}
-    #     elif all(isinstance(x, list) for x in elem):
-    #         print("[DEBUG] Collate produced a list! This should not happen:", type(elem), elem)
-    #     else:
-    #         raise TypeError(f"Unsupported type for collate: {type(elem)}")
 
     if isinstance(elem, torch.Tensor):
         # Stack tensors
@@ -436,9 +335,6 @@ def build_dataloaders(
     val_ds = MammoSegmentationDataset(val_df, input_shape=input_shape, task=task, transform=val_transforms)
     test_ds = MammoSegmentationDataset(test_df, input_shape=input_shape, task=task, transform=test_transforms)
     # DataLoaders
-    # train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True, collate_fn=nested_dict_collate)
-    # val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2), collate_fn=nested_dict_collate)
-    # test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2), collate_fn=nested_dict_collate)
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
     val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
@@ -447,37 +343,5 @@ def build_dataloaders(
     if debug:
         batch = next(iter(val_loader))
         print_batch_debug(batch)
-
-        # print("\n[DEBUG] Validating val_loader content for segmentation/multitask task:")
-        # val_sample = next(iter(val_loader))
-        # print("  Batch keys:", val_sample.keys())
-        # # Print image shape
-        # print("  Image shape:", val_sample["image"].shape)
-        # # Print mask shape and sample values (if present)
-        # if "mask" in val_sample:
-        #     print("  Mask shape:", val_sample["mask"].shape)
-        #     print("  Mask sample values:", val_sample["mask"][0, 0, :10, :10])
-        # else:
-        #     print("  [WARNING] 'mask' not in batch!")
-        # # Print label info (if present)
-        # if "label" in val_sample:
-        #     print("  Label shape:", val_sample["label"].shape)
-        #     print("  Label values:", val_sample["label"])
-        # else:
-        #     print("  [WARNING] 'label' not in batch!")
-
-        # val_sample = next(iter(val_loader))
-        # print("  Batch keys:", val_sample.keys())
-        # label = val_sample.get("label")
-        # if isinstance(label, dict):
-        #     print("  Label dict keys:", label.keys())
-        #     if "mask" in label:
-        #         print("  Mask shape:", label['mask'].shape)
-        #     else:
-        #         print("  [WARNING] 'mask' not in label dict!")
-        # else:
-        #     print("  [WARNING] 'label' is not a dict or missing!")
-        # print("  Image shape:", val_sample["image"].shape)
-        # print("  Mask sample values:", label["mask"][0, 0, :10, :10])
 
     return train_loader, val_loader, test_loader

@@ -292,12 +292,6 @@ class ViTModel(BaseModel):
             "iou_name": "val_iou",
         }
 
-    # def get_seg_output_transform(self):
-    #     # No segmentation output for ViT, but keep signature consistent
-    #     def _noop_transform(output):
-    #         return output
-    #     return _noop_transform
-
 
 # SwinUNETR
 class SwinUNETRModel(BaseModel):
