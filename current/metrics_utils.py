@@ -466,7 +466,7 @@ def make_metrics(
             "val_acc": Accuracy(output_transform=cls_ot),
             "val_prec": Precision(output_transform=cls_ot, average=False),
             "val_recall": Recall(output_transform=cls_ot, average=False),
-            "val_auc": ROC_AUC(output_transform=auc_ot, average=True),
+            "val_auc": ROC_AUC(output_transform=auc_ot),
             "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_ot),
         })
 
