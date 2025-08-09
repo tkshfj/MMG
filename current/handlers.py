@@ -127,7 +127,7 @@ def register_handlers(
 
 
 def wandb_log_handler(engine):
-    """Log all available metrics from engine.state.metrics to wandb, handling types robustly."""
+    """ Log all available metrics from engine.state.metrics to wandb, handling types robustly. """
     print("wandb_log_handler metrics (before logging):", engine.state.metrics)
     # Just in case, print type and content for further diagnosis
     print("wandb_log_handler engine.state.metrics.keys():", list(engine.state.metrics.keys()))
@@ -215,7 +215,7 @@ def make_image_logger(num_images: int = 4, threshold: float = 0.5):
         return arr.numpy()
 
     def _to_numpy_mask(x: torch.Tensor) -> np.ndarray:
-        """Accepts [H,W] (float 0/1 or logits). Returns uint8 HxW in {0,1}."""
+        """ Accepts [H,W] (float 0/1 or logits). Returns uint8 HxW in {0,1}. """
         t = x.detach().cpu()
         if t.ndim == 3:
             t = t[0]  # CHW->HW if needed

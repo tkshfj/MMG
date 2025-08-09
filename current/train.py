@@ -14,6 +14,23 @@ from handlers import register_handlers, wandb_log_handler
 from metrics_utils import attach_metrics
 
 
+def debug_batch(batch, model=None):
+    x = batch.get("image")
+    if x is not None:
+        print("image:", tuple(x.shape))
+    # classification labels (common aliases)
+    for k in ("label", "classification", "class", "target", "y"):
+        if k in batch:
+            print(f"{k}:", tuple(batch[k].shape))
+            break
+    # segmentation masks (print only if present or model supports seg)
+    if model and "segmentation" in getattr(model, "get_supported_tasks", lambda: [])():
+        for k in ("mask", "seg", "mask_label", "mask_true"):
+            if k in batch:
+                print(f"{k}:", tuple(batch[k].shape))
+                break
+
+
 def main(config=None):
     # Initialize Weights & Biases run (config passed from sweep)
     with wandb.init(config=config, dir="outputs"):
@@ -23,8 +40,6 @@ def main(config=None):
         device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         config["device"] = device
         run_id = wandb.run.id
-        # alpha = float(wandb.config["alpha"])
-        # beta  = float(wandb.config["beta"])
 
         # Build data loaders
         train_loader, val_loader, test_loader = build_dataloaders(
@@ -62,18 +77,12 @@ def main(config=None):
 
         # DEBUG
         batch = next(iter(train_loader))
+        # debug_batch(batch, model)
         print(batch["image"].shape)  # torch.Size([B, 1, H, W])
-        print(batch["mask"].shape)   # torch.Size([B, 1, H, W]), if segmentation
-        print(batch["label"].shape)  # torch.Size([B]), for classification/multitask
-
-        # print(f"[DEBUG batch] type: {type(batch)}, keys: {getattr(batch, 'keys', lambda: None)()}")
-        # images = batch["image"]
-        # print(f"[DEBUG images] type: {type(images)}")
-        # batch = next(iter(val_loader))
-        # print(type(batch))
-        # print(batch.keys())
-        # print(type(batch["image"]))  # Should be torch.Tensor
-        # print(type(batch["label"]))  # Should be dict for multitask
+        if "label" in batch:
+            print(batch["label"].shape)  # torch.Size([B]), for classification/multitask
+        if "mask" in batch:
+            print(batch["mask"].shape)  # torch.Size([B, 1, H, W]), if segmentation
 
         # Get optimizer, loss, metrics, output_transform, handler kwargs
         optimizer = get_optimizer(
@@ -154,7 +163,7 @@ def main(config=None):
 
         # DEBUG: Check model output shape
         b = next(iter(train_loader))
-        prep_fn = make_prepare_batch("multitask")  # or "classification"/"segmentation"
+        prep_fn = make_prepare_batch(task)
         pb_out = prep_fn(b, device=device, non_blocking=True)
 
         if isinstance(pb_out, tuple) and len(pb_out) == 4:

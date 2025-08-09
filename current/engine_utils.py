@@ -100,7 +100,6 @@ def prepare_batch(
 ) -> Tuple[torch.Tensor, Any, tuple, dict]:
     """
     Returns (inputs, targets, args, kwargs) for MONAI SupervisedTrainer/Evaluator.
-
     task:
       - "classification": targets = LongTensor (B,)
       - "segmentation" : targets = FloatTensor (B,1,H,W)
