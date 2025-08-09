@@ -273,18 +273,47 @@ def cls_output_transform(output):
 
 def auc_output_transform(output, positive_index=1):
     """
-    AUROC transform: returns (scores[B], labels[B]) where scores are prob of the positive class.
+    AUROC transform:
+      - binary:  scores[B], labels[B]
+      - multiclass (C>2): probs[B,C], one-hot labels[B,C] (OvR)
     """
-    logits, labels = cls_output_transform(output)
-    if logits.ndim == 2 and logits.shape[-1] == 2:
-        scores = torch.softmax(logits, dim=-1)[:, positive_index]
-    elif logits.ndim == 2 and logits.shape[-1] == 1:
-        scores = torch.sigmoid(logits.squeeze(-1))
-    elif logits.ndim == 1:
+    import torch
+    import torch.nn.functional as F
+
+    logits, labels = cls_output_transform(output)  # logits [B,C], labels [B]
+    if logits.ndim == 1:
+        # [B] logits (rare) -> binary
         scores = torch.sigmoid(logits)
-    else:
-        raise ValueError(f"[auc_output_transform] Unexpected logits shape: {tuple(logits.shape)}")
-    return scores, labels
+        return scores, labels
+
+    B, C = logits.shape
+    if C == 1:
+        scores = torch.sigmoid(logits.squeeze(-1))         # [B]
+        return scores, labels
+    if C == 2:
+        scores = torch.softmax(logits, dim=-1)[:, positive_index]  # [B]
+        return scores, labels
+
+    # C > 2: multiclass -> one-vs-rest
+    probs = torch.softmax(logits, dim=-1)                  # [B,C]
+    onehot = F.one_hot(labels.to(torch.int64), num_classes=C).to(probs.dtype)  # [B,C]
+    return probs, onehot
+
+
+# def auc_output_transform(output, positive_index=1):
+#     """
+#     AUROC transform: returns (scores[B], labels[B]) where scores are prob of the positive class.
+#     """
+#     logits, labels = cls_output_transform(output)
+#     if logits.ndim == 2 and logits.shape[-1] == 2:
+#         scores = torch.softmax(logits, dim=-1)[:, positive_index]
+#     elif logits.ndim == 2 and logits.shape[-1] == 1:
+#         scores = torch.sigmoid(logits.squeeze(-1))
+#     elif logits.ndim == 1:
+#         scores = torch.sigmoid(logits)
+#     else:
+#         raise ValueError(f"[auc_output_transform] Unexpected logits shape: {tuple(logits.shape)}")
+#     return scores, labels
 
 
 # Segmentation transforms
@@ -437,7 +466,7 @@ def make_metrics(
             "val_acc": Accuracy(output_transform=cls_ot),
             "val_prec": Precision(output_transform=cls_ot, average=False),
             "val_recall": Recall(output_transform=cls_ot, average=False),
-            "val_auc": ROC_AUC(output_transform=auc_ot),
+            "val_auc": ROC_AUC(output_transform=auc_ot, average=True),
             "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_ot),
         })
 
