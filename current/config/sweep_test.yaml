@@ -1,5 +1,5 @@
 # sweep_test.yaml
-program: train.py
+program: main.py
 method: bayes
 
 metric:
@@ -14,6 +14,14 @@ parameters:
     value: multitask
   run_cap:
     value: 1
+  debug:
+    value: true
+  debug_transforms:
+    value: false   # set true only when a one-off check needed
+  # class_counts:
+  #   value: [n0, n1]    # enables prior-bias init + inverse-freq weights
+  # class_weights:
+  #   value: [w0, w1]
 
   # Data settings
   input_shape:

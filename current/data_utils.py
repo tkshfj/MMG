@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import pydicom
 import torch
+from typing import Any, Optional, Sequence
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from monai.transforms import Compose, ScaleIntensityd, RandFlipd, RandRotate90d, ToTensord, Lambdad
@@ -63,17 +64,19 @@ def filter_dataframe(df, require_mask=True, require_image=True, verbose=True):
     if require_mask:
         mask &= df.apply(check_mask_exists, axis=1)
     filtered = df[mask].reset_index(drop=True)
-    if verbose:
-        print(f"[INFO] Filtered DataFrame: {len(filtered)} of {len(df)} samples remain after file existence check.")
-        missing = df[~mask]
-        if not missing.empty:
-            print("[WARNING] Dropped samples (file not found):")
-            print(missing[['image_path', 'mask_paths', 'roi_mask_path']].head())
+
+    # if verbose:
+    #     print(f"[INFO] Filtered DataFrame: {len(filtered)} of {len(df)} samples remain after file existence check.")
+    #     missing = df[~mask]
+    #     if not missing.empty:
+    #         print("[WARNING] Dropped samples (file not found):")
+    #         print(missing[['image_path', 'mask_paths', 'roi_mask_path']].head())
+
     return filtered
 
 
 def print_batch_debug(batch):
-    print("Batch keys:", batch.keys())
+    print("[DEBUG] Batch keys:", batch.keys())
     for k, v in batch.items():
         if isinstance(v, torch.Tensor):
             print(f"  {k}: shape {tuple(v.shape)}, dtype {v.dtype}, sample: {v.flatten()[0:10].tolist()}")
@@ -300,8 +303,9 @@ def build_dataloaders(
 ):
     """ Builds train/val/test DataLoaders from a CSV split by given proportions."""
     df = pd.read_csv(metadata_csv)
-    print("[DEBUG] DataFrame head:")
-    print(df.head())
+
+    # print("[DEBUG] DataFrame head:")
+    # print(df.head())
 
     # Filter for files that exist
     require_mask = (task in ['segmentation', 'multitask'])
@@ -345,3 +349,52 @@ def build_dataloaders(
         print_batch_debug(batch)
 
     return train_loader, val_loader, test_loader
+
+
+def _extract_labels_from_batch(batch: Any) -> torch.Tensor:
+    """
+    Supports common batch structures:
+      - (x, y) or (x, y, ...)
+      - {"label": y, ...} or {"y": y, ...}
+    Returns 1D long tensor of labels.
+    """
+    y = None
+    if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+        y = batch[1]
+    elif isinstance(batch, dict):
+        if "label" in batch:
+            y = batch["label"]
+        elif "y" in batch:
+            y = batch["y"]
+    if y is None:
+        raise ValueError("Could not find labels in batch for class count estimation.")
+    y = y if torch.is_tensor(y) else torch.as_tensor(y)
+    return y.view(-1).long()
+
+
+def compute_class_counts_from_loader(loader, num_classes: Optional[int] = None) -> Sequence[int]:
+    """
+    Iterate once over loader to tally label frequencies.
+    If num_classes is None, infer from max label + 1.
+    """
+    counts = None
+    seen_max = -1
+    for batch in loader:
+        y = _extract_labels_from_batch(batch)
+        seen_max = max(seen_max, int(y.max().item()))
+        if num_classes is None:
+            k = seen_max + 1
+            if counts is None:
+                counts = torch.zeros(k, dtype=torch.long)
+            elif k > counts.numel():
+                counts = torch.nn.functional.pad(counts, (0, k - counts.numel()))
+        else:
+            if counts is None:
+                counts = torch.zeros(num_classes, dtype=torch.long)
+            elif counts.numel() != num_classes:
+                raise ValueError(f"num_classes={num_classes} but tally has {counts.numel()} slots")
+        binc = torch.bincount(y, minlength=counts.numel())
+        counts[:binc.numel()] += binc
+    if counts is None:
+        raise RuntimeError("No batches seen while computing class counts.")
+    return [int(x) for x in counts.tolist()]

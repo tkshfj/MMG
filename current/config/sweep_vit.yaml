@@ -1,4 +1,5 @@
-program: train.py
+# sweep_vit.yaml
+program: main.py
 method: bayes
 
 metric:
@@ -6,68 +7,64 @@ metric:
   goal: maximize
 
 parameters:
-  # Core experiment settings
-  architecture:
-    value: vit
-  task:
-    value: classification
-  run_cap:
-    value: 20
+  # Core
+  architecture:        {value: vit}
+  task:                {value: classification}
+  run_cap:             {value: 20}
+  debug:               {value: true}
+  debug_transforms:    {value: false}
 
-  # Data settings
-  input_shape:
-    value: [256, 256]
-  in_channels:
-    value: 1
-  patch_size:
-    value: 16  # or [16, 16]
-  num_classes:
-    value: 2
-  num_workers:
-    value: 12
+  # Class imbalance (prefer counts; enables bias init + inverse-freq weights)
+  class_counts:        {value: [331, 232]}
+  # For explicit weights instead, comment the above and set:
+  # class_weights:     {values: [[0.7, 1.3], [1.0, 1.0]]}
 
-  # Fixed hyperparameters
-  epochs:
-    value: 40
-  base_learning_rate:
-    value: 0.0002
-
-  # Tunable hyperparameters
+  # Data
+  epochs:              {value: 40}
+  input_shape:         {value: [256, 256]}
+  in_channels:         {value: 1}
+  patch_size:          {value: 16}
+  num_classes:         {value: 2}
+  num_workers:         {value: 12}
   batch_size:
     values: [16, 32, 64]
 
-  lr_multiplier:
+  # Model (ViT)
+  hidden_size:
+    values: [384, 512, 768]
+  mlp_dim:
+    values: [1536, 2048, 3072]
+  num_layers:
+    values: [8, 10, 12]
+  num_heads:
+    values: [6, 8, 12]
+  dropout_rate:
     distribution: uniform
-    min: 0.8    # 0.95
-    max: 1.2    # 1.10
+    min: 0.10
+    max: 0.30
 
-  dropout:
-    distribution: uniform
-    min: 0.15   # 0.17
-    max: 0.25   # 0.20
+  # Optimizer / LR
+  optimizer:           {value: adamw}
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.001
 
-  l2_reg:
-    distribution: uniform
-    min: 0.00001   # 0.00006
-    max: 0.00012
+  # choose: "single" or "split"
+  lr_strategy:
+    values: ["single", "split"]
 
-  # Loss weighting hyperparameters
-  alpha:
-    values: [0.5, 1.0, 2.0]
-    # distribution: uniform
-    # min: 1.6
-    # max: 2.0
+  # Single-group LR (only when lr_strategy == "single")
+  lr:
+    distribution: log_uniform_values
+    min: 0.001
+    max: 0.003
 
-  beta:
-    values: [0.5, 1.0, 2.0]
-    # distribution: uniform
-    # min: 0.8
-    # max: 1.4
+  # Split LRs (only when lr_strategy == "split")
+  base_lr:
+    distribution: log_uniform_values
+    min: 0.00002
+    max: 0.0001
 
-
-# config:
-#   early_stop:
-#     patience: 10
-#     min_delta: 0.001
-#     metric: val_auc
-#     mode: max
+  head_multiplier:
+    values: [5.0, 10.0, 15.0]   # head_lr = base_lr * head_multiplier

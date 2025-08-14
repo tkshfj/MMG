@@ -1,5 +1,4 @@
 # metrics_utils.py
-import logging
 import torch
 from monai.data.meta_tensor import MetaTensor
 
@@ -15,24 +14,6 @@ def _to_tensor(x):
         return torch.as_tensor(x)
     except Exception as e:
         raise TypeError(f"_to_tensor: cannot convert type {type(x)}") from e
-
-
-def _coerce_factory(ot, default):
-    """
-    Accepts:
-      - None -> returns default
-      - a transform factory (zero-arg callable returning a transform) -> calls once
-      - a ready-to-use transform (callable taking `output`) -> returns as-is
-    """
-    if ot is None:
-        return default
-    try:
-        maybe = ot()
-        if callable(maybe):
-            return maybe
-    except TypeError:
-        pass
-    return ot
 
 
 def _wrap_output_transform(ot, name="output_transform"):
@@ -88,51 +69,64 @@ def cls_output_transform(output):
             return x
         return torch.as_tensor(x)
 
-    # tolerant extractors
+    def _pick_cls_from_seq(seq):
+        # Prefer 2D [B,C] tensors (classification head)
+        two_d = [t for t in seq if isinstance(t, torch.Tensor) and t.ndim == 2]
+        if two_d:
+            return two_d[0]
+        # Next: ViT-style [B,T,C] → take token 0 (or mean over T)
+        three_d = [t for t in seq if isinstance(t, torch.Tensor) and t.ndim == 3]
+        if three_d:
+            x = three_d[0]
+            return x[:, 0, :] if x.shape[1] >= 1 else x.mean(dim=1)
+        # Do NOT pick 4D [B,C,H,W] (likely segmentation); skip it
+        return None
+
     def _extract_logits(x):
-        # Tensors pass-through
+        # Tensors direct
         if isinstance(x, torch.Tensor):
             return x.float()
 
-        # Dict: try common paths first
         if isinstance(x, dict):
-            # common direct paths
-            for keys in (
-                ("pred", "class_logits"),
-                ("pred", "logits"),
-                ("class_logits",),
-                ("logits",),
-                ("y_pred",),
-                ("output",),
-                ("scores",),
-            ):
-                v = _get_nested(x, keys)
-                if v is not None:
-                    return _to_tensor(v).float()
-
-            # accept pred as tensor or nested dict with alternative keys
+            # If 'pred' exists, mine it first
             if "pred" in x:
-                v = x["pred"]
-                if isinstance(v, torch.Tensor):
-                    return v.float()
-                if isinstance(v, dict):
-                    for k in ("label", "y_pred", "cls", "out", "score", "logit"):
-                        if k in v:
-                            return _to_tensor(v[k]).float()
-                    # last resort: first tensor-like value inside pred
-                    for k, vv in v.items():
-                        if isinstance(vv, torch.Tensor):
-                            return vv.float()
+                p = x["pred"]
+                # pred is a tensor
+                if isinstance(p, torch.Tensor):
+                    if p.ndim == 2:  # [B,C]
+                        return p.float()
+                    if p.ndim == 3:  # [B,T,C]
+                        return (p[:, 0, :]).float() if p.shape[1] >= 1 else p.mean(dim=1).float()
+                    # 4D is probably segmentation; do not use as cls logits
+                # pred is a tuple/list: pick best candidate
+                if isinstance(p, (tuple, list)):
+                    cand = _pick_cls_from_seq(p)
+                    if cand is not None:
+                        return cand.float()
+                # pred is a dict: try common keys
+                if isinstance(p, dict):
+                    for k in ("class_logits", "logits", "y_pred", "scores", "output"):
+                        if k in p and isinstance(p[k], torch.Tensor):
+                            t = p[k]
+                            if t.ndim == 2:  # [B,C]
+                                return t.float()
+                            if t.ndim == 3:  # [B,T,C]
+                                return (t[:, 0, :]).float() if t.shape[1] >= 1 else t.mean(dim=1).float()
 
-            # last resort: first tensor-like value anywhere at top level
-            for k, v in x.items():
+            # Fall back to common top-level keys (NOT generic tensors like image)
+            for keys in (("pred", "class_logits"), ("pred", "logits"), ("class_logits",), ("logits",), ("y_pred",), ("scores",), ("output",)):
+                v = _get_nested(x, keys)
                 if isinstance(v, torch.Tensor):
-                    return v.float()
+                    if v.ndim == 2:
+                        return v.float()
+                    if v.ndim == 3:
+                        return (v[:, 0, :]).float() if v.shape[1] >= 1 else v.mean(dim=1).float()
 
+            # No acceptable logits found
             _debug_once_dict(x, "logits-miss")
-            raise KeyError("[cls_output_transform] Could not find logits in dict.")
+            raise KeyError("[cls_output_transform] Could not find classification logits in dict.")
 
-        # Fallback: try to coerce
+        # Anything else: try tensor coercion (rare)
         return _to_tensor(x).float()
 
     def _extract_labels(x):
@@ -182,63 +176,27 @@ def cls_output_transform(output):
         return y.long().view(-1)
 
     def _finalize(logits, labels):
+        # Keep batch B; reduce only non-class dims
+        if logits.ndim == 3:            # [B,T,C] -> [B,C]
+            logits = logits[:, 0, :] if logits.shape[1] >= 1 else logits.mean(dim=1)
+        elif logits.ndim >= 4:          # [B,C,H,W,...] -> [B,C]
+            dims = tuple(range(2, logits.ndim))
+            logits = logits.mean(dim=dims)
 
-        def _collapse_to_BC(x):
-            # Already [B, C]
-            if x.ndim == 2:
-                return x
-            # ViT-style [B, T, C] (tokens): prefer class token 0, else mean over tokens
-            if x.ndim == 3:
-                # one-time debug
-                if not getattr(cls_output_transform, "_dbg_collapse3", False):
-                    print(f"[cls_output_transform] collapsing 3D logits {tuple(x.shape)} -> select token0/mean")
-                    cls_output_transform._dbg_collapse3 = True
-                try:
-                    return x[:, 0, :]  # class token
-                except Exception:
-                    return x.mean(dim=1)
-            # CNN-style [B, C, H, W, ...]: global average pool over spatial dims
-            if x.ndim >= 4:
-                if not getattr(cls_output_transform, "_dbg_collapseN", False):
-                    print(f"[cls_output_transform] collapsing ND logits {tuple(x.shape)} -> GAP over dims 2..N")
-                    cls_output_transform._dbg_collapseN = True
-                if x.shape[1] >= 2:
-                    dims = tuple(range(2, x.ndim))
-                    return x.mean(dim=dims)
-                else:
-                    # If channel isn’t at dim=1, assume last dim is C and average the middle
-                    # [B, *, C] where * can be any product of spatial dims
-                    x = x.view(x.shape[0], -1, x.shape[-1])
-                    return x.mean(dim=1)
-            # Fallback: [C] -> [1, C]
-            if x.ndim == 1:
-                return x.unsqueeze(0)
-            raise ValueError(f"[cls_output_transform] Unexpected logits rank: {x.ndim}")
+        if logits.ndim == 1:
+            logits = logits.unsqueeze(0)
 
-        logits = _collapse_to_BC(logits).float()
+        if logits.ndim != 2:
+            raise ValueError(f"[cls_output_transform] Expected [B,C], got {tuple(logits.shape)}")
+
         labels = labels.long().view(-1)
-
-        if logits.ndim != 2 or logits.shape[0] != labels.shape[0]:
-            raise ValueError(
-                f"[cls_output_transform] Incompatible shapes after collapse: logits={tuple(logits.shape)}, labels={tuple(labels.shape)}"
-            )
+        if logits.shape[0] != labels.shape[0]:
+            raise ValueError(f"[cls_output_transform] Incompatible shapes after collapse: logits={tuple(logits.shape)}, labels={tuple(labels.shape)}")
 
         if not getattr(cls_output_transform, "_printed", False):
             print(f"[cls_output_transform] -> logits {tuple(logits.shape)}, labels {tuple(labels.shape)}")
             cls_output_transform._printed = True
-        return logits, labels
-
-    # def _finalize(logits, labels):
-    #     if logits.ndim == 1:
-    #         logits = logits.unsqueeze(0)
-    #     if logits.ndim > 2 and logits.shape[-1] >= 2:
-    #         logits = logits.reshape(-1, logits.shape[-1])
-    #     if logits.ndim != 2:
-    #         raise ValueError(f"[cls_output_transform] Expected logits [B, C], got {tuple(logits.shape)}")
-    #     if not getattr(cls_output_transform, "_printed", False):
-    #         print(f"[cls_output_transform] -> logits {tuple(logits.shape)}, labels {tuple(labels.shape)}")
-    #         cls_output_transform._printed = True
-    #     return logits.float(), labels.long().view(-1)
+        return logits.float(), labels
 
     # accepted outer shapes
     # list[dict] decollated
@@ -271,6 +229,40 @@ def cls_output_transform(output):
     raise ValueError(f"[cls_output_transform] Unexpected output structure: type={tname}, preview={prev}")
 
 
+# Classification confusion-matrix transform (logits -> Ignite will argmax)
+def cls_confmat_output_transform(output):
+    """
+    Return (y_pred, y_true) where:
+      - y_pred: [B, C] logits/probabilities (no argmax here)
+      - y_true: [B] int64 labels
+    This matches ignite.metrics.ConfusionMatrix's expected input.
+    """
+    logits, y_true = cls_output_transform(output)  # logits [B,C], y_true [B] (or close)
+    # Handle MONAI MetaTensor or numpy gracefully
+    if hasattr(logits, "as_tensor"):
+        logits = logits.as_tensor()
+    if not torch.is_tensor(logits):
+        logits = torch.as_tensor(logits)
+    if hasattr(y_true, "as_tensor"):
+        y_true = y_true.as_tensor()
+    if not torch.is_tensor(y_true):
+        y_true = torch.as_tensor(y_true)
+    # Ensure float logits and 2D shape
+    logits = logits.float()
+    if logits.ndim == 1:
+        logits = logits.unsqueeze(0)
+    if logits.ndim == 2 and logits.shape[1] == 1:
+        # Defensive: expand binary [B,1] logits to two-logit form for CM with C=2
+        logits = torch.cat([-logits, logits], dim=1)
+    if logits.ndim != 2:
+        raise ValueError(f"cls_confmat_output_transform expects [B,C] logits, got {tuple(logits.shape)}")
+    # Labels to [B] int64 (handle one-hot if it sneaks in)
+    if y_true.ndim >= 2 and y_true.shape[-1] > 1:
+        y_true = y_true.argmax(dim=-1)
+    y_true = y_true.view(-1).long()
+    return logits, y_true
+
+
 def auc_output_transform(output, positive_index=1):
     """
     AUROC transform:
@@ -300,52 +292,82 @@ def auc_output_transform(output, positive_index=1):
     return probs, onehot
 
 
-# def auc_output_transform(output, positive_index=1):
-#     """
-#     AUROC transform: returns (scores[B], labels[B]) where scores are prob of the positive class.
-#     """
-#     logits, labels = cls_output_transform(output)
-#     if logits.ndim == 2 and logits.shape[-1] == 2:
-#         scores = torch.softmax(logits, dim=-1)[:, positive_index]
-#     elif logits.ndim == 2 and logits.shape[-1] == 1:
-#         scores = torch.sigmoid(logits.squeeze(-1))
-#     elif logits.ndim == 1:
-#         scores = torch.sigmoid(logits)
-#     else:
-#         raise ValueError(f"[auc_output_transform] Unexpected logits shape: {tuple(logits.shape)}")
-#     return scores, labels
-
-
 # Segmentation transforms
+def _unpack_engine_output(output):
+    """Return (y_pred, y_true) from common Ignite/MONAI outputs."""
+    match output:
+        case (y_pred, y_true, *_) | [y_pred, y_true, *_]:
+            return y_pred, y_true
+        case {"y_pred": y_pred, "y": y_true}:
+            return y_pred, y_true
+        case {"pred": y_pred, "label": y_true}:  # MONAI Supervised* default
+            return y_pred, y_true
+        case _:
+            return output, None
+
+
 def seg_output_transform(output):
-    """
-    Return (seg_logits, mask):
-      seg_logits: float [B, C, H, W] (or [B, 1, H, W] for binary)
-      mask:      long  [B, H, W] (class indices, not one-hot)
-    Accepts (y_pred, y) or dict with pred['seg_out'], label['mask'].
-    """
-    if isinstance(output, (tuple, list)) and len(output) == 2:
-        y_pred, y_true = output
-    else:
-        y_pred = output["pred"]["seg_out"]
-        y_true = output["label"]["mask"]
+    """Return (seg_logits [B,C,H,W] float, mask [B,H,W] long)."""
+    y_pred, y_true = _unpack_engine_output(output)
+
+    def get(d, k):
+        return d.get(k) if isinstance(d, dict) else None
+
+    def coalesce(*vals):
+        return next((v for v in vals if v is not None), None)
+
+    # logits
+    y_pred = coalesce(
+        get(y_pred, "seg_out"), get(y_pred, "logits"), get(y_pred, "seg"),
+        get(get(output, "pred"), "seg_out"), get(get(output, "pred"), "logits"), get(get(output, "pred"), "seg"),
+        get(get(output, "y_pred"), "seg_out"), get(get(output, "y_pred"), "logits"), get(get(output, "y_pred"), "seg"),
+        y_pred if not isinstance(y_pred, dict) else None,
+    )
+
+    # mask
+    y_true = coalesce(
+        get(y_true, "mask"), get(y_true, "seg"), get(y_true, "y"),
+        get(get(output, "label"), "mask"), get(get(output, "label"), "seg"), get(get(output, "label"), "y"),
+        get(output, "mask"),
+        y_true if not isinstance(y_true, dict) else None,
+    )
+
+    if y_pred is None or y_true is None:
+        raise ValueError("seg_output_transform: expected pred['seg_out'] and label['mask'] (or top-level 'mask').")
 
     seg_logits = _to_tensor(y_pred).float()
     mask = _to_tensor(y_true)
 
-    # logits -> [B, C, H, W]
-    if seg_logits.ndim == 3:         # [C,H,W] -> [1,C,H,W]
-        seg_logits = seg_logits.unsqueeze(0)
-
-    # mask -> [B, H, W] (indices)
-    if mask.ndim == 4:               # [B,C,H,W] or [B,1,H,W]
+    if seg_logits.ndim == 3:
+        seg_logits = seg_logits.unsqueeze(0)  # [C,H,W] -> [1,C,H,W]
+    if mask.ndim == 4:
         mask = mask[:, 0] if mask.shape[1] == 1 else mask.argmax(dim=1)
     elif mask.ndim == 3 and mask.shape[0] == 1:
-        mask = mask.squeeze(0)        # [1,H,W] -> [H,W]
+        mask = mask.squeeze(0)  # [1,H,W] -> [H,W]
     if mask.ndim == 2:
-        mask = mask.unsqueeze(0)      # [H,W] -> [1,H,W]
+        mask = mask.unsqueeze(0)  # [H,W] -> [1,H,W]
 
     return seg_logits, mask.long()
+
+
+def seg_confmat_output_transform(output):
+    """
+    Ignite ConfusionMatrix transform for segmentation.
+    Returns:
+        y_pred: [B, C, H, W] probs/logits (ConfusionMatrix will argmax if 4D)
+        y:      [B, H, W] integer mask
+    """
+    seg_logits, mask = seg_output_transform(output)
+    # Convert logits to probs for stability
+    if seg_logits.shape[1] == 1:
+        # seg_logits = torch.stack([-seg_logits[:, 0], seg_logits[:, 0]], dim=1)
+        # return seg_logits, mask.long()
+        prob_fg = torch.sigmoid(seg_logits)
+        prob_bg = 1.0 - prob_fg
+        y_pred = torch.cat([prob_bg, prob_fg], dim=1)
+    else:
+        y_pred = torch.softmax(seg_logits, dim=1)
+    return y_pred, mask
 
 
 def _seg_cm_normalizer(ot):
@@ -367,44 +389,8 @@ def _seg_cm_normalizer(ot):
     return f
 
 
-def seg_confmat_output_transform(output):
-    """
-    Ignite ConfusionMatrix transform for segmentation.
-    Returns:
-        y_pred: [B, C, H, W] probs/logits (ConfusionMatrix will argmax if 4D)
-        y:      [B, H, W] integer mask
-    """
-    seg_logits, mask = seg_output_transform(output)
-    # Convert logits to probs for stability
-    if seg_logits.shape[1] == 1:
-        prob_fg = torch.sigmoid(seg_logits)
-        prob_bg = 1.0 - prob_fg
-        y_pred = torch.cat([prob_bg, prob_fg], dim=1)
-    else:
-        y_pred = torch.softmax(seg_logits, dim=1)
-    return y_pred, mask
-
-
-def seg_discrete_output_transform(output, activation="sigmoid", threshold=0.5):
-    """
-    For metrics that expect discrete masks.
-    """
-    logits, y = seg_output_transform(output)
-    if activation == "sigmoid":          # binary / multi-label: (B,1,...)
-        probs = torch.sigmoid(logits)
-        y_pred = (probs > threshold).long()
-    elif activation == "softmax":        # multi-class: (B,C,...)
-        probs = torch.softmax(logits, dim=1)
-        y_pred = probs.argmax(dim=1)     # (B, H, W)
-    else:
-        raise ValueError(f"Unknown activation: {activation}")
-    return y_pred, y.long()
-
-
 def loss_output_transform(output):
-    """
-    For multitask loss metrics: return (pred_dict, target_dict) or (y_pred, y).
-    """
+    """For multitask loss metrics: return (pred_dict, target_dict) or (y_pred, y)."""
     if isinstance(output, dict) and ("pred" in output) and ("label" in output):
         return output["pred"], output["label"]
     if isinstance(output, (tuple, list)) and len(output) == 2:
@@ -412,15 +398,42 @@ def loss_output_transform(output):
     raise ValueError(f"[loss_output_transform] Unexpected output type: {type(output)}")
 
 
-# Metric bundles
-def get_segmentation_metrics():
-    import torch.nn as nn
-    return {"loss": nn.BCEWithLogitsLoss()}
+# metrics utils
+def _coerce_factory(ot, default):
+    """
+    Accepts:
+      - None -> returns default
+      - a transform factory (zero-arg callable returning a transform) -> calls once
+      - a ready-to-use transform (callable taking `output`) -> returns as-is
+    """
+    if ot is None:
+        return default
+    try:
+        res = ot()
+        return res if callable(res) else ot
+    except TypeError:
+        return ot
 
 
-def get_classification_metrics(loss_fn=None):
-    import torch.nn as nn
-    return {"loss": nn.CrossEntropyLoss()}
+def _seg_ce_loss_ot(output):
+    """Shape y_pred/y for CrossEntropy over segmentation.
+       - logits: [B,C,H,W]; if C==1 -> make 2-channel by [-x, x]
+       - target: [B,H,W] (Long indices)
+    """
+    import torch
+    logits, y = seg_output_transform(output)  # logits [B,C,H,W], y [B,H,W] (Long)
+    if logits.ndim != 4:
+        raise ValueError(f"_seg_ce_loss_ot expects logits [B,C,H,W], got {tuple(logits.shape)}")
+    if logits.shape[1] == 1:  # binary -> 2-channel logits for CE
+        x = logits[:, 0:1]
+        logits = torch.cat([-x, x], dim=1)
+    return logits, y.long()
+
+
+def _build_seg_cm_ot():
+    """ConfusionMatrix OT with probs (2 channels if binary) + index masks."""
+    base = _coerce_factory(None, seg_confmat_output_transform)   # -> callable
+    return _wrap_output_transform(_seg_cm_normalizer(base), "seg_cm_ot")
 
 
 def make_metrics(
@@ -432,75 +445,64 @@ def make_metrics(
     seg_cm_ot=None,
     seg_num_classes=None,
     multitask=False,
-    **legacy,  # accept old kwarg names
+    **_,
 ):
     """
-    Build a metrics dict suitable for Ignite .attach(...).
-
-    Args:
-        tasks: list/iterable containing "classification" and/or "segmentation"
-        num_classes: classification classes
-        loss_fn: optional callable
-        cls_ot: classification output_transform (factory or callable). If None, uses cls_output_transform
-        auc_ot: auc output_transform (factory or callable). If None, uses auc_output_transform
-        seg_cm_ot: segmentation confusion-matrix output_transform. If None, uses seg_confmat_output_transform
-        seg_num_classes: classes for segmentation confmat; default 2 if None
-        multitask: if True, wires a combined val_loss via loss_output_transform
+    Build metrics for the active tasks.
+      tasks: iterable of {"classification","segmentation"}
+      num_classes: classification C
+      seg_num_classes: segmentation classes (default 2)
+      multitask: attach unified val_loss via loss_output_transform (requires combined loss_fn)
     """
     from ignite.metrics import Accuracy, ConfusionMatrix, Loss, DiceCoefficient, JaccardIndex, Precision, Recall, ROC_AUC
     import torch.nn as nn
 
-    # Resolve and wrap transforms safely
-    cls_ot = _wrap_output_transform(_coerce_factory(cls_ot, cls_output_transform), "cls_ot")
-    auc_ot = _wrap_output_transform(_coerce_factory(auc_ot, lambda out: auc_output_transform(out)), "auc_ot")
-
-    # Build a normalized seg CM transform (probs + index labels)
-    _seg_cm_base = _coerce_factory(seg_cm_ot, seg_confmat_output_transform)
-    seg_cm_ot = _wrap_output_transform(_seg_cm_normalizer(_seg_cm_base), "seg_cm_ot")
-
-    metrics = {}
-
-    # Classification metrics
-    if ("classification" in tasks) or multitask:
-        metrics.update({
-            "val_acc": Accuracy(output_transform=cls_ot),
-            "val_prec": Precision(output_transform=cls_ot, average=False),
-            "val_recall": Recall(output_transform=cls_ot, average=False),
-            "val_auc": ROC_AUC(output_transform=auc_ot),
-            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_ot),
-        })
-
-    # Segmentation metrics (via ConfusionMatrix)
-    if ("segmentation" in tasks) or multitask:
-        # Default to 2 for binary segmentation if not provided; enforce >1
-        seg_nc = int(seg_num_classes) if seg_num_classes is not None else 2
-        if seg_nc <= 1:
-            print("[make_metrics] seg_num_classes <= 1 detected; using 2 for binary segmentation CM.")
-            seg_nc = 2
-
-        seg_cm = ConfusionMatrix(num_classes=seg_nc, output_transform=seg_cm_ot)
-        metrics.update({
-            "val_dice": DiceCoefficient(cm=seg_cm),
-            "val_iou": JaccardIndex(cm=seg_cm),
-            "val_seg_confmat": seg_cm,
-        })
-
-    # Loss metrics (single-task / mixed-task / multitask combined)
+    tasks = set(tasks or [])
     has_cls = "classification" in tasks
     has_seg = "segmentation" in tasks
     mixed_task = (has_cls and has_seg and not multitask)
 
+    metrics = {}
+
+    # classification metrics
+    if has_cls or multitask:
+        _cls_ot = _wrap_output_transform(_coerce_factory(cls_ot, cls_output_transform), "cls_ot")
+        _auc_ot = _wrap_output_transform(_coerce_factory(auc_ot, lambda out: auc_output_transform(out)), "auc_ot")
+
+        metrics.update({
+            "val_acc": Accuracy(output_transform=_cls_ot),
+            "val_prec": Precision(output_transform=_cls_ot, average=False),
+            "val_recall": Recall(output_transform=_cls_ot, average=False),
+            "val_auc": ROC_AUC(output_transform=_auc_ot),
+            # Use dedicated OT for CM so shapes are guaranteed [B,C] vs [B]
+            "val_cls_confmat": ConfusionMatrix(num_classes=num_classes, output_transform=cls_confmat_output_transform),
+        })
+
+    # segmentation metrics
+    if has_seg or multitask:
+        seg_nc = max(2, int(seg_num_classes) if seg_num_classes is not None else 2)
+        _seg_cm = ConfusionMatrix(
+            num_classes=seg_nc,
+            output_transform=(_wrap_output_transform(
+                _seg_cm_normalizer(_coerce_factory(seg_cm_ot, seg_confmat_output_transform)), "seg_cm_ot") if seg_cm_ot is not None else _build_seg_cm_ot()))
+        metrics.update({
+            "val_dice": DiceCoefficient(cm=_seg_cm),
+            "val_iou": JaccardIndex(cm=_seg_cm),
+            "val_seg_confmat": _seg_cm,
+        })
+
+    # loss metrics
     if mixed_task:
-        # Per-task losses when using two independent heads
+        # Per-task validation losses (independent heads)
         metrics["val_cls_loss"] = Loss(
             loss_fn=loss_fn or nn.CrossEntropyLoss(),
-            output_transform=cls_ot,
+            output_transform=_wrap_output_transform(_coerce_factory(cls_ot, cls_output_transform), "cls_ot"),
         )
+        # Seg loss: use CE with indices; binary (C=1) is handled by _seg_ce_loss_ot
         metrics["val_seg_loss"] = Loss(
-            loss_fn=loss_fn or nn.BCEWithLogitsLoss(),
-            output_transform=seg_output_transform,
+            loss_fn=nn.CrossEntropyLoss(),
+            output_transform=_wrap_output_transform(_coerce_factory(None, _seg_ce_loss_ot), "seg_ce_loss_ot"),
         )
-        # Intentionally omit unified `val_loss` in mixed-task mode.
     elif multitask:
         if loss_fn is None:
             raise ValueError("multitask=True requires a combined loss_fn")
@@ -509,54 +511,19 @@ def make_metrics(
         if has_cls and not has_seg:
             metrics["val_loss"] = Loss(
                 loss_fn=loss_fn or nn.CrossEntropyLoss(),
-                output_transform=cls_ot,
+                output_transform=_wrap_output_transform(_coerce_factory(cls_ot, cls_output_transform), "cls_ot"),
             )
         elif has_seg and not has_cls:
             metrics["val_loss"] = Loss(
-                loss_fn=loss_fn or nn.BCEWithLogitsLoss(),
-                output_transform=seg_output_transform,
+                # CE over indices works for binary (via _seg_ce_loss_ot) and multiclass
+                loss_fn=nn.CrossEntropyLoss() if loss_fn is None else loss_fn,
+                output_transform=_wrap_output_transform(_coerce_factory(None, _seg_ce_loss_ot), "seg_ce_loss_ot"),
             )
 
     return metrics
 
 
-# Optional: classification confmat transform (pred indices)
-def cls_confmat_output_transform(output):
-    """
-    Output transform for classification confusion matrix that returns predicted indices.
-    """
-    y_pred, y_true = cls_output_transform(output)
-    if y_pred.ndim > 1:
-        y_pred = y_pred.argmax(dim=1)
-    y_pred = y_pred.view(-1).long()
-    y_true = y_true.view(-1).long()
-    print(f"[DEBUG] Confmat Transform - y_pred.shape: {y_pred.shape}, y_true.shape: {y_true.shape}")
-    return y_pred, y_true
-
-
-# Attach helper
-def attach_metrics(evaluator, model, config=None, val_loader=None):
-    """Attach metrics to evaluator using model registry's get_metrics() method."""
-    metrics = model.get_metrics()
-    attached = []
-    for name, metric in metrics.items():
-        metric.attach(evaluator, name)
-        attached.append(name)
-    logging.info(f"Attached metrics: {', '.join(attached)}")
-    if hasattr(evaluator, "metrics"):
-        print("[attach_metrics] Registered metrics:", list(evaluator.metrics.keys()))
-    elif hasattr(evaluator, "_metrics"):
-        print("[attach_metrics] Registered metrics:", list(evaluator._metrics.keys()))
-    else:
-        print("[attach_metrics] Registered metrics not available.")
-    return attached
-
-
 __all__ = [
-    # factories/bundles
-    "make_metrics", "get_classification_metrics", "get_segmentation_metrics",
-    # core transforms
-    "cls_output_transform", "auc_output_transform", "seg_output_transform",
-    "seg_confmat_output_transform", "seg_discrete_output_transform",
-    "loss_output_transform", "cls_confmat_output_transform",
+    "make_metrics", "cls_output_transform", "auc_output_transform", "seg_output_transform",
+    "cls_confmat_output_transform", "seg_confmat_output_transform", "loss_output_transform"
 ]

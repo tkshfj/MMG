@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-08-10 to 2025-08-14
+- Refactor (MONAI/Ignite/W&B): Add task-aware metric construction, consistent output transforms, W&B step semantics, and hardened logging/checkpointing
+- TODO: Add evaluator scheduling
+
 # 2025-08-09
 - refactor(model): use sweep-defined alpha/beta in multitask get_loss_fn
 - refactor(pipeline): solidify transforms/metrics, clamp seg\_num\_classes≥2, robust cls OT (token/GAP), tolerant multitask loss, ABC+ROC\_AUC fixes

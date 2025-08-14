@@ -1,4 +1,4 @@
-program: train.py
+program: main.py
 method: bayes
 
 metric:
@@ -56,10 +56,3 @@ parameters:
     # distribution: uniform
     # min: 0.8
     # max: 1.4
-
-# config:
-#   early_stop:
-#     patience: 10
-#     min_delta: 0.001
-#     metric: val_auc
-#     mode: max

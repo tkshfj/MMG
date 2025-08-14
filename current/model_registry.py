@@ -1,14 +1,14 @@
 # model_registry.py
-from model_protocol import ModelRegistryProtocol
 from typing import Dict
-from model_utils import (
-    SimpleCNNModel,
-    DenseNet121Model,
-    UNetModel,
-    MultitaskUNetModel,
-    ViTModel,
-    SwinUNETRModel,
-)
+from model_protocol import ModelRegistryProtocol
+
+from models.simple_cnn import SimpleCNNModel
+from models.densenet121 import DenseNet121Model
+from models.unet import UNetModel
+from models.multitask_unet import MultitaskUNetModel
+from models.vit import ViTModel
+from models.swin_unetr import SwinUNETRModel
+
 
 MODEL_REGISTRY: Dict[str, ModelRegistryProtocol] = {
     "simple_cnn": SimpleCNNModel,
@@ -18,3 +18,6 @@ MODEL_REGISTRY: Dict[str, ModelRegistryProtocol] = {
     "vit": ViTModel,
     "swin_unetr": SwinUNETRModel,
 }
+
+
+__all__ = ["MODEL_REGISTRY"]
