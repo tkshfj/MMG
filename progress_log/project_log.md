@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-08-16
+- Rename dirs: mtlunet_monai->monai_v1; previous->monai_v2; recent->monai_v3
+
 # 2025-08-15
 - Archive legacy MONAI/Ignite code
 - Close W&B sweeps for recent MONAI/Ignite Multitask U-Net (121 runs, August 09-14)
