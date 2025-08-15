@@ -2,7 +2,7 @@ program: main.py
 method: bayes
 
 metric:
-  name: val_auc
+  name: val_multi
   goal: maximize
 
 parameters:
