@@ -3,7 +3,7 @@ program: main.py
 method: bayes
 
 metric:
-  name: val_auc
+  name: val_multi
   goal: maximize
 
 parameters:
@@ -40,6 +40,8 @@ parameters:
     value: 40
   base_learning_rate:
     value: 0.0002
+  multi_weight:
+    value: 0.65
 
   # Tunable hyperparameters
   batch_size:

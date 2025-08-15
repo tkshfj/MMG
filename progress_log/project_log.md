@@ -4,6 +4,7 @@
 - Archive legacy MONAI/Ignite code
 - Close W&B sweeps for recent MONAI/Ignite Multitask U-Net (121 runs, August 09-14)
 - Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (* runs, August 15-)
+- Refactor: Integrate a weighted harmonic mean val_multi into make_metrics
 
 # 2025-08-10 to 2025-08-14
 - Refactor MONAI/Ignite Multitask U-Net pipeline: Add task-aware metric construction, consistent output transforms, W&B step semantics, and hardened logging/checkpointing

@@ -436,6 +436,16 @@ def _build_seg_cm_ot():
     return _wrap_output_transform(_seg_cm_normalizer(base), "seg_cm_ot")
 
 
+def compute_val_multi(metrics: dict, w: float = 0.65,
+                      auc_key: str = "val_auc", dice_key: str = "val_dice") -> float:
+    """Weighted harmonic mean of AUC and Dice. Returns 0.0 if either is missing/zero."""
+    auc = float(metrics.get(auc_key, 0.0) or 0.0)
+    dice = float(metrics.get(dice_key, 0.0) or 0.0)
+    if auc <= 0.0 or dice <= 0.0:
+        return 0.0
+    return 1.0 / (w / auc + (1.0 - w) / dice)
+
+
 def make_metrics(
     tasks,
     num_classes,
@@ -455,6 +465,7 @@ def make_metrics(
       multitask: attach unified val_loss via loss_output_transform (requires combined loss_fn)
     """
     from ignite.metrics import Accuracy, ConfusionMatrix, Loss, DiceCoefficient, JaccardIndex, Precision, Recall, ROC_AUC
+    from ignite.metrics import MetricsLambda
     import torch.nn as nn
 
     tasks = set(tasks or [])
@@ -519,6 +530,30 @@ def make_metrics(
                 loss_fn=nn.CrossEntropyLoss() if loss_fn is None else loss_fn,
                 output_transform=_wrap_output_transform(_coerce_factory(None, _seg_ce_loss_ot), "seg_ce_loss_ot"),
             )
+
+    if multitask and ("val_auc" in metrics) and ("val_dice" in metrics):
+        # Weighted harmonic mean of AUC and Dice (vector)
+        w = float(_.get("multi_weight", 0.65))
+        eps = 1e-8
+        metrics["val_multi"] = MetricsLambda(
+            lambda auc, dice: 1.0 / (w / (auc + eps) + (1.0 - w) / (dice + eps)),
+            metrics["val_auc"], metrics["val_dice"]
+        )
+
+        # Foreground only (common in med-seg, scaler)
+        # dice_fg = MetricsLambda(lambda d: d[1], metrics["val_dice"])  # pick class-1
+        # w, eps = 0.65, 1e-8
+        # metrics["val_multi"] = MetricsLambda(
+        #     lambda auc, d: 1.0 / (w / (auc + eps) + (1.0 - w) / (d + eps)),
+        #     metrics["val_auc"], dice_fg
+        # )
+
+        # Mean Dice over classes (macro, scalar)
+        # dice_mean = MetricsLambda(lambda d: d.mean(), metrics["val_dice"])
+        # metrics["val_multi"] = MetricsLambda(
+        #     lambda auc, d: 1.0 / (w / (auc + eps) + (1.0 - w) / (d + eps)),
+        #     metrics["val_auc"], dice_mean
+        # )
 
     return metrics
 

@@ -21,6 +21,8 @@ parameters:
     value: 40
   input_shape:
     value: [256, 256]
+  multi_weight:
+    value: 0.65
 
   # Tunable hyperparameters
   batch_size:
