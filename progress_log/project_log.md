@@ -2,6 +2,7 @@
 
 # 2025-08-16
 - Rename dirs: mtlunet_monai->monai_v1; previous->monai_v2; recent->monai_v3
+- Refactor: Schedulers, Sweeps and Metrics in MONAI/Ignite Pipeline
 
 # 2025-08-15
 - Archive legacy MONAI/Ignite code

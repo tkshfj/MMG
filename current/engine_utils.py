@@ -1,10 +1,13 @@
 # engine_utils.py
 from __future__ import annotations
 import torch
+import numpy as np
 from enum import Enum
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union
 from monai.engines import SupervisedTrainer, SupervisedEvaluator
 from ignite.metrics import Metric
+from ignite.engine import Events, Engine
+from optim_factory import get_scheduler, SchedulerSpec
 
 
 def build_trainer(
@@ -42,6 +45,7 @@ def build_evaluator(
     postprocessing: Optional[Callable] = None,
     inferer: Optional[Callable] = None,
 ) -> SupervisedEvaluator:
+    """Build a MONAI SupervisedEvaluator and attach provided metrics."""
     assert callable(prepare_batch), "prepare_batch must be callable"
 
     evaluator = SupervisedEvaluator(
@@ -167,10 +171,7 @@ def _normalize_task(task: Union[str, Task]) -> Task:
 def _pick(d: Dict[str, Any], *keys: str) -> Any:
     if not isinstance(d, dict):
         return None
-    for k in keys:
-        if k in d:
-            return d[k]
-    return None
+    return next((d[k] for k in keys if k in d), None)
 
 
 def _to_tensor(x: Any) -> torch.Tensor:
@@ -184,7 +185,6 @@ def _to_tensor(x: Any) -> torch.Tensor:
     if isinstance(x, torch.Tensor):
         return x
     try:
-        import numpy as np
         if isinstance(x, np.ndarray):
             return torch.from_numpy(x)
     except Exception:
@@ -197,23 +197,17 @@ def _to_device(t: torch.Tensor, device: torch.device, non_blocking: bool) -> tor
 
 
 def _tuple_batch_to_dict(seq: Sequence[Any]) -> Dict[str, Any]:
-    # Supports (x, y) or (x, y, m)
+    """Supports (x, y) or (x, y, m). If y is a dict, merge its keys."""
     n = len(seq)
+    if n not in (2, 3):
+        raise TypeError(f"Unsupported tuple/list batch length: {n} (expected 2 or 3)")
+    x, *rest = seq
+    out: Dict[str, Any] = {"image": x}
     if n == 2:
-        x, y = seq
-        if isinstance(y, dict):
-            out = {"image": x}
-            out.update(y)
-            return out
-        return {"image": x, "label": y}
-    if n == 3:
-        x, y, m = seq
-        if isinstance(y, dict):
-            out = {"image": x, "mask": m}
-            out.update(y)
-            return out
-        return {"image": x, "label": y, "mask": m}
-    raise TypeError(f"Unsupported tuple/list batch length: {n} (expected 2 or 3)")
+        (y,) = rest
+        return {**out, **y} if isinstance(y, dict) else {**out, "label": y}
+    y, m = rest
+    return ({**out, **y, "mask": m} if isinstance(y, dict) else {**out, "label": y, "mask": m})
 
 
 def _to_batch_dict(batch: Union[Dict[str, Any], Sequence[Any]]) -> Dict[str, Any]:
@@ -285,6 +279,74 @@ def _debug_print(
     if y_seg is not None:
         uniq = torch.unique(y_seg.detach())
         print(f"  mask:  shape={tuple(y_seg.shape)}, dtype={y_seg.dtype}, unique[:6]={uniq[:6].tolist()}")
+
+
+def attach_scheduler(
+    cfg: Any,
+    trainer: Engine,
+    evaluator: Optional[Engine],
+    optimizer,
+    train_loader: Optional[Any] = None,
+    use_monai_handler: bool = False,
+) -> Optional[object]:
+    """
+    Creates and attaches LR scheduler to Ignite events.
+    Returns the underlying scheduler (or None).
+    """
+    spec: SchedulerSpec = get_scheduler(cfg, optimizer)
+    if spec.scheduler is None and spec.step_cadence is None:
+        return None
+
+    # Special case: OneCycle requires steps_per_epoch or total_steps, and must step per-iteration.
+    if spec.step_cadence == "iteration" and spec.scheduler is None and getattr(spec, "needs_train_len", False):
+        if train_loader is None:
+            raise ValueError("OneCycleLR needs train_loader to compute steps_per_epoch.")
+        steps_per_epoch = len(train_loader)
+        kwargs = spec._onecycle_kwargs
+        spec.scheduler = torch.optim.lr_scheduler.OneCycleLR(
+            optimizer=optimizer,
+            epochs=int(getattr(cfg, "epochs", 1)),
+            steps_per_epoch=steps_per_epoch,
+            **kwargs,
+        )
+
+    sch = spec.scheduler
+    if sch is None:
+        return None
+
+    # Helper: just step the scheduler; no calls to get_lr() (which may be NotImplemented)
+    def _safe_step(_engine=None):
+        try:
+            sch.step()
+        except Exception as e:
+            # Avoid killing the run if a stray step() call happens at epoch 0 or similar
+            print(f"[scheduler] step() failed ({type(sch).__name__}): {e}")
+
+    cadence = (spec.step_cadence or "").lower()
+
+    if cadence == "epoch":
+        trainer.add_event_handler(Events.EPOCH_COMPLETED, _safe_step)
+
+    elif cadence == "iteration":
+        trainer.add_event_handler(Events.ITERATION_COMPLETED, _safe_step)
+
+    elif cadence == "plateau":
+        if evaluator is None:
+            raise ValueError("ReduceLROnPlateau needs evaluator to read the monitored metric.")
+        monitor_key = str(getattr(cfg, "monitor", "val_loss"))
+
+        @evaluator.on(Events.COMPLETED)
+        def _step_plateau(_):
+            metrics = evaluator.state.metrics or {}
+            if monitor_key not in metrics:
+                return
+            value = float(metrics[monitor_key])
+            try:
+                sch.step(value)  # direction handled by sch.mode set in get_scheduler()
+            except Exception as e:
+                print(f"[scheduler] ReduceLROnPlateau.step({monitor_key}={value}) failed: {e}")
+
+    return sch
 
 
 __all__ = ["Task", "PrepareBatch", "make_prepare_batch"]
