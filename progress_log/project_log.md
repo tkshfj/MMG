@@ -1,13 +1,17 @@
 # Project Log
 
+# 2025-08-17
+- Refactor the sweep config to log val/multi, val/dice, val/iou, val/prec, val/recall as the vector means
+
 # 2025-08-16
 - Rename dirs: mtlunet_monai->monai_v1; previous->monai_v2; recent->monai_v3
-- Refactor: Schedulers, Sweeps and Metrics in MONAI/Ignite Pipeline
+- Refactor: schedulers, sweeps and metrics in MONAI/Ignite Pipeline
+- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: 6g24co4r, * runs, August 17-)
 
 # 2025-08-15
 - Archive legacy MONAI/Ignite code
 - Close W&B sweeps for recent MONAI/Ignite Multitask U-Net (121 runs, August 09-14)
-- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (* runs, August 15-)
+- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: 69481690, 14 runs, August 15-16)
 - Refactor: Integrate a weighted harmonic mean val_multi into make_metrics
 
 # 2025-08-10 to 2025-08-14

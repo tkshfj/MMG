@@ -43,11 +43,9 @@ def _to_scalar_dict(
 
     for k, v in metrics.items():
         nk = norm(k)
-
         # tensors → numpy
         if torch.is_tensor(v):
             v = v.detach().cpu().numpy()
-
         if isinstance(v, np.ndarray):
             # 2D confusion matrices → emit cells + matrix under val/... prefix
             if log_confmat and v.ndim == 2 and is_confmat_key(k):
@@ -57,14 +55,12 @@ def _to_scalar_dict(
                         out[f"{nk}_{i}{j}"] = int(cm[i, j])
                 out[f"{nk}_matrix"] = cm.tolist()
                 continue
-
             # scalar
             if v.ndim == 0:
                 val = float(v.item())
                 if np.isfinite(val):
                     out[nk] = val
                 continue
-
             # vector → val/dice/0, val/iou/1, ...
             if allow_vectors and v.ndim == 1:
                 for i, vi in enumerate(v.tolist()):
@@ -72,20 +68,17 @@ def _to_scalar_dict(
                     if np.isfinite(val):
                         out[f"{nk}{vector_sep}{i}"] = val
                 continue
-
             # fallback: mean
             val = float(np.mean(v))
             if np.isfinite(val):
                 out[nk] = val
             continue
-
         # plain numbers
         if isinstance(v, (float, int, np.floating, np.integer)):
             val = float(v)
             if np.isfinite(val):
                 out[nk] = val
             continue
-
         # things with .item()
         try:
             val = float(v.item())
@@ -121,21 +114,27 @@ def make_wandb_logger(
             "iteration",
             0,
         ))
-
         # pick metrics
         m = dict(engine.state.metrics or {})
         if metric_names:
             m = {k: m[k] for k in metric_names if k in m}
+        flat = _to_scalar_dict(m, allow_vectors=True)
 
-        flat = _to_scalar_dict(m, allow_vectors=True)  # your improved flattener
+        # create scalar sweep target from the per-class values
+        def add_macro_mean(prefix: str):
+            a, b = f"{prefix}/0", f"{prefix}/1"
+            if a in flat and b in flat and prefix not in flat:
+                flat[prefix] = 0.5 * (flat[a] + flat[b])
+
+        for k in ("val/multi", "val/dice", "val/iou", "val/prec", "val/recall"):
+            add_macro_mean(k)
+
         payload = {"epoch": epoch, "global_step": global_step, **flat}
-
         if step_by == "omit":
             step_arg = {}
         else:
             step = global_step if step_by == "global" else epoch
             step_arg = {"step": step}
-
         if debug:
             logger.info("wandb log: step_by=%s, step=%s, keys=%s",
                         step_by, step_arg.get("step"), list(flat.keys()))
@@ -170,7 +169,7 @@ def register_handlers(
     checkpoint_prefix = f"{arch_name}"
     best_model_prefix = f"{arch_name}_best"
 
-    # Report what WE plan to log
+    # Report metrics to log
     if debug_handlers:
         planned = list(metric_names) if metric_names else "(all evaluator metrics)"
         logger.info("[register_handlers] Will log metrics: %s", planned)
