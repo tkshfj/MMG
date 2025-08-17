@@ -252,6 +252,13 @@ def make_wandb_logger(
         # flatten (emits per-class as val/dice/0 etc., keeps scalar keys above)
         flat = _to_scalar_dict(m, allow_vectors=True)
 
+        def add_macro_mean(prefix: str):
+            a, b = f"{prefix}/0", f"{prefix}/1"
+            if a in flat and b in flat and prefix not in flat:
+                flat[prefix] = 0.5 * (flat[a] + flat[b])
+        for k in ("val/multi", "val/dice", "val/iou", "val/prec", "val/recall"):
+            add_macro_mean(k)
+
         # payload + step control
         payload = {"epoch": epoch, "global_step": global_step, **flat}
         if step_by == "omit":
@@ -260,13 +267,13 @@ def make_wandb_logger(
             step_arg = {"step": (global_step if step_by == "global" else epoch)}
 
         if debug:
-            logger.info("wandb log: step_by=%s, step=%s, keys=%s",
-                        step_by, step_arg.get("step"), list(flat.keys()))
+            logger.info("wandb log: step_by=%s, step=%s, keys=%s", step_by, step_arg.get("step"), list(flat.keys()))
         try:
             wandb.log(payload, **step_arg)
         except Exception as e:
             logger.warning("wandb.log failed: %s", e)
-        return _handler
+
+    return _handler
 
 
 def register_handlers(
@@ -386,7 +393,7 @@ def register_handlers(
 
     evaluator.add_event_handler(
         Events.COMPLETED,
-        make_wandb_logger(trainer=trainer, evaluator=evaluator, metric_names=metric_names, step_by="global")
+        make_wandb_logger(trainer=trainer, evaluator=evaluator, metric_names=metric_names, step_by="global", debug=True)
     )
 
     # Early stopping
