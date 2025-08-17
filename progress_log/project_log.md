@@ -2,8 +2,9 @@
 
 # 2025-08-17
 - Refactor W&B sweep config to log val/multi, val/dice, val/iou, val/prec and val/recall as the vector means
-- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: 1brphv69, * runs, August 17-)
+- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: 3ewpciv6, * runs, August 17-)
 - Refactor simpleCNN: class-weighted CE + multi-class prior bias; auto class_counts; sweep/eval diagnostics
+- Launch W&B sweeps for refactored MONAI/Ignite Simple CNN (run_id: l518t31y, * runs, August 17-)
 
 # 2025-08-16
 - Rename dirs: mtlunet_monai->monai_v1; previous->monai_v2; recent->monai_v3
