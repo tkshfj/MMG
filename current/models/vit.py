@@ -1,8 +1,7 @@
 # vit.py
 import logging
-logger = logging.getLogger(__name__)
-
 from typing import Any, List, Dict, Callable, Sequence, Optional, Tuple
+
 import math
 import torch
 import torch.nn as nn
@@ -10,6 +9,8 @@ import torch.nn as nn
 from models.model_base import BaseModel
 from metrics_utils import cls_output_transform
 from monai.networks.nets import ViT
+
+logger = logging.getLogger(__name__)
 
 
 class ViTModel(BaseModel):
