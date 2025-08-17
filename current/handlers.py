@@ -164,31 +164,52 @@ def make_wandb_logger(
 
         # optional subset
         if metric_names:
-            m = {k: m[k] for k in metric_names if k in m}
+            keep = set(metric_names)
+            # include namespace synonyms so we don’t drop synthesized keys
+            keep |= {k.replace("_", "/") for k in metric_names}
+            keep |= {k.replace("/", "_") for k in metric_names}
+            m = {k: v for k, v in m.items() if k in keep}
 
         # flatten (emits per-class as val/dice/0 etc., keeps scalar keys above)
         flat = _to_scalar_dict(m, allow_vectors=True)
 
         def add_macro_mean(prefix: str):
-            a, b = f"{prefix}/0", f"{prefix}/1"
-            if a in flat and b in flat and prefix not in flat:
-                flat[prefix] = 0.5 * (flat[a] + flat[b])
+            pairs = [(f"{prefix}/0", f"{prefix}/1"), (f"{prefix}_0", f"{prefix}_1")]
+            for a, b in pairs:
+                if a in flat and b in flat and prefix not in flat:
+                    flat[prefix] = 0.5 * (flat[a] + flat[b])
+                    flat[prefix.replace("/", "_")] = flat[prefix]
+                    break
+
+        # def add_macro_mean(prefix: str):
+        #     a, b = f"{prefix}/0", f"{prefix}/1"
+        #     if a in flat and b in flat and prefix not in flat:
+        #         flat[prefix] = 0.5 * (flat[a] + flat[b])
+
         for k in ("val/multi", "val/dice", "val/iou", "val/prec", "val/recall"):
             add_macro_mean(k)
 
         # payload + step control
         payload = {"epoch": epoch, "global_step": global_step, **flat}
-        if step_by == "omit":
-            step_arg = {}
-        else:
-            step_arg = {"step": (global_step if step_by == "global" else epoch)}
-
+        step = None if step_by == "omit" else (global_step if step_by == "global" else epoch)
         if debug:
-            logger.info("wandb log: step_by=%s, step=%s, keys=%s", step_by, step_arg.get("step"), list(flat.keys()))
+            logger.info("wandb log: step_by=%s, step=%s, keys=%s",
+                        step_by, step, list(flat.keys()))
         try:
-            wandb.log(payload, **step_arg)
+            wandb.log(payload, **({} if step is None else {"step": step}))
         except Exception as e:
             logger.warning("wandb.log failed: %s", e)
+
+        # if step_by == "omit":
+        #     step_arg = {}
+        # else:
+        #     step_arg = {"step": (global_step if step_by == "global" else epoch)}
+        # if debug:
+        #     logger.info("wandb log: step_by=%s, step=%s, keys=%s", step_by, step_arg.get("step"), list(flat.keys()))
+        # try:
+        #     wandb.log(payload, **step_arg)
+        # except Exception as e:
+        #     logger.warning("wandb.log failed: %s", e)
 
     return _handler
 
