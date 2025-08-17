@@ -25,7 +25,7 @@ parameters:
   in_channels:         {value: 1}
   patch_size:          {value: 16}
   num_classes:         {value: 2}
-  num_workers:         {value: 12}
+  num_workers:         {value: 2}
   batch_size:
     values: [16, 32, 64]
 
