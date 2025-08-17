@@ -17,7 +17,7 @@ class MultitaskUNetModel(BaseModel):
     Plays nicely with BaseModel's task-aware loss and the refactored, task-gated metrics.
     """
 
-    # -------- Registry / construction --------
+    # Registry / construction
     def build_model(self, config: Any) -> Any:
         # Keep config on the instance so BaseModel can read knobs (task, weights, etc.)
         self.config = config
@@ -49,12 +49,12 @@ class MultitaskUNetModel(BaseModel):
             features=self.features,
         )
 
-    # -------- Capabilities --------
+    # Capabilities
     def get_supported_tasks(self) -> List[str]:
         # The wrapper supports all three modes; active mode is chosen in cfg["task"]
         return ["classification", "segmentation", "multitask"]
 
-    # -------- Handlers / metrics wiring (keep neutral; attach_metrics handles gating) --------
+    # Handlers / metrics wiring (keep neutral; attach_metrics handles gating)
     def get_handler_kwargs(self) -> Dict[str, Any]:
         # Avoid forcing metric flags here
         return {
@@ -63,7 +63,7 @@ class MultitaskUNetModel(BaseModel):
             "seg_output_transform": seg_output_transform,
         }
 
-    # -------- (Optional) logits extraction for external callers --------
+    # logits extraction for external callers
     def extract_logits(self, y_pred: Any) -> torch.Tensor:
         """
         Robustly pull classification logits from containers. Falls back to BaseModel for tensors/tuples.

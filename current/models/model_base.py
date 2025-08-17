@@ -339,12 +339,6 @@ class BaseModel(ModelRegistryProtocol):
 
         return nn.CrossEntropyLoss(**ce_kwargs)
 
-    # def _build_cls_loss(self) -> nn.Module:
-    #     # Weighted CE (uses config knobs if present)
-    #     ls = self._get("label_smoothing", None)
-    #     ig = self._get("ignore_index", None)
-    #     return self._get_ce_criterion(label_smoothing=ls, ignore_index=ig)
-
     def _build_seg_loss(self) -> nn.Module:
         # Default seg loss: CE over index masks (compatible with ConfusionMatrix/DiceCE flows)
         ig = self._get("ignore_index", None)
