@@ -1,12 +1,13 @@
 # simple_cnn.py
 import logging
-logger = logging.getLogger(__name__)
-
 from typing import Any, List, Dict, Callable
+
 import torch
 import torch.nn as nn
 from models.model_base import BaseModel
 from metrics_utils import cls_output_transform
+
+logger = logging.getLogger(__name__)
 
 
 class SimpleCNNModel(BaseModel):

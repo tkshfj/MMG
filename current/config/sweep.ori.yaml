@@ -3,7 +3,7 @@ program: main.py
 method: bayes
 
 metric:
-  name: val_multi
+  name: val/multi
   goal: maximize
 
 parameters:

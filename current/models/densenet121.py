@@ -1,12 +1,13 @@
 # densenet121.py
 import logging
-logger = logging.getLogger(__name__)
-
 from typing import Any, List, Dict, Callable
+
 import torch
 from models.model_base import BaseModel
 from metrics_utils import cls_output_transform
 from monai.networks.nets import DenseNet121
+
+logger = logging.getLogger(__name__)
 
 
 class DenseNet121Model(BaseModel):
