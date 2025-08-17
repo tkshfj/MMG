@@ -5,7 +5,8 @@
 - Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: 3ewpciv6, * runs, August 17-)
 - Refactor simpleCNN: class-weighted CE + multi-class prior bias; auto class_counts; sweep/eval diagnostics
 - Launch W&B sweeps for refactored MONAI/Ignite Simple CNN (run_id: l518t31y, * runs, August 17-)
-- Refactor MONAI/Ignite classification and segmentation models
+- Refactor MONAI/Ignite classification and segmentation models to align with a common BaseModel API and standardized metric/output transforms
+  - Refactor ViT/DenseNet121/UNet/SwinUNETR to unified BaseModel API; standardize metric transforms and centralized losses; add class-imbalance/bias-init handling; align W&B sweeps and fix step semantics.
 
 # 2025-08-16
 - Rename dirs: mtlunet_monai->monai_v1; previous->monai_v2; recent->monai_v3
