@@ -1,4 +1,4 @@
-# sweep.yaml
+# sweep_mtlunet.yaml
 program: main.py
 method: bayes
 
