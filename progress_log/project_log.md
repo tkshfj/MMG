@@ -2,7 +2,7 @@
 
 # 2025-08-17
 - Refactor W&B sweep config to log val/multi, val/dice, val/iou, val/prec and val/recall as the vector means
-- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: g3ujxqde, 10 runs, August 17-)
+- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: a8ndfops, * runs, August 17-)
 
 # 2025-08-16
 - Rename dirs: mtlunet_monai->monai_v1; previous->monai_v2; recent->monai_v3
