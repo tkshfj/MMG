@@ -102,6 +102,90 @@ def make_wandb_logger(
     Curried Ignite handler: flattens engine.state.metrics and logs to W&B.
     Use step_by="epoch" for validation logs (avoids step-reset warnings).
     """
+
+    # def _handler(engine):
+    #     # epoch/global_step
+    #     epoch = int(getattr(
+    #         evaluator.state if evaluator is not None else engine.state,
+    #         "trainer_epoch",
+    #         getattr(trainer.state if trainer is not None else engine.state, "epoch", 0),
+    #     ))
+    #     global_step = int(getattr(
+    #         trainer.state if trainer is not None else engine.state,
+    #         "iteration",
+    #         0,
+    #     ))
+    #     # pick metrics
+    #     m = dict(engine.state.metrics or {})
+
+    #     # synthesize macro scalar dice from vector if needed
+    #     def _mean_of(prefix: str):
+    #         # accepts both slash and underscore indexed forms
+    #         vals = []
+    #         for k in (f"{prefix}", f"{prefix}/0", f"{prefix}/1", f"{prefix}_0", f"{prefix}_1"):
+    #             v = m.get(k)
+    #             if v is None:
+    #                 continue
+    #             if torch.is_tensor(v): v = v.detach().cpu().numpy()
+    #             try:
+    #                 if isinstance(v, (list, tuple)): vals += [float(x) for x in v]
+    #                 elif hasattr(v, "ndim") and v.ndim == 1: vals += [float(x) for x in v.tolist()]
+    #                 else: vals.append(float(v))
+    #             except Exception:
+    #                 pass
+    #         return (sum(vals) / len(vals)) if vals else None
+
+    #     mw = float(getattr(wandb.config, "multi_weight", 0.65))
+    #     auc  = m.get("val/auc", m.get("val_auc"))
+    #     if auc is not None and dice is not None:
+    #         # pick one namespace and stay consistent; here we use slash
+    #         m["val/multi"] = mw * float(dice) + (1.0 - mw) * float(auc)
+
+    #     dice = _mean_of("val/dice") or _mean_of("val_dice")
+    #     if dice is not None:
+    #         m["val/dice"] = float(dice)
+
+    #     iou = _mean_of("val/iou") or _mean_of("val_iou")
+    #     if iou is not None:
+    #         m["val/iou"] = float(iou)
+
+    #     prec = _mean_of("val/prec") or _mean_of("val_prec")
+    #     if prec is not None:
+    #         m["val/prec"] = float(prec)
+
+    #     recall = _mean_of("val/recall") or _mean_of("val_recall")
+    #     if recall is not None:
+    #         m["val/recall"] = float(recall)
+
+    #     if metric_names:
+    #         m = {k: m[k] for k in metric_names if k in m}
+    #     flat = _to_scalar_dict(m, allow_vectors=True)
+
+    #     # create scalar sweep target from the per-class values
+    #     def add_macro_mean(prefix: str):
+    #         a, b = f"{prefix}/0", f"{prefix}/1"
+    #         if a in flat and b in flat and prefix not in flat:
+    #             flat[prefix] = 0.5 * (flat[a] + flat[b])
+
+    #     for k in ("val/multi", "val/dice", "val/iou", "val/prec", "val/recall"):
+    #         add_macro_mean(k)
+
+    #     payload = {"epoch": epoch, "global_step": global_step, **flat}
+    #     if step_by == "omit":
+    #         step_arg = {}
+    #     else:
+    #         step = global_step if step_by == "global" else epoch
+    #         step_arg = {"step": step}
+    #     if debug:
+    #         logger.info("wandb log: step_by=%s, step=%s, keys=%s",
+    #                     step_by, step_arg.get("step"), list(flat.keys()))
+    #     try:
+    #         wandb.log(payload, **step_arg)
+    #     except Exception as e:
+    #         logger.warning("wandb.log failed: %s", e)
+
+    # return _handler
+
     def _handler(engine):
         # epoch/global_step
         epoch = int(getattr(
@@ -114,27 +198,67 @@ def make_wandb_logger(
             "iteration",
             0,
         ))
-        # pick metrics
+
+        # copy metrics
         m = dict(engine.state.metrics or {})
+
+        # helper: mean of vector metric supporting both namespaces + shapes
+        def _mean_of(prefix: str):
+            # accepts both slash and underscore indexed forms and vector tensors/arrays
+            vals = []
+            for k in (f"{prefix}", f"{prefix}/0", f"{prefix}/1", f"{prefix}_0", f"{prefix}_1"):
+                v = m.get(k)
+                if v is None:
+                    continue
+                if torch.is_tensor(v):
+                    v = v.detach().cpu().numpy()
+                try:
+                    # vector-like
+                    if isinstance(v, (list, tuple)):
+                        vals += [float(x) for x in v]
+                    elif hasattr(v, "ndim") and getattr(v, "ndim", 0) == 1:
+                        vals += [float(x) for x in v.tolist()]
+                    else:
+                        vals.append(float(v))
+                except Exception:
+                    pass
+            return (sum(vals) / len(vals)) if vals else None
+
+        # synthesize scalar aggregates
+        dice_mean = _mean_of("val/dice") or _mean_of("val_dice")
+        iou_mean = _mean_of("val/iou") or _mean_of("val_iou")
+        prec_mean = _mean_of("val/prec") or _mean_of("val_prec")
+        recall_mean = _mean_of("val/recall") or _mean_of("val_recall")
+
+        if dice_mean is not None:
+            m["val/dice"] = float(dice_mean)
+        if iou_mean is not None:
+            m["val/iou"] = float(iou_mean)
+        if prec_mean is not None:
+            m["val/prec"] = float(prec_mean)
+        if recall_mean is not None:
+            m["val/recall"] = float(recall_mean)
+
+        # synthesize scalar val/multi from dice + auc (prefer slash namespace if present)
+        mw = float(getattr(wandb.config, "multi_weight", 0.65))
+        auc = m.get("val/auc", m.get("val_auc"))
+        if auc is not None and dice_mean is not None:
+            m["val/multi"] = mw * float(dice_mean) + (1.0 - mw) * float(auc)
+
+        # optional subset
         if metric_names:
             m = {k: m[k] for k in metric_names if k in m}
+
+        # flatten (emits per-class as val/dice/0 etc., keeps scalar keys above)
         flat = _to_scalar_dict(m, allow_vectors=True)
 
-        # create scalar sweep target from the per-class values
-        def add_macro_mean(prefix: str):
-            a, b = f"{prefix}/0", f"{prefix}/1"
-            if a in flat and b in flat and prefix not in flat:
-                flat[prefix] = 0.5 * (flat[a] + flat[b])
-
-        for k in ("val/multi", "val/dice", "val/iou", "val/prec", "val/recall"):
-            add_macro_mean(k)
-
+        # payload + step control
         payload = {"epoch": epoch, "global_step": global_step, **flat}
         if step_by == "omit":
             step_arg = {}
         else:
-            step = global_step if step_by == "global" else epoch
-            step_arg = {"step": step}
+            step_arg = {"step": (global_step if step_by == "global" else epoch)}
+
         if debug:
             logger.info("wandb log: step_by=%s, step=%s, keys=%s",
                         step_by, step_arg.get("step"), list(flat.keys()))
@@ -142,8 +266,7 @@ def make_wandb_logger(
             wandb.log(payload, **step_arg)
         except Exception as e:
             logger.warning("wandb.log failed: %s", e)
-
-    return _handler
+        return _handler
 
 
 def register_handlers(
