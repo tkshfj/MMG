@@ -1,6 +1,6 @@
 # vit.py
 import logging
-from typing import Any, Dict, Callable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 import math
 import torch
 import torch.nn as nn
@@ -181,24 +181,15 @@ class ViTModel(BaseModel):
         # Classification only
         return ["classification"]
 
-    def get_cls_output_transform(self) -> Callable:
-        # Standard logits -> (y_pred, y_true) transform for metrics
-        return cls_output_transform
-
     def get_handler_kwargs(self) -> Dict[str, Any]:
         # Keep this minimal and uniform with other wrappers
         return {
             "num_classes": self.get_num_classes(),
             "cls_output_transform": cls_output_transform,
-            "seg_output_transform": None,  # not used
-            # "add_classification_metrics": True,
-            # "acc_name": "val_acc",
-            # "auc_name": "val_auc",
-            # "confmat_name": "val_cls_confmat",
-            # "add_segmentation_metrics": False,
+            "seg_output_transform": None,
         }
 
-    # Optional convenience for external callers (kept for parity with older usage)
+    # Optional convenience for external callers
     def extract_logits(self, y_pred: Any):
         if isinstance(y_pred, dict):
             for k in ("class_logits", "logits", "y_pred"):
