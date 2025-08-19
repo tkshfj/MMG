@@ -1,25 +1,34 @@
 # Project Log
 
+# 2025-08-20
+- Launch W&B sweeps on M4PRRO for refactored MONAI/Ignite Multitask U-Net (sweep_id: 6wgror3q, 2 runs/finished, August 19-20)
+- Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: bxc8qzvz, 1 runs/finished, August 20)
+
 # 2025-08-19
-- Enforce FP32-only/TF32 off policy and fix transform dtypes
+- Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: 9eoogu2o/f7dt0ou5, 9 finished/31 crashed/40 runs, August 19)
+- Fix: enforce FP32-only/TF32 off policy and fix transform dtypes
+
+# 2025-08-18
+- Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: ftmiimtj/ksh8xv3i, 7 finished/39 crashed/46 runs, August 18)
+- Launch W&B sweeps on X870E for refactored MONAI/Ignite Simple CNN (sweep_id: wusk5yxi, 6 finished/10 crashed/16 runs, August 18)
+- Launch W&B sweeps on X870E for refactored MONAI/Ignite ViT (sweep_id: a5nhd6ll/zsvrfyyt, 5 finished/10 crashed/8 runs, August 17-18)
 
 # 2025-08-17
 - Refactor W&B sweep config to log val/multi, val/dice, val/iou, val/prec and val/recall as the vector means
-- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: 3ewpciv6, * runs, August 17-)
+- Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: 3ewpciv6/1brphv69, 3 runs/finished, August 17)
 - Refactor simpleCNN: class-weighted CE + multi-class prior bias; auto class_counts; sweep/eval diagnostics
-- Launch W&B sweeps for refactored MONAI/Ignite Simple CNN (run_id: l518t31y, * runs, August 17-)
 - Refactor MONAI/Ignite classification and segmentation models to align with a common BaseModel API and standardized metric/output transforms
-  - Refactor ViT/DenseNet121/UNet/SwinUNETR to unified BaseModel API; standardize metric transforms and centralized losses; add class-imbalance/bias-init handling; align W&B sweeps and fix step semantics.
+- Refactor ViT/DenseNet121/UNet/SwinUNETR to unified BaseModel API; standardize metric transforms and centralized losses; add class-imbalance/bias-init handling; align W&B sweeps and fix step semantics.
 
 # 2025-08-16
 - Rename dirs: mtlunet_monai->monai_v1; previous->monai_v2; recent->monai_v3
 - Refactor schedulers, sweeps and metrics in MONAI/Ignite pipeline
-- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: 6g24co4r, 6 runs, August 17)
+- Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: 6g24co4r, 6 runs/finished, August 17)
 
 # 2025-08-15
 - Archive legacy MONAI/Ignite code
 - Close W&B sweeps for recent MONAI/Ignite Multitask U-Net (121 runs, August 09-14)
-- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: 69481690, 14 runs, August 15-16)
+- Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (sweep_id: 69481690, 14 runs, August 15-16)
 - Refactor: Integrate a weighted harmonic mean val_multi into make_metrics
 
 # 2025-08-10 to 2025-08-14
