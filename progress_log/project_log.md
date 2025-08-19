@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-08-19
+- Enforce FP32-only/TF32 off policy and fix transform dtypes
+
 # 2025-08-17
 - Refactor W&B sweep config to log val/multi, val/dice, val/iou, val/prec and val/recall as the vector means
 - Launch W&B sweeps for refactored MONAI/Ignite Multitask U-Net (run_id: 3ewpciv6, * runs, August 17-)

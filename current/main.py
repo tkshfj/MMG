@@ -19,6 +19,19 @@ from optim_factory import get_optimizer
 from resume_utils import restore_training_state
 
 
+# FP32-only policy: disable TF32 on CUDA and avoid AMP
+def enforce_fp32_policy():
+    import os
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = False
+        torch.backends.cudnn.allow_tf32 = False
+        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':16:8')
+    try:
+        torch.set_float32_matmul_precision('highest')
+    except Exception:
+        pass
+
+
 def auto_device() -> torch.device:
     """Select CUDA, then MPS (macOS), else CPU."""
     if torch.cuda.is_available():
@@ -72,6 +85,7 @@ def configure_wandb_step_semantics() -> None:
 def run(cfg: dict) -> None:
     # setup
     set_determinism(seed=42)
+    enforce_fp32_policy()
     device = auto_device()
     cfg["device"] = device
 
@@ -99,7 +113,8 @@ def run(cfg: dict) -> None:
     except KeyError as e:
         raise ValueError(f"Unknown architecture '{arch}'.") from e
 
-    model = wrapper.build_model(cfg).to(device)
+    # model = wrapper.build_model(cfg).to(device)
+    model = wrapper.build_model(cfg).to(device=device, dtype=torch.float32)
 
     # optim
     optimizer = get_optimizer(cfg, model)

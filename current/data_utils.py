@@ -218,38 +218,43 @@ class MammoSegmentationDataset(Dataset):
         return sample
 
 
-# Custom Transform for Nested Labels
 def to_long_nested_label(label):
     """ Convert only label['label'] to long/int if label is a dict with 'label' key. """
+    """Convert nested label to a plain int (required by CrossEntropyLoss)."""
     if isinstance(label, dict):
-        if "label" in label and not isinstance(label["label"], int):
-            # Convert to int if not already
-            if hasattr(label["label"], "long"):
-                label["label"] = label["label"].long()
-            else:
-                label["label"] = int(label["label"])
-    return label
+        v = label.get("label", None)
+        if v is None:
+            return label
+        return int(v.item()) if torch.is_tensor(v) else int(v)
+    return int(label.item()) if torch.is_tensor(label) else int(label)
 
 
 # MONAI transforms for segmentation and classification tasks
-def get_monai_transforms(task="segmentation", input_shape=(256, 256)):
-    keys = ["image", "mask"] if task in ["segmentation", "multitask"] else ["image"]
-    # For multitask/classification, label might not always be present in some samples
-    tensord_keys = keys + (["label"] if task in ["classification", "multitask"] else [])
+def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256)):
+    # Which keys are image-like tensors
+    image_keys = ["image", "mask"] if task in ("segmentation", "multitask") else ["image"]
+
     train_transforms = [
         ScaleIntensityd(keys=["image"]),
-        RandFlipd(keys=keys, prob=0.5, spatial_axis=1, allow_missing_keys=True),
-        RandRotate90d(keys=keys, prob=0.5, allow_missing_keys=True),
-        ToTensord(keys=tensord_keys, allow_missing_keys=True),
+        RandFlipd(keys=image_keys, prob=0.5, spatial_axis=1, allow_missing_keys=True),
+        RandRotate90d(keys=image_keys, prob=0.5, allow_missing_keys=True),
+        ToTensord(keys=image_keys, dtype=torch.float32, allow_missing_keys=True),  # FP32 images/masks
     ]
     val_transforms = [
         ScaleIntensityd(keys=["image"]),
-        ToTensord(keys=tensord_keys, allow_missing_keys=True),
+        ToTensord(keys=image_keys, dtype=torch.float32, allow_missing_keys=True),  # FP32 images/masks
     ]
-    if task in ["classification", "multitask"]:
-        # Apply to nested dict
-        train_transforms.append(Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True))
-        val_transforms.append(Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True))
+    # Only add label transforms when classification/multitask is used
+    if task in ("classification", "multitask"):
+        train_transforms += [
+            Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
+            ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
+        ]
+        val_transforms += [
+            Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
+            ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
+        ]
+
     return Compose(train_transforms), Compose(val_transforms)
 
 
