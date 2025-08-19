@@ -18,8 +18,9 @@ import torch
 from typing import Any, Optional, Sequence
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
-from monai.transforms import Compose, ScaleIntensityd, RandFlipd, RandRotate90d, ToTensord, Lambdad
-
+# from monai.transforms import Compose, ScaleIntensityd, RandFlipd, RandRotate90d, ToTensord, Lambdad
+from monai.transforms import Compose, EnsureTyped, EnsureChannelFirstd, ScaleIntensityRanged, RandFlipd, RandRotate90d, Lambdad
+# Compose, EnsureTyped, ScaleIntensityRanged, RandFlipd, RandRotate90d, Lambdad
 EPSILON = 1e-8  # Small value to avoid division by zero
 
 
@@ -182,27 +183,33 @@ class MammoSegmentationDataset(Dataset):
         #     print(f"[FATAL] __getitem__: img is not ndarray! idx={idx}, type={type(img)}, value={img}")
         #     raise TypeError(f"Image is not a numpy array: {type(img)}, value: {img}")
         img = cv2.resize(img, (self.input_shape[1], self.input_shape[0]))
-        img = np.expand_dims(img, axis=0)  # [C, H, W]
-        image_tensor = torch.as_tensor(img, dtype=torch.float32)
+        # img = np.expand_dims(img, axis=0)  # [C, H, W]
+        # image_tensor = torch.as_tensor(img, dtype=torch.float32)
+        if img.ndim == 2:
+            img = np.expand_dims(img, axis=0)          # [1, H, W]
+        image_tensor = torch.from_numpy(img).float()   # float32
 
         # Prepare sample dict with image only
         sample = {"image": image_tensor}
 
-        # Optional label
+        # classification / multitask label
         if self.task in ['classification', 'multitask']:
             label_value = row.get('label')
             if label_value is not None and not (pd.isna(label_value) or label_value == ''):
-                label_tensor = torch.tensor(int(label_value), dtype=torch.long)
-                sample["label"] = label_tensor
+                # label_tensor = torch.tensor(int(label_value), dtype=torch.long)
+                # sample["label"] = label_tensor
+                sample["label"] = torch.tensor(int(label_value), dtype=torch.long)
 
-        # Optional mask
+        # segmentation / multitask mask
         if self.task in ['segmentation', 'multitask']:
             mask_paths = self.resolve_mask_paths(row)
             if mask_paths:
                 mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
                 mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
-                mask = np.expand_dims(mask, axis=0)
-                mask_tensor = torch.as_tensor(mask, dtype=torch.float32)
+                # mask = np.expand_dims(mask, axis=0)
+                # mask_tensor = torch.as_tensor(mask, dtype=torch.float32)
+                # sample["mask"] = mask_tensor
+                mask_tensor = torch.from_numpy((mask > 0.5).astype(np.int64)).long()
                 sample["mask"] = mask_tensor
 
         # Apply transforms if present
@@ -229,33 +236,88 @@ def to_long_nested_label(label):
     return int(label.item()) if torch.is_tensor(label) else int(label)
 
 
+def _check_hw(x):
+    import torch
+    t = x if torch.is_tensor(x) else torch.as_tensor(x)
+    assert t.ndim >= 3 and t.shape[-2] > 1 and t.shape[-1] > 1, f"Need [...,H,W], got {tuple(t.shape)}"
+    return x
+
+
 # MONAI transforms for segmentation and classification tasks
-def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256)):
-    # Which keys are image-like tensors
-    image_keys = ["image", "mask"] if task in ("segmentation", "multitask") else ["image"]
+# def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256)):
+#     # Which keys are image-like tensors
+#     image_keys = ["image", "mask"] if task in ("segmentation", "multitask") else ["image"]
 
-    train_transforms = [
-        ScaleIntensityd(keys=["image"]),
-        RandFlipd(keys=image_keys, prob=0.5, spatial_axis=1, allow_missing_keys=True),
-        RandRotate90d(keys=image_keys, prob=0.5, allow_missing_keys=True),
-        ToTensord(keys=image_keys, dtype=torch.float32, allow_missing_keys=True),  # FP32 images/masks
+#     train_transforms = [
+#         ScaleIntensityd(keys=["image"]),
+#         RandFlipd(keys=image_keys, prob=0.5, spatial_axis=1, allow_missing_keys=True),
+#         RandRotate90d(keys=image_keys, prob=0.5, allow_missing_keys=True),
+#         ToTensord(keys=image_keys, dtype=torch.float32, allow_missing_keys=True),  # FP32 images/masks
+#     ]
+#     val_transforms = [
+#         ScaleIntensityd(keys=["image"]),
+#         ToTensord(keys=image_keys, dtype=torch.float32, allow_missing_keys=True),  # FP32 images/masks
+#     ]
+#     # Only add label transforms when classification/multitask is used
+#     if task in ("classification", "multitask"):
+#         train_transforms += [
+#             Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
+#             ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
+#         ]
+#         val_transforms += [
+#             Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
+#             ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
+#         ]
+
+#     return Compose(train_transforms), Compose(val_transforms)
+
+
+def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256), add_sanity: bool = True):
+    img_keys  = ["image"]
+    mask_keys = ["mask"] if task in ("segmentation", "multitask") else []
+    spatial_keys = img_keys + mask_keys
+
+    # Lock shapes & dtypes BEFORE any spatial aug
+    common = [
+        # The dataset already yields [C,H,W] (C=1). Tell MONAI that channel is dim 0
+        # so it won’t try to infer/add channels and won’t create 5D tensors.
+        EnsureChannelFirstd(keys=img_keys,  channel_dim=0, allow_missing_keys=True),
+        EnsureChannelFirstd(keys=mask_keys, channel_dim=0, allow_missing_keys=True),
+
+        # Explicit dtypes; no meta tracking (robust across readers)
+        EnsureTyped(keys=img_keys,  dtype=torch.float32, track_meta=False, allow_missing_keys=True),
+        EnsureTyped(keys=mask_keys, dtype=torch.long,    track_meta=False, allow_missing_keys=True),
+
+        # Explicit intensity range (host parity)
+        ScaleIntensityRanged(
+            keys=["image"], a_min=0.0, a_max=1.0, b_min=0.0, b_max=1.0, clip=True, allow_missing_keys=True
+        ),
     ]
-    val_transforms = [
-        ScaleIntensityd(keys=["image"]),
-        ToTensord(keys=image_keys, dtype=torch.float32, allow_missing_keys=True),  # FP32 images/masks
+
+    sanity = [Lambdad(keys=spatial_keys, func=_check_hw, allow_missing_keys=True)] if add_sanity else []
+
+    # Spatial aug on the *last two* dims only (safe for [C,H,W] and [H,W])
+    aug = [
+        RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=-2, allow_missing_keys=True),          # vertical
+        RandRotate90d(keys=spatial_keys, prob=0.5, spatial_axes=(-2, -1), allow_missing_keys=True) # 90° over (H,W)
     ]
-    # Only add label transforms when classification/multitask is used
+
+    # train = common + aug
+    # val   = common.copy()
+    train = common + sanity + aug
+    val   = common + sanity
+
+    # Labels for classification/multitask
     if task in ("classification", "multitask"):
-        train_transforms += [
+        label_tf = [
             Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
-            ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
+            EnsureTyped(keys=["label"], dtype=torch.long, track_meta=False, allow_missing_keys=True),
         ]
-        val_transforms += [
-            Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
-            ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
-        ]
+        train += label_tf
+        val   += label_tf
 
-    return Compose(train_transforms), Compose(val_transforms)
+    return Compose(train), Compose(val)
+
 
 
 def nested_dict_collate(batch):
@@ -295,6 +357,18 @@ def nested_dict_collate(batch):
             raise TypeError(f"Unsupported list element type: {type(elem)}")
     else:
         raise TypeError(f"Unsupported batch element type: {type(elem)}")
+
+
+def _sanity_check_batch(batch, task):
+    x = batch["image"]
+    assert x.ndim == 4 and x.shape[1] == 1, f"image must be [N,1,H,W], got {tuple(x.shape)}"
+    if task in ("segmentation", "multitask") and "mask" in batch:
+        m = batch["mask"]
+        assert m.ndim == 3, f"mask must be [N,H,W] integer, got {tuple(m.shape)}"
+        assert m.dtype in (torch.int64, torch.long), f"mask dtype must be long, got {m.dtype}"
+    if task in ("classification", "multitask") and "label" in batch:
+        y = batch["label"]
+        assert y.dtype in (torch.int64, torch.long), f"label dtype must be long, got {y.dtype}"
 
 
 def build_dataloaders(
@@ -351,6 +425,7 @@ def build_dataloaders(
     # Debug batch content for masks
     if debug:
         batch = next(iter(val_loader))
+        _sanity_check_batch(batch, task)
         print_batch_debug(batch)
 
     return train_loader, val_loader, test_loader
