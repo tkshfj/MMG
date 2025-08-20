@@ -14,7 +14,7 @@ parameters:
 
   # Execution
   epochs: {value: 40}
-  num_workers: {value: 0}
+  num_workers: {value: 1}
   debug: {value: true}
   debug_transforms: {value: false}
 
