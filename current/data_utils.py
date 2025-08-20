@@ -19,7 +19,7 @@ from typing import Any, Optional, Sequence
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
 from monai.transforms import Compose, ToTensord, Lambdad, RandFlipd, RandRotate90d
-# ScaleIntensityRanged
+
 EPSILON = 1e-8  # Small value to avoid division by zero
 
 
@@ -135,7 +135,6 @@ class MammoSegmentationDataset(Dataset):
                 print(f"[WARNING] Used fallback for mask: {matches}")
                 return matches
         # raise FileNotFoundError(f"No mask file found for {row}")
-        # Instead of raising:
         logger.error(f"No mask file found for {row}")
         return []
 
@@ -175,18 +174,9 @@ class MammoSegmentationDataset(Dataset):
         img_path = self.resolve_image_path(row)
         if not img_path:
             # logger.warning(f"Skipping sample idx={idx} (no image path): {row.to_dict()}")
-            # Optionally, raise or return a dummy/empty sample
             raise IndexError(f"No valid image for idx={idx}")
-            # raise ValueError(f"No image path found in row: {row.to_dict()}")
         img = self.load_dicom(img_path)
-        # DEBUG
-        # print(f"[DEBUG __getitem__] loaded img type: {type(img)}, shape: {getattr(img, 'shape', None)}")
-        # if not isinstance(img, np.ndarray):
-        #     print(f"[FATAL] __getitem__: img is not ndarray! idx={idx}, type={type(img)}, value={img}")
-        #     raise TypeError(f"Image is not a numpy array: {type(img)}, value: {img}")
         img = cv2.resize(img, (self.input_shape[1], self.input_shape[0]))
-        # img = np.expand_dims(img, axis=0)  # [C, H, W]
-        # image_tensor = torch.as_tensor(img, dtype=torch.float32)
         if img.ndim == 2:
             img = np.expand_dims(img, axis=0)          # [1, H, W]
         image_tensor = torch.from_numpy(img).float()   # float32
@@ -198,8 +188,6 @@ class MammoSegmentationDataset(Dataset):
         if self.task in ['classification', 'multitask']:
             label_value = row.get('label')
             if label_value is not None and not (pd.isna(label_value) or label_value == ''):
-                # label_tensor = torch.tensor(int(label_value), dtype=torch.long)
-                # sample["label"] = label_tensor
                 sample["label"] = torch.tensor(int(label_value), dtype=torch.long)
 
         # segmentation / multitask mask
@@ -207,10 +195,6 @@ class MammoSegmentationDataset(Dataset):
             mask_paths = self.resolve_mask_paths(row)
             if mask_paths:
                 mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
-                # mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
-                # mask = np.expand_dims(mask, axis=0)
-                # mask_tensor = torch.as_tensor(mask, dtype=torch.float32)
-                # sample["mask"] = mask_tensor
                 mask_tensor = torch.from_numpy((mask > 0.5).astype(np.int64)).long()
                 sample["mask"] = mask_tensor
 
@@ -252,12 +236,6 @@ def _ensure_chw(x):
     return t
 
 
-# def _mask_to_long(m):
-#     """Cast mask to integer labels after all spatial augs."""
-#     import torch
-#     return torch.as_tensor(m).long()
-
-
 def _squeeze_ch1(x):
     import torch
     t = torch.as_tensor(x)
@@ -295,47 +273,6 @@ def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256)):
         val_t += label_tf
 
     return Compose(train_t), Compose(val_t)
-
-
-# def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256)):
-#     img_keys = ["image"]
-#     mask_keys = ["mask"] if task in ("segmentation", "multitask") else []
-#     spatial_keys = img_keys + mask_keys
-
-#     train_t = [
-#         ToTensord(keys=img_keys, dtype=torch.float32, allow_missing_keys=True),
-#         ToTensord(keys=mask_keys, dtype=torch.float32, allow_missing_keys=True),
-#         Lambdad(keys=spatial_keys, func=_ensure_chw, allow_missing_keys=True),
-
-#         ScaleIntensityRanged(keys=img_keys, a_min=0.0, a_max=1.0, b_min=0.0, b_max=1.0,
-#                              clip=True, allow_missing_keys=True),
-
-#         RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=-2, allow_missing_keys=True),
-#         RandRotate90d(keys=spatial_keys, prob=0.5, spatial_axes=(-2, -1), allow_missing_keys=True),
-
-#         Lambdad(keys=mask_keys, func=_mask_to_long, allow_missing_keys=True),
-#         Lambdad(keys=mask_keys, func=_squeeze_ch1, allow_missing_keys=True),  # <-- make mask [H,W]
-#     ]
-
-#     val_t = [
-#         ToTensord(keys=img_keys, dtype=torch.float32, allow_missing_keys=True),
-#         ToTensord(keys=mask_keys, dtype=torch.float32, allow_missing_keys=True),
-#         Lambdad(keys=spatial_keys, func=_ensure_chw, allow_missing_keys=True),
-#         ScaleIntensityRanged(keys=img_keys, a_min=0.0, a_max=1.0, b_min=0.0, b_max=1.0,
-#                              clip=True, allow_missing_keys=True),
-#         Lambdad(keys=mask_keys, func=_mask_to_long, allow_missing_keys=True),
-#         Lambdad(keys=mask_keys, func=_squeeze_ch1, allow_missing_keys=True),  # <-- make mask [H,W]
-#     ]
-
-#     if task in ("classification", "multitask"):
-#         label_tf = [
-#             Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
-#             ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
-#         ]
-#         train_t += label_tf
-#         val_t += label_tf
-
-#     return Compose(train_t), Compose(val_t)
 
 
 def nested_dict_collate(batch):
