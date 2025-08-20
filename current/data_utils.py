@@ -333,7 +333,8 @@ def build_dataloaders(
     task="multitask",
     split=(0.7, 0.15, 0.15),
     num_workers=32,
-    debug=False
+    debug=False,
+    pin_memory=False
 ):
     """ Builds train/val/test DataLoaders from a CSV split by given proportions."""
     df = pd.read_csv(metadata_csv)
@@ -373,9 +374,9 @@ def build_dataloaders(
     val_ds = MammoSegmentationDataset(val_df, input_shape=input_shape, task=task, transform=val_transforms)
     test_ds = MammoSegmentationDataset(test_df, input_shape=input_shape, task=task, transform=test_transforms)
     # DataLoaders
-    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=True)
-    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
-    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2))
+    train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
+    val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2), pin_memory=pin_memory)
+    test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2), pin_memory=pin_memory)
 
     # Debug batch content for masks
     if debug:

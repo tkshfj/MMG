@@ -1,14 +1,25 @@
-# main_refactored.py
+# main.py
 import os
-os.environ["TF_CPP_MIN_LOG_LEVEL"] = "2"
+os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")  # CuBLAS deterministic
+os.environ.setdefault("PYTHONHASHSEED", "42")  # stable hashing for dicts/sets
+os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
-import time
-from typing import Tuple
-from collections.abc import Callable
+import random
+import numpy as np
+seed = 42  # seeding
+random.seed(seed)
+np.random.seed(seed)
 
 import torch
-import wandb
 from monai.utils import set_determinism
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
+set_determinism(seed=seed)
+
+import time
+import wandb
+from typing import Tuple
+from collections.abc import Callable
 
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
@@ -21,11 +32,9 @@ from resume_utils import restore_training_state
 
 # FP32-only policy: disable TF32 on CUDA and avoid AMP
 def enforce_fp32_policy():
-    import os
     if torch.cuda.is_available():
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
-        os.environ.setdefault('CUBLAS_WORKSPACE_CONFIG', ':16:8')
     try:
         torch.set_float32_matmul_precision('highest')
     except Exception:
@@ -84,7 +93,6 @@ def configure_wandb_step_semantics() -> None:
 
 def run(cfg: dict) -> None:
     # setup
-    set_determinism(seed=42)
     enforce_fp32_policy()
     device = auto_device()
     cfg["device"] = device
@@ -98,6 +106,7 @@ def run(cfg: dict) -> None:
         split=cfg.get("split", (0.7, 0.15, 0.15)),
         num_workers=cfg.get("num_workers", 32),
         debug=bool(cfg.get("debug", False)),
+        pin_memory=bool(cfg.get("pin_memory", False)),
     )
     if cfg.get("print_dataset_sizes", True):
         print(
@@ -230,4 +239,10 @@ def main(config: dict | None = None) -> None:
 
 
 if __name__ == "__main__":
+    import torch.multiprocessing as mp
+    try:
+        mp.set_start_method("spawn", force=False)  # set once
+    except RuntimeError:
+        pass  # already set
+
     main()
