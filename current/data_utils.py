@@ -10,7 +10,6 @@ logger = logging.getLogger(__name__)
 import os
 import ast
 import glob
-import cv2
 import numpy as np
 import pandas as pd
 import pydicom
@@ -152,6 +151,7 @@ class MammoSegmentationDataset(Dataset):
         return img
 
     def load_and_merge_masks(self, mask_paths, shape):
+        import cv2
         mask = np.zeros(shape, dtype=np.float32)
         for mpath in mask_paths:
             m = self.load_dicom(mpath)
@@ -165,6 +165,7 @@ class MammoSegmentationDataset(Dataset):
         return len(self.df)
 
     def __getitem__(self, idx):
+        import cv2
         row = self.df.iloc[idx]
         # DEBUG print row
         # print(f"[DEBUG __getitem__] idx={idx}, row={row.to_dict()}")
