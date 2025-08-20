@@ -18,9 +18,8 @@ import torch
 from typing import Any, Optional, Sequence
 from sklearn.model_selection import train_test_split
 from torch.utils.data import Dataset, DataLoader
-# from monai.transforms import Compose, ScaleIntensityd, RandFlipd, RandRotate90d, ToTensord, Lambdad
-from monai.transforms import Compose, EnsureTyped, EnsureChannelFirstd, ScaleIntensityRanged, RandFlipd, RandRotate90d, Lambdad
-# Compose, EnsureTyped, ScaleIntensityRanged, RandFlipd, RandRotate90d, Lambdad
+from monai.transforms import Compose, ToTensord, Lambdad, RandFlipd, RandRotate90d
+# ScaleIntensityRanged
 EPSILON = 1e-8  # Small value to avoid division by zero
 
 
@@ -144,6 +143,9 @@ class MammoSegmentationDataset(Dataset):
         try:
             dcm = pydicom.dcmread(path)
             img = dcm.pixel_array.astype(np.float32)
+            # Invert if MONOCHROME1
+            if str(getattr(dcm, "PhotometricInterpretation", "")).upper() == "MONOCHROME1":
+                img = img.max() - img
             img = (img - img.min()) / (img.max() - img.min() + EPSILON)
         except Exception as e:
             logger.warning(f"[DICOM ERROR] Failed to load {path}: {e}")
@@ -205,7 +207,7 @@ class MammoSegmentationDataset(Dataset):
             mask_paths = self.resolve_mask_paths(row)
             if mask_paths:
                 mask = self.load_and_merge_masks(mask_paths, img.shape[1:])
-                mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
+                # mask = cv2.resize(mask, (self.input_shape[1], self.input_shape[0]), interpolation=cv2.INTER_NEAREST)
                 # mask = np.expand_dims(mask, axis=0)
                 # mask_tensor = torch.as_tensor(mask, dtype=torch.float32)
                 # sample["mask"] = mask_tensor
@@ -236,88 +238,104 @@ def to_long_nested_label(label):
     return int(label.item()) if torch.is_tensor(label) else int(label)
 
 
-def _check_hw(x):
-    import torch
-    t = x if torch.is_tensor(x) else torch.as_tensor(x)
+def _ensure_chw(x):
+    """Return a tensor with shape [C,H,W]. If x is HxW, add C=1. If x is HxWxC, permute to CxHxW."""
+    t = torch.as_tensor(x)
+    if t.ndim == 2:                 # H, W
+        t = t.unsqueeze(0)          # 1, H, W
+    elif t.ndim == 3:
+        # If first dim isn't a typical channel count but last is, assume HWC -> CHW
+        if t.shape[0] not in (1, 3, 4) and t.shape[-1] in (1, 3, 4):
+            t = t.permute(2, 0, 1)  # C, H, W
+    # Optional strict check:
     assert t.ndim >= 3 and t.shape[-2] > 1 and t.shape[-1] > 1, f"Need [...,H,W], got {tuple(t.shape)}"
-    return x
+    return t
 
 
-# MONAI transforms for segmentation and classification tasks
-# def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256)):
-#     # Which keys are image-like tensors
-#     image_keys = ["image", "mask"] if task in ("segmentation", "multitask") else ["image"]
-
-#     train_transforms = [
-#         ScaleIntensityd(keys=["image"]),
-#         RandFlipd(keys=image_keys, prob=0.5, spatial_axis=1, allow_missing_keys=True),
-#         RandRotate90d(keys=image_keys, prob=0.5, allow_missing_keys=True),
-#         ToTensord(keys=image_keys, dtype=torch.float32, allow_missing_keys=True),  # FP32 images/masks
-#     ]
-#     val_transforms = [
-#         ScaleIntensityd(keys=["image"]),
-#         ToTensord(keys=image_keys, dtype=torch.float32, allow_missing_keys=True),  # FP32 images/masks
-#     ]
-#     # Only add label transforms when classification/multitask is used
-#     if task in ("classification", "multitask"):
-#         train_transforms += [
-#             Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
-#             ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
-#         ]
-#         val_transforms += [
-#             Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
-#             ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
-#         ]
-
-#     return Compose(train_transforms), Compose(val_transforms)
+# def _mask_to_long(m):
+#     """Cast mask to integer labels after all spatial augs."""
+#     import torch
+#     return torch.as_tensor(m).long()
 
 
-def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256), add_sanity: bool = True):
-    img_keys  = ["image"]
+def _squeeze_ch1(x):
+    import torch
+    t = torch.as_tensor(x)
+    return t.squeeze(0) if t.ndim == 3 and t.shape[0] == 1 else t  # [1,H,W] -> [H,W]
+
+
+def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256)):
+    img_keys = ["image"]
     mask_keys = ["mask"] if task in ("segmentation", "multitask") else []
     spatial_keys = img_keys + mask_keys
 
-    # Lock shapes & dtypes BEFORE any spatial aug
-    common = [
-        # The dataset already yields [C,H,W] (C=1). Tell MONAI that channel is dim 0
-        # so it won’t try to infer/add channels and won’t create 5D tensors.
-        EnsureChannelFirstd(keys=img_keys,  channel_dim=0, allow_missing_keys=True),
-        EnsureChannelFirstd(keys=mask_keys, channel_dim=0, allow_missing_keys=True),
-
-        # Explicit dtypes; no meta tracking (robust across readers)
-        EnsureTyped(keys=img_keys,  dtype=torch.float32, track_meta=False, allow_missing_keys=True),
-        EnsureTyped(keys=mask_keys, dtype=torch.long,    track_meta=False, allow_missing_keys=True),
-
-        # Explicit intensity range (host parity)
-        ScaleIntensityRanged(
-            keys=["image"], a_min=0.0, a_max=1.0, b_min=0.0, b_max=1.0, clip=True, allow_missing_keys=True
-        ),
+    train_t = [
+        ToTensord(keys=img_keys, dtype=torch.float32, allow_missing_keys=True),
+        ToTensord(keys=mask_keys, dtype=torch.long, allow_missing_keys=True),
+        Lambdad(keys=spatial_keys, func=_ensure_chw, allow_missing_keys=True),
+        # (optional) ScaleIntensityRanged(...) if you need it
+        RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=-2, allow_missing_keys=True),
+        RandRotate90d(keys=spatial_keys, prob=0.5, spatial_axes=(-2, -1), allow_missing_keys=True),
+        Lambdad(keys=mask_keys, func=_squeeze_ch1, allow_missing_keys=True),  # -> [H,W]
     ]
 
-    sanity = [Lambdad(keys=spatial_keys, func=_check_hw, allow_missing_keys=True)] if add_sanity else []
-
-    # Spatial aug on the *last two* dims only (safe for [C,H,W] and [H,W])
-    aug = [
-        RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=-2, allow_missing_keys=True),          # vertical
-        RandRotate90d(keys=spatial_keys, prob=0.5, spatial_axes=(-2, -1), allow_missing_keys=True) # 90° over (H,W)
+    val_t = [
+        ToTensord(keys=img_keys, dtype=torch.float32, allow_missing_keys=True),
+        ToTensord(keys=mask_keys, dtype=torch.long, allow_missing_keys=True),
+        Lambdad(keys=spatial_keys, func=_ensure_chw, allow_missing_keys=True),
+        Lambdad(keys=mask_keys, func=_squeeze_ch1, allow_missing_keys=True),
     ]
 
-    # train = common + aug
-    # val   = common.copy()
-    train = common + sanity + aug
-    val   = common + sanity
-
-    # Labels for classification/multitask
     if task in ("classification", "multitask"):
         label_tf = [
             Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
-            EnsureTyped(keys=["label"], dtype=torch.long, track_meta=False, allow_missing_keys=True),
+            ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
         ]
-        train += label_tf
-        val   += label_tf
+        train_t += label_tf
+        val_t += label_tf
 
-    return Compose(train), Compose(val)
+    return Compose(train_t), Compose(val_t)
 
+
+# def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256)):
+#     img_keys = ["image"]
+#     mask_keys = ["mask"] if task in ("segmentation", "multitask") else []
+#     spatial_keys = img_keys + mask_keys
+
+#     train_t = [
+#         ToTensord(keys=img_keys, dtype=torch.float32, allow_missing_keys=True),
+#         ToTensord(keys=mask_keys, dtype=torch.float32, allow_missing_keys=True),
+#         Lambdad(keys=spatial_keys, func=_ensure_chw, allow_missing_keys=True),
+
+#         ScaleIntensityRanged(keys=img_keys, a_min=0.0, a_max=1.0, b_min=0.0, b_max=1.0,
+#                              clip=True, allow_missing_keys=True),
+
+#         RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=-2, allow_missing_keys=True),
+#         RandRotate90d(keys=spatial_keys, prob=0.5, spatial_axes=(-2, -1), allow_missing_keys=True),
+
+#         Lambdad(keys=mask_keys, func=_mask_to_long, allow_missing_keys=True),
+#         Lambdad(keys=mask_keys, func=_squeeze_ch1, allow_missing_keys=True),  # <-- make mask [H,W]
+#     ]
+
+#     val_t = [
+#         ToTensord(keys=img_keys, dtype=torch.float32, allow_missing_keys=True),
+#         ToTensord(keys=mask_keys, dtype=torch.float32, allow_missing_keys=True),
+#         Lambdad(keys=spatial_keys, func=_ensure_chw, allow_missing_keys=True),
+#         ScaleIntensityRanged(keys=img_keys, a_min=0.0, a_max=1.0, b_min=0.0, b_max=1.0,
+#                              clip=True, allow_missing_keys=True),
+#         Lambdad(keys=mask_keys, func=_mask_to_long, allow_missing_keys=True),
+#         Lambdad(keys=mask_keys, func=_squeeze_ch1, allow_missing_keys=True),  # <-- make mask [H,W]
+#     ]
+
+#     if task in ("classification", "multitask"):
+#         label_tf = [
+#             Lambdad(keys="label", func=to_long_nested_label, allow_missing_keys=True),
+#             ToTensord(keys=["label"], dtype=torch.long, allow_missing_keys=True),
+#         ]
+#         train_t += label_tf
+#         val_t += label_tf
+
+#     return Compose(train_t), Compose(val_t)
 
 
 def nested_dict_collate(batch):

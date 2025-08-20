@@ -3,6 +3,7 @@
 # 2025-08-20
 - Launch W&B sweeps on M4PRRO for refactored MONAI/Ignite Multitask U-Net (sweep_id: 6wgror3q, 2 runs/finished, August 19-20)
 - Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: bxc8qzvz, 1 runs/finished, August 20)
+- Refactor MONAI transforms for multiprocessing- and shape-safe: module-level callables, enforce CHW & H,W masks, use H/W axes, add batch sanity check, document Zarr pinning
 
 # 2025-08-19
 - Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: 9eoogu2o/f7dt0ou5, 9 finished/31 crashed/40 runs, August 19)
