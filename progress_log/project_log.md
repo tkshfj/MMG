@@ -5,6 +5,7 @@
 - Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: bxc8qzvz, 1 runs/finished, August 20)
 - Refactor MONAI pipeline: correct shape/layout issues, replace unpicklable lambdas for multiprocessing, standardize env (Zarr/CUDA/TF32), enforce deterministic runs, and add fast sanity checks.
 - Refactor main.py: enforce Linux ‘fork’ start method; build DataLoaders before any CUDA; pass mp context to DataLoader; delay CUDA/TF32 setup until after loaders for fork-safety
+- Refactor MONAI pipeline main.py: keep macOS on spawn (safe) and makes Linux use fork (fast)
 
 # 2025-08-19
 - Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: 9eoogu2o/f7dt0ou5, 9 finished/31 crashed/40 runs, August 19)
