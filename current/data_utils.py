@@ -376,11 +376,6 @@ def build_dataloaders(
     val_ds = MammoSegmentationDataset(val_df, input_shape=input_shape, task=task, transform=val_transforms)
     test_ds = MammoSegmentationDataset(test_df, input_shape=input_shape, task=task, transform=test_transforms)
 
-    # DataLoaders
-    # train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True, num_workers=num_workers, pin_memory=pin_memory)
-    # val_loader = DataLoader(val_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2), pin_memory=pin_memory)
-    # test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2), pin_memory=pin_memory)
-
     # Common kwargs for DataLoader
     common_kwargs = dict(
         batch_size=batch_size,
@@ -424,30 +419,6 @@ def build_dataloaders(
     train_loader = _make_loader(train_ds, shuffle=True, drop_last=True)
     val_loader = _make_loader(val_ds, shuffle=False)
     test_loader = _make_loader(test_ds, shuffle=False)
-
-    # common_kwargs = dict(num_workers=num_workers, pin_memory=pin_memory)
-    # # Allow passing either a context object or a string like "fork"
-    # if isinstance(multiprocessing_context, str):
-    #     import multiprocessing as mp
-    #     multiprocessing_context = mp.get_context(multiprocessing_context)
-    # if multiprocessing_context is not None:
-    #     common_kwargs["multiprocessing_context"] = multiprocessing_context
-
-    # # Helper to construct with graceful fallback if torch is too old to accept the kwarg
-    # def _make_loader(ds, shuffle, **extra):
-    #     kwargs = {**common_kwargs, "batch_size": batch_size, "shuffle": shuffle, **extra}
-    #     try:
-    #         return DataLoader(ds, **kwargs)
-    #     except TypeError as e:
-    #         # Retry without multiprocessing_context if unsupported by this torch build
-    #         if "unexpected keyword argument 'multiprocessing_context'" in str(e):
-    #             kwargs.pop("multiprocessing_context", None)
-    #             return DataLoader(ds, **kwargs)
-    #         raise
-
-    # train_loader = _make_loader(train_ds, shuffle=True)
-    # val_loader = _make_loader(val_ds, shuffle=False, batch_size=batch_size)
-    # test_loader = _make_loader(test_ds, shuffle=False, batch_size=batch_size)
 
     # Debug batch content for masks
     if debug:
