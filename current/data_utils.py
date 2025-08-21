@@ -382,29 +382,72 @@ def build_dataloaders(
     # test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False, num_workers=max(1, num_workers // 2), pin_memory=pin_memory)
 
     # Common kwargs for DataLoader
-    common_kwargs = dict(num_workers=num_workers, pin_memory=pin_memory)
-    # Allow passing either a context object or a string like "fork"
+    common_kwargs = dict(
+        batch_size=batch_size,
+        num_workers=num_workers,
+        pin_memory=bool(pin_memory),
+    )
+
+    # persistent_workers/prefetch_factor only valid when workers > 0
+    if num_workers and num_workers > 0:
+        common_kwargs.update(
+            persistent_workers=True,
+            prefetch_factor=2,  # reduce worker idle time
+        )
+
+    # Allow passing either a context object or a string like "fork"/"spawn"
     if isinstance(multiprocessing_context, str):
         import multiprocessing as mp
         multiprocessing_context = mp.get_context(multiprocessing_context)
-    if multiprocessing_context is not None:
+
+    if multiprocessing_context is not None and num_workers and num_workers > 0:
         common_kwargs["multiprocessing_context"] = multiprocessing_context
 
-    # Helper to construct with graceful fallback if torch is too old to accept the kwarg
-    def _make_loader(ds, shuffle, **extra):
-        kwargs = {**common_kwargs, "batch_size": batch_size, "shuffle": shuffle, **extra}
+    # Helper: construct with graceful fallback if torch is too old for some kwargs
+    def _make_loader(ds, shuffle: bool, **extra):
+        kwargs = {**common_kwargs, "shuffle": shuffle, **extra}
         try:
             return DataLoader(ds, **kwargs)
         except TypeError as e:
-            # Retry without multiprocessing_context if unsupported by this torch build
-            if "unexpected keyword argument 'multiprocessing_context'" in str(e):
-                kwargs.pop("multiprocessing_context", None)
-                return DataLoader(ds, **kwargs)
-            raise
+            msg = str(e)
+            # Strip unsupported keys and retry (older torch might not support these)
+            for bad_key in ("multiprocessing_context", "prefetch_factor", "persistent_workers"):
+                if bad_key in kwargs and f"unexpected keyword argument '{bad_key}'" in msg:
+                    kwargs.pop(bad_key, None)
+                    try:
+                        return DataLoader(ds, **kwargs)
+                    except TypeError as e2:
+                        msg = str(e2)
+            raise  # still failing -> surface original error
 
-    train_loader = _make_loader(train_ds, shuffle=True)
-    val_loader   = _make_loader(val_ds,   shuffle=False, batch_size=batch_size)
-    test_loader  = _make_loader(test_ds,  shuffle=False, batch_size=batch_size)
+    # Build loaders
+    train_loader = _make_loader(train_ds, shuffle=True, drop_last=True)
+    val_loader = _make_loader(val_ds, shuffle=False)
+    test_loader = _make_loader(test_ds, shuffle=False)
+
+    # common_kwargs = dict(num_workers=num_workers, pin_memory=pin_memory)
+    # # Allow passing either a context object or a string like "fork"
+    # if isinstance(multiprocessing_context, str):
+    #     import multiprocessing as mp
+    #     multiprocessing_context = mp.get_context(multiprocessing_context)
+    # if multiprocessing_context is not None:
+    #     common_kwargs["multiprocessing_context"] = multiprocessing_context
+
+    # # Helper to construct with graceful fallback if torch is too old to accept the kwarg
+    # def _make_loader(ds, shuffle, **extra):
+    #     kwargs = {**common_kwargs, "batch_size": batch_size, "shuffle": shuffle, **extra}
+    #     try:
+    #         return DataLoader(ds, **kwargs)
+    #     except TypeError as e:
+    #         # Retry without multiprocessing_context if unsupported by this torch build
+    #         if "unexpected keyword argument 'multiprocessing_context'" in str(e):
+    #             kwargs.pop("multiprocessing_context", None)
+    #             return DataLoader(ds, **kwargs)
+    #         raise
+
+    # train_loader = _make_loader(train_ds, shuffle=True)
+    # val_loader = _make_loader(val_ds, shuffle=False, batch_size=batch_size)
+    # test_loader = _make_loader(test_ds, shuffle=False, batch_size=batch_size)
 
     # Debug batch content for masks
     if debug:

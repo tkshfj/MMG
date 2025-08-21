@@ -2,6 +2,7 @@
 import os
 os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":16:8")  # cuBLAS deterministic
 os.environ.setdefault("PYTHONHASHSEED", "42")
+os.environ.setdefault("WANDB_DISABLE_CODE", "true")
 os.environ["TF_CPP_MIN_LOG_LEVEL"] = "3"
 
 import random
@@ -15,7 +16,6 @@ from typing import Tuple
 from collections.abc import Callable
 
 import torch
-import wandb
 
 from monai.utils import set_determinism
 
@@ -65,7 +65,7 @@ def dict_safe(loss: torch.nn.Module | Callable):
 
     def _fn(pred, tgt):
         pred_t = pred.get("cls_out", pred.get("class_logits", pred)) if isinstance(pred, dict) else pred
-        tgt_t  = tgt.get("label", tgt.get("y", tgt)) if isinstance(tgt, dict) else tgt
+        tgt_t = tgt.get("label", tgt.get("y", tgt)) if isinstance(tgt, dict) else tgt
         if isinstance(loss, bce):
             return loss(pred_t, torch.as_tensor(tgt_t).float().view_as(pred_t))
         return loss(pred_t, torch.as_tensor(tgt_t).long().view(-1))
@@ -76,8 +76,8 @@ def configure_wandb_step_semantics() -> None:
     try:
         wandb.define_metric("epoch")
         wandb.define_metric("train/*", step_metric="epoch")
-        wandb.define_metric("val/*",   step_metric="epoch")
-        wandb.define_metric("val_*",   step_metric="epoch")
+        wandb.define_metric("val/*", step_metric="epoch")
+        wandb.define_metric("val_*", step_metric="epoch")
     except Exception:
         pass
 
@@ -109,7 +109,7 @@ def run(
     # loss (dict-safe)
     loss_fn = dict_safe(wrapper.get_loss_fn(task, cfg))
 
-    #- batch prep-
+    # batch prep
     prepare_batch = make_prepare_batch(
         task=task,
         debug=cfg.get("debug"),
@@ -138,7 +138,7 @@ def run(
         inferer=None,
     )
 
-    #- scheduler-
+    # scheduler
     scheduler = attach_scheduler(
         cfg=cfg,
         trainer=trainer,
@@ -153,7 +153,7 @@ def run(
         from debug_utils import debug_batch
         debug_batch(next(iter(train_loader)), model)
 
-    #- handlers, checkpoints, resume-
+    # handlers, checkpoints, resume
     handler_kwargs = {
         **wrapper.get_handler_kwargs(),
         "add_classification_metrics": has_cls,
@@ -200,8 +200,10 @@ def run(
 if __name__ == "__main__":
     import sys
     import multiprocessing as mp
+    import wandb
 
     method = "fork" if sys.platform.startswith("linux") else "spawn"
+    # method = "spawn"  # use spawn on all OSes
     try:
         mp.set_start_method(method, force=True)
     except RuntimeError:
@@ -210,7 +212,7 @@ if __name__ == "__main__":
 
     with wandb.init(config={}, dir="outputs") as wb_run:
         cfg = load_and_validate_config(dict(wandb.config))
-        cfg.setdefault("run_id",   wb_run.id)
+        cfg.setdefault("run_id", wb_run.id)
         cfg.setdefault("run_name", wb_run.name)
         configure_wandb_step_semantics()
 

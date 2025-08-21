@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-08-21
+- Refactor main: use fork on Linux (spawn elsewhere), build DataLoaders before CUDA init, pass mp context, and set pin_memory=False under fork.
+
 # 2025-08-20
 - Launch W&B sweeps on M4PRRO for refactored MONAI/Ignite Multitask U-Net (sweep_id: 6wgror3q, 2 runs/finished, August 19-20)
 - Launch W&B sweeps on X870E for refactored MONAI/Ignite Multitask U-Net (sweep_id: bxc8qzvz, 1 runs/finished, August 20)
