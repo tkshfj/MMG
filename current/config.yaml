@@ -41,7 +41,7 @@ scheduler:
   final_div_factor: 10000.0
 
   # plateau
-  monitor: val_loss
+  monitor: loss
   monitor_mode: min
   patience: 3
   factor: 0.5

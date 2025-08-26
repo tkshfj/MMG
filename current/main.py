@@ -16,17 +16,19 @@ from typing import Tuple
 from collections.abc import Callable
 
 import torch
-
 from monai.utils import set_determinism
 
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_registry import MODEL_REGISTRY
-from engine_utils import build_trainer, build_evaluator, make_prepare_batch, attach_scheduler
-from handlers import register_handlers, wandb_log_handler, CHECKPOINT_DIR
-from optim_factory import get_optimizer
+from engine_utils import build_trainer, make_prepare_batch, attach_two_pass_validation, attach_lr_scheduling, read_current_lr
+from optim_factory import get_optimizer, make_scheduler
+from wandb_utils import make_wandb_logger
+from handlers import register_handlers
+from constants import CHECKPOINT_DIR
 from resume_utils import restore_training_state
-
+from calibrator import Calibrator, CalConfig
+from ignite.engine import Events
 
 # determinism (CPU side + algorithm choices), safe pre-fork
 torch.backends.cudnn.deterministic = True
@@ -67,19 +69,49 @@ def dict_safe(loss: torch.nn.Module | Callable):
         pred_t = pred.get("cls_out", pred.get("class_logits", pred)) if isinstance(pred, dict) else pred
         tgt_t = tgt.get("label", tgt.get("y", tgt)) if isinstance(tgt, dict) else tgt
         if isinstance(loss, bce):
-            return loss(pred_t, torch.as_tensor(tgt_t).float().view_as(pred_t))
-        return loss(pred_t, torch.as_tensor(tgt_t).long().view(-1))
+            val = loss(pred_t, torch.as_tensor(tgt_t).float().view_as(pred_t))
+        else:
+            val = loss(pred_t, torch.as_tensor(tgt_t).long().view(-1))
+        # normalize to dict for engine_utils.coerce_loss_dict
+        return {"loss": val}
     return _fn
 
 
 def configure_wandb_step_semantics() -> None:
     try:
         wandb.define_metric("epoch")
-        wandb.define_metric("train/*", step_metric="epoch")
+        wandb.define_metric("global_step")
+        # wandb.define_metric("train/*", step_metric="epoch")
+        wandb.define_metric("train/*", step_metric="global_step")
         wandb.define_metric("val/*", step_metric="epoch")
         wandb.define_metric("val_*", step_metric="epoch")
     except Exception:
         pass
+
+
+@torch.no_grad()
+def _compute_loss(model, val_loader, loss_fn, prepare_batch, device) -> float:
+    was_training = model.training
+    model.eval()
+    total, count = 0.0, 0
+    pin = bool(getattr(val_loader, "pin_memory", False))
+    for batch in val_loader:
+        inputs, targets = prepare_batch(batch, device, pin)
+        outputs = model(inputs)
+        # accept tensor OR dict; normalize via coerce_loss_dict
+        loss_out = loss_fn(outputs, targets)
+        try:
+            from engine_utils import coerce_loss_dict as _coerce  # local import ok
+            loss_map = _coerce(loss_out)
+            loss_t = loss_map["loss"]
+        except Exception:
+            loss_t = loss_out
+        loss = float(loss_t.detach().cpu().item()) if torch.is_tensor(loss_t) else float(loss_t)
+        total += loss
+        count += 1
+    if was_training:
+        model.train()
+    return total / max(1, count)
 
 
 def run(
@@ -101,21 +133,19 @@ def run(
     # optim
     optimizer = get_optimizer(cfg, model)
 
-    # task + metrics
+    # flags
     task = (cfg.get("task") or wrapper.get_supported_tasks()[0]).lower()
     has_cls, has_seg = get_task_flags(task)
-    metrics = wrapper.get_metrics(config=cfg, task=task, has_cls=has_cls, has_seg=has_seg)
 
-    # loss (dict-safe)
-    loss_fn = dict_safe(wrapper.get_loss_fn(task, cfg))
-
-    # batch prep
-    prepare_batch = make_prepare_batch(
+    # two prepare_batch functions
+    prepare_batch_std = make_prepare_batch(
         task=task,
         debug=cfg.get("debug"),
         binary_label_check=True,
         num_classes=int(cfg.get("num_classes", 2)),
     )
+
+    loss_fn = dict_safe(wrapper.get_loss_fn(task, cfg))
 
     # engines
     trainer = build_trainer(
@@ -125,40 +155,79 @@ def run(
         network=model,
         optimizer=optimizer,
         loss_function=loss_fn,
-        prepare_batch=prepare_batch,
-    )
-    evaluator = build_evaluator(
-        device=device,
-        val_data_loader=val_loader,
-        network=model,
-        prepare_batch=prepare_batch,
-        metrics=metrics,
-        decollate=False,
-        postprocessing=None,
-        inferer=None,
+        prepare_batch=prepare_batch_std,   # training remains the std path
     )
 
-    # scheduler
-    scheduler = attach_scheduler(
-        cfg=cfg,
+    # Set cal_init_threshold; fall back to cls_threshold, then threshold
+    init_thr = float(cfg.get("cal_init_threshold", cfg.get("cls_threshold", cfg.get("threshold", 0.5))))
+    # Two-pass evaluator wiring
+    cal = Calibrator(CalConfig(
+        method=str(cfg.get("calibration_method", "youden")),
+        q_bounds=tuple(cfg.get("cal_q_bounds", (0.10, 0.90))),
+        rate_tol=float(cfg.get("cal_rate_tolerance", 0.15)),
+        warmup_epochs=int(cfg.get("cal_warmup_epochs", 2)),
+        auc_floor=float(cfg.get("cal_auc_floor", 0.52)),
+        fallback=str(cfg.get("cal_fallback", "rate_match")),
+        init_threshold=init_thr,
+        ema_beta=float(cfg.get("cal_ema_beta", 0.2)),
+        max_delta=float(cfg.get("cal_max_delta", 0.10)),
+        min_tp=int(cfg.get("cal_min_tp", 10)),
+        bootstraps=int(cfg.get("cal_bootstraps", 0)),
+    ))
+
+    # Two-pass validation: populate trainer.state.metrics each epoch
+    attach_two_pass_validation(
         trainer=trainer,
-        evaluator=evaluator,
-        optimizer=optimizer,
-        train_loader=train_loader,
-        use_monai_handler=False,
+        model=model,
+        val_loader=val_loader,
+        device=device,
+        cfg=cfg,
+        calibrator=cal,
     )
+
+    @trainer.on(Events.EPOCH_COMPLETED)
+    def _store_loss(engine):
+        loss = _compute_loss(model, val_loader, loss_fn, prepare_batch_std, device)
+        engine.state.metrics = engine.state.metrics or {}
+        engine.state.metrics["loss"] = float(loss)
+
+    # TRAIN: per-iteration logging from trainer.state.output, step by global_step
+    trainer.add_event_handler(
+        Events.ITERATION_COMPLETED,
+        make_wandb_logger(prefix="train", source="output", step_by="global", trainer=trainer, debug=False)
+    )
+
+    # Scheduler: construct + attach (trainer-only)
+    scheduler = make_scheduler(cfg=cfg, optimizer=optimizer, train_loader=train_loader)
+
+    # Attach stepping to the trainer only (never evaluator).
+    attach_lr_scheduling(
+        trainer=trainer,
+        evaluator=None,  # two-pass writes into trainer.state.metrics
+        optimizer=optimizer,
+        scheduler=scheduler,
+        plateau_metric=cfg.get("plateau_metric", "val_loss"),
+        plateau_mode=cfg.get("plateau_mode", "min"),
+    )
+
+    # log LR right AFTER scheduler.step() has run (per epoch).
+    @trainer.on(Events.EPOCH_COMPLETED)
+    def _log_lr(engine):
+        try:
+            import wandb
+            sched = getattr(engine.state, "_scheduler", None)
+            lr = read_current_lr(optimizer, sched)
+            if lr is not None:
+                # epoch-only to avoid step metric conflicts
+                wandb.log({"train/lr": float(lr), "epoch": engine.state.epoch})
+
+        except Exception:
+            pass
 
     # optional one-shot debug
     if cfg.get("debug_batch_once", bool(cfg.get("debug", False))):
         from debug_utils import debug_batch
         debug_batch(next(iter(train_loader)), model)
-
-    # handlers, checkpoints, resume
-    handler_kwargs = {
-        **wrapper.get_handler_kwargs(),
-        "add_classification_metrics": has_cls,
-        "add_segmentation_metrics": has_seg,
-    }
 
     run_id = str(cfg.get("run_id") or (wandb.run.id if wandb.run else time.strftime("%Y%m%d-%H%M%S")))
     ckpt_dir = os.path.join(CHECKPOINT_DIR, run_id)
@@ -176,15 +245,19 @@ def run(
         print(f"[resume] restored training state from epoch {last_epoch}")
 
     register_handlers(
-        cfg=cfg,
         trainer=trainer,
-        evaluator=evaluator,
+        evaluator=None,
         model=model,
-        save_dir=ckpt_dir,
-        prefix=arch,
-        wandb_log_handler=wandb_log_handler,
-        metric_names=list(metrics.keys()),
-        **handler_kwargs,
+        optimizer=optimizer,
+        out_dir=getattr(cfg, "out_dir", getattr(cfg, "output_dir", "./outputs")),
+        watch_metric=getattr(getattr(cfg, "early_stop", {}), "metric", "val_auc"),
+        watch_mode=getattr(getattr(cfg, "early_stop", {}), "mode", "max"),
+        save_last_n=getattr(cfg, "save_last_n", 2),
+        wandb_project=getattr(cfg, "wandb_project", None),
+        wandb_run_name=getattr(cfg, "run_name", None),
+        log_images=getattr(cfg, "log_images", False),
+        image_every_n_epochs=getattr(cfg, "image_every_n_epochs", 1),
+        image_max_items=getattr(cfg, "image_max_items", 8),
     )
 
     print("[DEBUG] max_epochs (pre-run) =", trainer.state.max_epochs)
@@ -227,6 +300,10 @@ if __name__ == "__main__":
             debug=bool(cfg.get("debug", False)),
             pin_memory=bool(cfg.get("pin_memory", False)),
             multiprocessing_context=ctx,
+            seg_target="indices",
+            num_classes=int(cfg.get("num_classes", 2)),
+            sampling="weighted",
+            seed=42,
         )
 
         if cfg.get("print_dataset_sizes", True):

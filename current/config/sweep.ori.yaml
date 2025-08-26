@@ -67,7 +67,7 @@ parameters:
   final_div_factor: {value: 10000.0}
 
   # Plateau (after validation)
-  monitor: {values: ["val_loss", "val_auc"]}
+  monitor: {values: ["loss", "val_auc"]}
   monitor_mode: {values: ["min", "max"]}
   patience: {values: [2, 3, 4, 6]}
   factor: {values: [0.5, 0.3]}

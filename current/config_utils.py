@@ -1,7 +1,6 @@
 # config_utils.py
 from __future__ import annotations
-from typing import Any, Dict, Mapping  # Tuple
-# from types import SimpleNamespace
+from typing import Any, Dict, Mapping
 import copy
 import yaml
 from ast import literal_eval
@@ -49,6 +48,11 @@ def _flatten_nested_config(nested: Mapping[str, Any]) -> Dict[str, Any]:
     # metrics
     metrics = nested.get("metrics", {})
     out["multi_weight"] = metrics.get("multi_weight")
+    # allow nested thresholds if provided
+    out["cls_decision"] = metrics.get("cls_decision")
+    out["cls_threshold"] = metrics.get("cls_threshold")
+    out["seg_threshold"] = metrics.get("seg_threshold")
+    out["positive_index"] = metrics.get("positive_index")
 
     # optim
     optim = nested.get("optim", {})
@@ -112,14 +116,15 @@ def _to_tuple(val, typ=float):
 def _coerce_types(cfg: Dict[str, Any]) -> None:
     # ints
     for k in ("epochs", "num_workers", "batch_size", "num_classes",
-              "T_max", "patience", "warmup_epochs"):
+              "T_max", "patience", "warmup_epochs", "positive_index"):
         if k in cfg and cfg[k] is not None:
             cfg[k] = int(cfg[k])
 
     # floats
     for k in ("lr", "weight_decay", "dropout_rate", "eta_min", "max_lr",
               "pct_start", "div_factor", "final_div_factor",
-              "factor", "warmup_start_factor", "alpha", "beta", "multi_weight"):
+              "factor", "warmup_start_factor", "alpha", "beta",
+              "multi_weight", "cls_threshold", "seg_threshold"):
         if k in cfg and cfg[k] is not None:
             cfg[k] = float(cfg[k])
 
@@ -128,7 +133,7 @@ def _coerce_types(cfg: Dict[str, Any]) -> None:
         cfg["input_shape"] = _to_tuple(cfg["input_shape"], int)
 
     # strings lowercased where appropriate
-    for k in ("optimizer", "lr_strategy", "monitor_mode", "architecture", "task"):
+    for k in ("optimizer", "lr_strategy", "monitor_mode", "architecture", "task", "cls_decision"):
         if k in cfg and isinstance(cfg[k], str):
             cfg[k] = cfg[k].lower() if k != "architecture" else cfg[k]
 
@@ -164,14 +169,18 @@ def _apply_defaults(cfg: Dict[str, Any]) -> None:
         "input_shape": (256, 256),
         "num_classes": 2,
 
+        # multitask aggregation
         "multi_weight": 0.65,
 
+        # optim
         "optimizer": "adamw",
         "lr": 2e-4,
         "weight_decay": 5e-5,
 
+        # regularization
         "dropout_rate": 0.20,
 
+        # scheduler
         "lr_strategy": "cosine",
         "T_max": None,  # if None, code can fall back to epochs
         "eta_min": 0.0,
@@ -181,7 +190,7 @@ def _apply_defaults(cfg: Dict[str, Any]) -> None:
         "div_factor": 25.0,
         "final_div_factor": 1e4,
 
-        "monitor": "val_loss",
+        "monitor": "loss",
         "monitor_mode": "min",
         "patience": 3,
         "factor": 0.5,
@@ -189,22 +198,30 @@ def _apply_defaults(cfg: Dict[str, Any]) -> None:
         "warmup_epochs": 3,
         "warmup_start_factor": 0.1,
 
+        # loss mixing
         "alpha": 1.0,
         "beta": 1.0,
 
+        # IO
         "metadata_csv": "../data/processed/cbis_ddsm_metadata_full.csv",
 
+        # early stop
         "early_stop": {
             "patience": 10,
             "min_delta": 0.001,
             "metric": "val_auc",
             "mode": "max",
         },
+
+        # classification/seg decisions (thresholdable defaults)
+        "cls_decision": "threshold",
+        "positive_index": 1,
+        "cls_threshold": 0.5,
+        "seg_threshold": 0.5,
     }
     # inject defaults where missing
     for k, v in defaults.items():
         if k not in cfg or cfg[k] is None:
-            # deep-merge early_stop dict
             if k == "early_stop" and isinstance(v, dict):
                 es = copy.deepcopy(v)
                 user_es = cfg.get("early_stop") or {}
@@ -214,12 +231,32 @@ def _apply_defaults(cfg: Dict[str, Any]) -> None:
                 cfg[k] = v
 
 
+def normalize_lr_config(cfg: dict) -> dict:
+    # alias lr_scheduler -> lr_strategy
+    lr_strat = str(cfg.get("lr_strategy", cfg.get("lr_scheduler", "none"))).lower()
+    cfg["lr_strategy"] = lr_strat
+
+    # normalize metric key once (slashes → underscores)
+    if "plateau_metric" in cfg and cfg["plateau_metric"]:
+        cfg["plateau_metric"] = str(cfg["plateau_metric"]).replace("/", "_")
+
+    # prune dead keys if scheduler is off
+    if lr_strat in ("none", "", "off"):
+        for k in ("plateau_metric", "plateau_mode", "patience", "factor",
+                  "eta_min", "warmup_epochs", "warmup_start_factor", "T_max"):
+            cfg.pop(k, None)
+    return cfg
+
+
 def _normalize_back_compat(cfg: Dict[str, Any]) -> None:
     """
     Map old sweep names to the new canonical keys.
     - base_learning_rate * lr_multiplier -> lr
     - l2_reg -> weight_decay
     - dropout -> dropout_rate
+    - lr_scheduler -> lr_strategy
+    - plateau_metric -> monitor
+    - plateau_mode -> monitor_mode
     """
     if "lr" not in cfg or cfg.get("lr") is None:
         base = cfg.get("base_learning_rate")
@@ -244,6 +281,14 @@ def _normalize_back_compat(cfg: Dict[str, Any]) -> None:
         except Exception:
             pass
 
+    # aliases for scheduler/monitor keys
+    if "lr_strategy" not in cfg and "lr_scheduler" in cfg:
+        cfg["lr_strategy"] = cfg["lr_scheduler"]
+    if "monitor" not in cfg and "plateau_metric" in cfg:
+        cfg["monitor"] = cfg["plateau_metric"]
+    if "monitor_mode" not in cfg and "plateau_mode" in cfg:
+        cfg["monitor_mode"] = cfg["plateau_mode"]
+
 
 def _validate_required(cfg: Dict[str, Any]) -> None:
     missing = [k for k in ("batch_size", "epochs") if cfg.get(k) in (None, "")]
@@ -257,7 +302,7 @@ def _validate_required(cfg: Dict[str, Any]) -> None:
             raise ValueError("OneCycle requires `max_lr` (sweep or config).")
     if strat == "plateau":
         if cfg.get("monitor") is None:
-            raise ValueError("Plateau scheduler requires `monitor` (e.g., 'val_loss' or 'val_auc').")
+            raise ValueError("Plateau scheduler requires `monitor` (e.g., 'loss' or 'val_auc').")
 
 
 def load_and_validate_config(
@@ -281,12 +326,31 @@ def load_and_validate_config(
     if wandb_config is not None:
         cfg.update(dict(wandb_config))
 
-    # Back-compat mapping (old → new names)
+    # Back-compat/aliases first
     _normalize_back_compat(cfg)
+
+    # Explicit aliases (belt-and-suspenders)
+    cfg.setdefault("lr_strategy", cfg.get("lr_scheduler", "none"))
+    cfg.setdefault("monitor", cfg.get("plateau_metric", cfg.get("monitor")))
+    cfg.setdefault("monitor_mode", cfg.get("plateau_mode", cfg.get("monitor_mode")))
 
     # Coerce types & apply defaults
     _coerce_types(cfg)
     _apply_defaults(cfg)
+
+    # calibration defaults & coercion (kept simple; can expand if nested YAML exists)
+    cal = cfg.setdefault("calibration", {})
+    cal.setdefault("enabled", True)
+    cal.setdefault("rate_tol", 0.10)
+    cal["enabled"] = bool(cal["enabled"])
+    try:
+        cal["rate_tol"] = float(cal["rate_tol"])
+    except Exception:
+        raise ValueError("calibration.rate_tol must be a float")
+
+    # dot-access for nested calibration
+    if isinstance(cal, Mapping):
+        cfg["calibration"] = AttrDict(dict(cal))
 
     # Early-stop sub-dict coercion
     if "early_stop" in cfg and isinstance(cfg["early_stop"], Mapping):

@@ -82,7 +82,7 @@ parameters:
   warmup_start_factor: { values: [0.1, 0.2] }
 
   # Plateau (only when scheduler == "plateau")
-  monitor:      { value: val_loss }
+  monitor:      { value: val/loss }
   monitor_mode: { value: min }
   patience:     { values: [3, 6] }
   factor:       { values: [0.5, 0.3] }

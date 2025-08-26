@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-08-26
+- Refactor MONAI pipeline: unify model/evaluator API; add two-pass evaluator with trainer-routed val metrics; fix CM/metric wiring, handler/JSON/tensor-truthiness; standardize keys and W&B step semantics; add single-logit BCE + imbalance tooling; enforce FP32 and spawn-safe loaders; step ReduceLROnPlateau after validation.
+
 # 2025-08-21
 - Refactor main: use fork on Linux (spawn elsewhere), build DataLoaders before CUDA init, pass mp context, and set pin_memory=False under fork.
 

@@ -1,6 +1,6 @@
 # model_registry.py
 from typing import Dict
-from model_protocol import ModelRegistryProtocol
+from protocols import ModelRegistryProtocol
 
 from models.simple_cnn import SimpleCNNModel
 from models.densenet121 import DenseNet121Model

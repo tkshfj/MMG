@@ -1,29 +1,27 @@
 # optim_factory.py
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Dict, List, Mapping, Optional, Sequence
+from typing import Any, Dict, List, Mapping, Optional, Union
+import math
 import torch
 from torch.optim import Optimizer
+from torch.optim.lr_scheduler import _LRScheduler, ReduceLROnPlateau
 
 
 # Scheduler spec
 @dataclass
 class SchedulerSpec:
-    """
-    Wrapper describing how to drive the scheduler in Ignite.
-    - step_cadence: 'epoch' | 'iteration' | 'plateau' | None
-    - needs_train_len: True for OneCycle (created later when steps_per_epoch is known)
-    """
-    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler]  # ReduceLROnPlateau ok too
-    step_cadence: Optional[str]
-    needs_train_len: bool = False
-
+    """Wrapper describing how to drive the scheduler in Ignite."""
+    # scheduler: Optional[torch.optim.lr_scheduler._LRScheduler]  # ReduceLROnPlateau ok too
+    scheduler: Optional[Union[_LRScheduler, ReduceLROnPlateau]]
+    step_cadence: Optional[str]  # 'epoch' | 'iteration' | 'plateau' | None
+    needs_train_len: bool = False  # True for OneCycle
     # stash for late OneCycle construction
     _onecycle_kwargs: Optional[Dict[str, float]] = None
 
 
 # Param-group handling
-def _extract_param_groups(parameters: Any) -> List[Dict[str, Any]] | List[Dict[str, Any]]:
+def _extract_param_groups(parameters: Any) -> List[Dict[str, Any]]:
     """
     Accepts:
       - a model (has .parameters()) -> single group with all trainable params
@@ -37,14 +35,16 @@ def _extract_param_groups(parameters: Any) -> List[Dict[str, Any]] | List[Dict[s
         if not params:
             raise ValueError("get_optimizer: model has no trainable parameters.")
         return [{"params": params}]
-
-    # already param groups?
-    if isinstance(parameters, Sequence) and len(parameters) > 0:
-        first = parameters[0]
+    # iterable of tensors or a list of param-group dicts
+    from collections.abc import Iterable
+    if isinstance(parameters, Iterable):
+        params_list = list(parameters)
+        if len(params_list) == 0:
+            raise ValueError("get_optimizer: empty parameters iterable.")
+        first = params_list[0]
         if isinstance(first, dict):
-            return list(parameters)  # type: ignore[return-value]
-        # iterable of tensors
-        return [{"params": list(parameters)}]
+            return list(params_list)  # list of param group dicts
+        return [{"params": params_list}]  # list/iterable of tensors
 
     raise ValueError("get_optimizer: unsupported parameters input.")
 
@@ -131,9 +131,12 @@ def get_scheduler(cfg: Mapping[str, Any], optimizer: Optimizer) -> SchedulerSpec
     if strat == "plateau":
         sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
-            mode=str(cfg.get("monitor_mode", "min")).lower(),
+            mode=str(cfg.get("plateau_mode", "min")).lower(),
             patience=int(cfg.get("patience", 3)),
             factor=float(cfg.get("factor", 0.5)),
+            threshold=float(cfg.get("threshold", 1e-4)),
+            threshold_mode=str(cfg.get("threshold_mode", "rel")).lower(),  # 'rel' or 'abs'
+            cooldown=int(cfg.get("cooldown", 0)),
         )
         return SchedulerSpec(scheduler=sch, step_cadence="plateau")
 
@@ -156,3 +159,81 @@ def get_scheduler(cfg: Mapping[str, Any], optimizer: Optimizer) -> SchedulerSpec
 
     # Fallback
     return SchedulerSpec(None, None)
+
+
+def make_scheduler(cfg: dict, optimizer: torch.optim.Optimizer, train_loader=None):
+    """
+    Pure factory: builds and returns a torch scheduler (no event wiring).
+    Supported: none, cosine, step, multistep, exponential, plateau, onecycle, linear_warmup_cosine
+    """
+    name = str(cfg.get("lr_scheduler", "none") or "none").lower()
+
+    if name in ("none", "", "off", "false"):
+        return None
+
+    if name in ("cosine", "cosineannealing", "cos"):
+        T_max = int(cfg.get("T_max", cfg.get("epochs", 40)))
+        eta_min = float(cfg.get("eta_min", 0.0))
+        return torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=T_max, eta_min=eta_min)
+
+    if name in ("step", "steplr"):
+        step_size = int(cfg.get("step_size", 10))
+        gamma = float(cfg.get("gamma", 0.1))
+        return torch.optim.lr_scheduler.StepLR(optimizer, step_size=step_size, gamma=gamma)
+
+    if name in ("multistep", "multisteplr", "multi_step"):
+        milestones = cfg.get("milestones", [30, 60, 90])
+        if isinstance(milestones, str):
+            import re
+            milestones = [int(x) for x in re.findall(r"\d+", milestones)]
+        gamma = float(cfg.get("gamma", 0.1))
+        return torch.optim.lr_scheduler.MultiStepLR(optimizer, milestones=milestones, gamma=gamma)
+
+    if name in ("exp", "exponential"):
+        gamma = float(cfg.get("gamma", 0.95))
+        return torch.optim.lr_scheduler.ExponentialLR(optimizer, gamma=gamma)
+
+    if name in ("plateau", "reducelronplateau", "reduce"):
+        mode = str(cfg.get("plateau_mode", "min"))
+        factor = float(cfg.get("factor", 0.5))
+        patience = int(cfg.get("patience", 3))
+        threshold = float(cfg.get("threshold", 1e-4))
+        # verbose = bool(cfg.get("plateau_verbose", False))
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode=mode, factor=factor, patience=patience, threshold=threshold
+        )
+
+    if name in ("onecycle", "one_cycle"):
+        if train_loader is None:
+            raise ValueError("OneCycleLR requires train_loader to compute steps_per_epoch.")
+        max_lr = float(cfg.get("max_lr", cfg.get("lr", 1e-3)))
+        steps_per_epoch = len(train_loader)
+        epochs = int(cfg.get("epochs", 40))
+        pct_start = float(cfg.get("pct_start", 0.3))
+        anneal_strategy = str(cfg.get("anneal_strategy", "cos")).lower()
+        return torch.optim.lr_scheduler.OneCycleLR(
+            optimizer,
+            max_lr=max_lr,
+            steps_per_epoch=steps_per_epoch,
+            epochs=epochs,
+            pct_start=pct_start,
+            anneal_strategy=anneal_strategy,
+            div_factor=float(cfg.get("div_factor", 25.0)),
+            final_div_factor=float(cfg.get("final_div_factor", 1e4)),
+        )
+
+    if name in ("linear_warmup_cosine", "warmup_cosine", "warmcos", "warm_cos", "warmupcos"):
+        warmup_epochs = int(cfg.get("warmup_epochs", 5))
+        total_epochs = int(cfg.get("epochs", 40))
+
+        def lr_lambda(current_epoch: int):
+            if current_epoch < warmup_epochs:
+                # linear warmup to 1.0
+                return float(current_epoch + 1) / float(max(1, warmup_epochs))
+            # cosine decay afterwards
+            progress = (current_epoch - warmup_epochs) / float(max(1, total_epochs - warmup_epochs))
+            return 0.5 * (1.0 + math.cos(math.pi * progress))
+
+        return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+    raise ValueError(f"Unknown lr_scheduler '{name}'")

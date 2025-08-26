@@ -37,7 +37,11 @@ class MultitaskUNetModel(BaseModel):
         # Model hyperparams
         self.in_channels: int = int(self._cfg_get(config, "in_channels", 1))
         self.seg_out_channels: int = int(self._cfg_get(config, "out_channels", 1))  # segmentation C
-        self.num_classes: int = int(self._cfg_get(config, "num_classes", 2))        # classification C
+        # self.num_classes: int = int(self._cfg_get(config, "num_classes", 2))        # classification C
+        self.num_classes: int = int(self._cfg_get(config, "num_classes", 2))        # classification classes
+        # Prefer single-logit for binary classification (removes channel ambiguity)
+        self.binary_single_logit: bool = bool(self._cfg_get(config, "binary_single_logit", True))
+        cls_out_channels = 1 if (self.num_classes == 2 and self.binary_single_logit) else self.num_classes
         self.features: Tuple[int, ...] = tuple(self._cfg_get(config, "features", (32, 64, 128, 256, 512)))
         self.spatial_dims: int = int(self._cfg_get(config, "spatial_dims", 2))
 
@@ -45,7 +49,8 @@ class MultitaskUNetModel(BaseModel):
             spatial_dims=self.spatial_dims,
             in_channels=self.in_channels,
             out_channels=self.seg_out_channels,  # segmentation head channels
-            num_classes=self.num_classes,        # classification classes
+            # num_classes=self.num_classes,        # classification classes
+            cls_out_channels=cls_out_channels,   # 1 for binary-single-logit; C for multi-class
             features=self.features,
         )
 
@@ -69,13 +74,18 @@ class MultitaskUNetModel(BaseModel):
         Robustly pull classification logits from containers. Falls back to BaseModel for tensors/tuples.
         """
         if isinstance(y_pred, dict):
-            v = y_pred.get("class_logits")
+            # v = y_pred.get("class_logits")
+            v = y_pred.get("cls_out", y_pred.get("class_logits"))
             if isinstance(v, torch.Tensor):
                 return v
         if isinstance(y_pred, (list, tuple)):
             for e in y_pred:
-                if isinstance(e, dict) and "class_logits" in e and isinstance(e["class_logits"], torch.Tensor):
-                    return e["class_logits"]
+                # if isinstance(e, dict) and "class_logits" in e and isinstance(e["class_logits"], torch.Tensor):
+                #     return e["class_logits"]
+                if isinstance(e, dict):
+                    vv = e.get("cls_out", e.get("class_logits"))
+                    if isinstance(vv, torch.Tensor):
+                        return vv
                 if isinstance(e, torch.Tensor):
                     return e
         return super().extract_logits(y_pred)
@@ -95,7 +105,8 @@ class MultiTaskUNet(nn.Module):
         spatial_dims: int = 2,
         in_channels: int = 1,
         out_channels: int = 1,
-        num_classes: int = 2,
+        # num_classes: int = 2,
+        cls_out_channels: int = 1,
         features: Tuple[int, ...] = (32, 64, 128, 256, 512),
     ) -> None:
         super().__init__()
@@ -108,22 +119,36 @@ class MultiTaskUNet(nn.Module):
             num_res_units=2,
         )
 
-        self.gap = nn.AdaptiveAvgPool2d(1)
-        self.classifier = nn.Linear(features[-1], num_classes)
+        # self.gap = nn.AdaptiveAvgPool2d(1)
+        self.gap = nn.AdaptiveAvgPool3d(1) if spatial_dims == 3 else nn.AdaptiveAvgPool2d(1)
+        # self.classifier = nn.Linear(features[-1], num_classes)
+        self.classifier = nn.Linear(features[-1], cls_out_channels)
+        self.cls_out_channels = int(cls_out_channels)
         self._bottleneck: Optional[torch.Tensor] = None
 
         # Register a forward hook on the deepest Conv2d to capture encoder features
         self._register_bottleneck_hook(features[-1])
 
     def _register_bottleneck_hook(self, bottleneck_channels: int) -> None:
+        Conv = nn.Conv3d if isinstance(self.gap, nn.AdaptiveAvgPool3d) else nn.Conv2d
+        last_match = None
         for name, module in self.unet.named_modules():
-            if isinstance(module, nn.Conv2d) and module.out_channels == bottleneck_channels:
-                module.register_forward_hook(self._save_bottleneck)
-                break
-        else:
-            raise RuntimeError(
-                "Could not find a Conv2d layer with the expected bottleneck channels to register the hook."
-            )
+            if isinstance(module, Conv) and module.out_channels == bottleneck_channels:
+                last_match = module
+        if last_match is not None:
+            last_match.register_forward_hook(self._save_bottleneck)
+            return
+        raise RuntimeError("Could not find a bottleneck Conv layer to register the hook.")
+
+    # def _register_bottleneck_hook(self, bottleneck_channels: int) -> None:
+    #     for name, module in self.unet.named_modules():
+    #         if isinstance(module, nn.Conv2d) and module.out_channels == bottleneck_channels:
+    #             module.register_forward_hook(self._save_bottleneck)
+    #             break
+    #     else:
+    #         raise RuntimeError(
+    #             "Could not find a Conv2d layer with the expected bottleneck channels to register the hook."
+    #         )
 
     def _save_bottleneck(self, module: nn.Module, inputs: Tuple[torch.Tensor, ...], output: torch.Tensor) -> None:
         self._bottleneck = output
@@ -137,14 +162,24 @@ class MultiTaskUNet(nn.Module):
 
         pooled = self.gap(self._bottleneck)              # [B, C, 1, 1]
         pooled = pooled.view(pooled.size(0), -1)         # [B, C]
-        class_logits = self.classifier(pooled)           # [B, num_classes]
+        # class_logits = self.classifier(pooled)           # [B, num_classes]
+        cls = self.classifier(pooled)                    # [B, cls_out_channels]
+        # For binary-single-logit, emit shape (B,) to make BCE auto-detect
+        if self.cls_out_channels == 1:
+            cls = cls.squeeze(-1)                        # [B]
 
         # Lightweight sanity checks
-        if class_logits.ndim != 2:
-            raise RuntimeError(f"[MultiTaskUNet] Expected class logits [B, num_classes], got {tuple(class_logits.shape)}")
+        # if class_logits.ndim != 2:
+        #     raise RuntimeError(f"[MultiTaskUNet] Expected class logits [B, num_classes], got {tuple(class_logits.shape)}")
+        if not (cls.ndim == 1 or (cls.ndim == 2 and cls.shape[1] >= 1)):
+            raise RuntimeError(f"[MultiTaskUNet] Unexpected cls_out shape {tuple(cls.shape)}")
         if seg_out.ndim != 4:
             raise RuntimeError(f"[MultiTaskUNet] Expected seg_out [B, C, H, W], got {tuple(seg_out.shape)}")
-        if class_logits.shape[0] != seg_out.shape[0]:
-            raise RuntimeError("Batch size mismatch between classification and segmentation outputs.")
+        # if class_logits.shape[0] != seg_out.shape[0]:
+        #     raise RuntimeError("Batch size mismatch between classification and segmentation outputs.")
 
-        return {"class_logits": class_logits, "seg_out": seg_out}
+        # return {"class_logits": class_logits, "seg_out": seg_out}
+        # Standardize keys: 'cls_out' for classification, keep 'seg_out' for segmentation
+        # return {"cls_out": cls, "seg_out": seg_out}
+        # Standardize keys expected by metrics/loss plumbing
+        return {"cls_out": cls, "seg_logits": seg_out}
