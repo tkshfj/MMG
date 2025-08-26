@@ -1,0 +1,111 @@
+# sweep_vit.yaml
+program: main.py
+method: bayes
+
+# Optimize the metric emitted by the evaluator/handlers
+metric:
+  name: val/auc
+  goal: maximize
+
+parameters:
+  # --- Core / execution ---
+  architecture:        {value: vit}
+  task:                {value: classification}
+  run_cap:             {value: 20}
+  epochs:              {value: 40}
+  num_workers:         {value: 12}
+  debug:               {value: true}
+  debug_transforms:    {value: false}
+
+  # --- Data / labels ---
+  in_channels:         {value: 1}
+  input_shape:         {value: [256, 256]}
+  patch_size:          {value: 16}
+  num_classes:         {value: 2}
+  class_counts:        {value: [331, 232]}   # enables bias init + inverse-freq CE weighting
+  batch_size:
+    values: [32, 64]                         # 32 slightly best so far
+
+  # --- Model (ViT) ---
+  hidden_size:
+    values: [384, 512, 768]
+  mlp_dim:
+    values: [1536, 2048, 3072]
+  num_layers:
+    values: [8, 10, 12]
+  num_heads:
+    values: [6, 8, 12]
+  dropout_rate:
+    distribution: uniform
+    min: 0.18
+    max: 0.24
+
+  # --- Loss weighting (used by centralized get_loss_fn) ---
+  alpha: {values: [1.0, 2.0]}
+  beta:  {values: [0.5, 1.0]}
+  # Combined metric weight (if val_multi is enabled in code)
+  multi_weight: {value: 0.65}
+
+  # --- Optimizer / weight decay ---
+  optimizer:           {value: adamw}
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.00005
+
+  # --- Param-group strategy (optimizer LR layout) ---
+  # "single": one LR for all params (use `lr`)
+  # "split" : backbone/base LR + head LR = base_lr * head_multiplier
+  param_groups:
+    values: ["single", "split"]
+
+  # Single-group LR (used when param_groups == "single")
+  lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0008
+
+  # Split LRs (used when param_groups == "split")
+  base_lr:
+    distribution: log_uniform_values
+    min: 0.00002
+    max: 0.0001
+  head_multiplier:
+    values: [5.0, 10.0, 15.0]
+
+  # --- LR scheduler (epoch-level) ---
+  # "none"    : fixed LR(s)
+  # "cosine"  : CosineAnnealingLR(T_max, eta_min)
+  # "warmcos" : Linear warmup → cosine
+  # "plateau" : ReduceLROnPlateau(monitor, factor, patience)
+  scheduler:
+    values: ["none", "cosine", "warmcos", "plateau"]
+
+  # Cosine-only params (used by "cosine" and cosine part of "warmcos")
+  T_max:   {value: 40}        # usually tie to epochs
+  eta_min: {value: 0.0}
+
+  # Warmup (only when scheduler == "warmcos")
+  warmup_epochs:        {values: [0, 2, 3]}
+  warmup_start_factor:  {values: [0.1, 0.2]}
+
+  # Plateau (only when scheduler == "plateau")
+  monitor:       {value: val_loss}
+  monitor_mode:  {value: min}
+  patience:      {values: [3, 6]}
+  factor:        {values: [0.5, 0.3]}
+
+# Early termination to save budget
+early_terminate:
+  type: hyperband
+  min_iter: 4
+
+# NOTE:
+# val_multi gets registered whenever both val_auc and val_dice exist
+# get_loss_fn reads alpha, beta
+# Optimizer uses cfg.lr and cfg.weight_decay
+# Model reads cfg.dropout_rate
+# Remove/ignore patch_size for UNet, or gate by architecture
+
+# IMPORTANT: make sure we log a scalar macro mean as "val/multi"
+# (or change name below to "val/multi_mean" if that’s what we emit)

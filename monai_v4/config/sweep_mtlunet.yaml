@@ -1,0 +1,82 @@
+# sweep_mtlunet.yaml
+program: main.py
+method: bayes
+
+metric:
+  name: val/multi
+  goal: maximize
+
+parameters:
+  # Fixed experiment knobs
+  architecture: {value: multitask_unet}
+  task: {value: multitask}
+  run_cap: {value: 20}
+
+  # Execution
+  epochs: {value: 40}
+  num_workers: {value: 1}
+  debug: {value: true}
+  debug_transforms: {value: false}
+
+  # Data
+  in_channels: {value: 1}
+  input_shape: {value: [256, 256]}
+  num_classes: {value: 2}
+  class_counts: {value: [331, 232]}
+  # Optionally sweep this later if classification recall is low:
+  # pos_weight: {values: [1.0, 2.0, 3.3]}
+
+  # Weighting for the combined metric (if used in code)
+  multi_weight: {value: 0.65}
+
+  # Core tunables (narrowed by evidence)
+  batch_size: {values: [32, 64]}          # 32 slightly best so far
+  lr:
+    distribution: log_uniform_values
+    min: 0.00003                           # was 1e-5..3e-3; lower lr looked better
+    max: 0.0008
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.00001                           # 1e-5
+    max: 0.00005                           # 5e-5
+  dropout_rate:
+    distribution: uniform
+    min: 0.18                              # higher in prior range looked helpful
+    max: 0.24
+
+  # Loss weighting (prune weak options)
+  alpha: {values: [1.0, 2.0]}              # 2.0 tended to do best; keep 1.0 as fallback
+  beta:  {values: [0.5, 1.0]}              # 2.0 underperformed
+
+  # LR strategy: keep epoch-level only in this sweep
+  lr_strategy: {values: ["none", "cosine", "warmcos", "plateau"]}
+
+  # Cosine-only params (used by "cosine" and the cosine part of "warmcos")
+  T_max: {value: 40}                        # tie to epochs
+  eta_min: {value: 0.0}
+
+  # Warmup + Cosine
+  warmup_epochs: {values: [0, 2, 3]}        # trim 5 for now
+  warmup_start_factor: {values: [0.1, 0.2]}
+
+  # Plateau (AFTER validation) – FIX the pairing to avoid bad combos
+  monitor: {value: val/loss}                # if using slash-style logging
+  monitor_mode: {value: min}
+  patience: {values: [3, 6]}
+  factor: {values: [0.5, 0.3]}
+
+# (Optional) Early termination to save budget
+early_terminate:
+  type: hyperband
+  min_iter: 4
+
+
+# NOTE:
+# val_multi gets registered whenever both val_auc and val_dice exist
+# get_loss_fn reads alpha, beta
+# Optimizer uses cfg.lr and cfg.weight_decay
+# Model reads cfg.dropout_rate
+# Remove/ignore patch_size for UNet, or gate by architecture
+
+# IMPORTANT: make sure we log a scalar macro mean as "val/multi"
+# (or change name below to "val/multi_mean" if that’s what we emit)

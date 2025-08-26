@@ -1,0 +1,55 @@
+# config.yaml
+experiment:
+  architecture: multitask_unet
+  task: multitask
+  run_cap: 20
+
+execution:
+  epochs: 40
+  num_workers: 8
+  debug: false
+  debug_transforms: false
+  batch_size: 32
+
+data:
+  in_channels: 1
+  input_shape: [256, 256]
+  num_classes: 2
+
+metrics:
+  multi_weight: 0.65   # for val_multi
+
+optim:
+  optimizer: adamw
+  lr: 0.0002
+  weight_decay: 0.00005
+
+regularization:
+  dropout_rate: 0.20
+
+scheduler:
+  lr_strategy: cosine   # none|cosine|onecycle|plateau|warmcos
+
+  # cosine
+  T_max: 40
+  eta_min: 0.0
+
+  # onecycle
+  max_lr: 0.003
+  pct_start: 0.3
+  div_factor: 25.0
+  final_div_factor: 10000.0
+
+  # plateau
+  monitor: val_loss
+  monitor_mode: min
+  patience: 3
+  factor: 0.5
+
+  # warmup + cosine
+  warmup_epochs: 3
+  warmup_start_factor: 0.1
+
+loss:
+  alpha: 1.0
+  beta: 1.0
