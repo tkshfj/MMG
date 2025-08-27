@@ -7,82 +7,113 @@ metric:
   goal: maximize
 
 parameters:
-  # --- Core / execution ---
-  architecture:        { value: densenet121 }
-  task:                { value: classification }
-  run_cap:             { value: 20 }
-  epochs:              { value: 40 }
-  num_workers:         { value: 12 }
-  debug:               { value: true }
-  debug_transforms:    { value: false }
+  # ---------------- Fixed experiment knobs ----------------
+  architecture: {value: densenet121}
+  task: {value: classification}
+  run_cap: {value: 20}
 
-  # --- Data / labels ---
-  in_channels:         { value: 1 }
-  input_shape:         { value: [256, 256] }
-  num_classes:         { value: 2 }
-  class_counts:        { value: [331, 232] }   # enables inverse-freq CE weights (+ optional bias init if implemented)
-  batch_size:
-    values: [32, 64]
+  # ---------------- Execution ----------------
+  epochs: {value: 40}
+  num_workers: {value: 12}
+  debug: {value: true}
+  debug_transforms: {value: false}
+  console_iter_log: {value: false}
+  console_epoch_log: {value: true}
+  seed: {value: 42}
 
-  # --- Model (DenseNet121) ---
-  pretrained:
-    values: [false, true]
+  # ---------------- Two-pass validation / calibration ----------------
+  two_pass_val: {value: true}
+  log_calibrated: {value: true}
 
-  # --- Loss weighting (read by centralized get_loss_fn) ---
-  alpha:        { values: [1.0, 2.0] }
-  beta:         { values: [0.5, 1.0] }
-  multi_weight: { value: 0.65 }  # used only if combined metric is enabled
+  calibration_method:
+    values: ["youden", "f1", "rate_match"]
+  cal_q_bounds: {value: [0.10, 0.90]}
+  cal_min_tp: {values: [5, 10, 20]}
+  cal_bootstraps: {values: [0, 25]}
 
-  # --- Optimizer / weight decay ---
-  optimizer: { value: adamw }
+  cal_warmup_epochs: {values: [1, 2, 3]}
+  cal_init_threshold: {values: [0.40, 0.50, 0.60]}
+  cal_ema_beta: {values: [0.10, 0.20, 0.30]}
+  cal_max_delta: {values: [0.05, 0.10, 0.20]}
+  cal_rate_tolerance: {values: [0.08, 0.10, 0.12, 0.15]}
+  cal_auc_floor: {values: [0.50, 0.52, 0.55]}
+  cal_fallback: {values: ["rate_match", "keep_last"]}
+
+  # ---------------- Data / labels ----------------
+  in_channels: {value: 1}
+  input_shape: {value: [256, 256]}
+  num_classes: {value: 2}
+  class_counts: {value: [331, 232]}
+  class_balance: {value: inverse}
+  batch_size: {values: [32, 64]}
+
+  # ---------------- Model (DenseNet121) ----------------
+  pretrained: {values: [false, true]}
+
+  # ---------------- Loss weighting ----------------
+  alpha: {values: [1.0, 2.0]}
+  beta:  {values: [0.5, 1.0]}
+  multi_weight: {value: 0.65}
+
+  # ---------------- Optimizer / weight decay ----------------
+  optimizer: {value: adamw}
   weight_decay:
     distribution: log_uniform_values
     min: 0.00001
     max: 0.001
 
-  # --- Param-group strategy (optimizer LR layout) ---
-  # "single": one LR for all params (use `lr`)
-  # "split" : backbone/base LR + head LR = base_lr * head_multiplier
-  param_groups:
-    values: ["single", "split"]
+  # ---------------- Param-group strategy ----------------
+  param_groups: {values: ["single", "split"]}
 
-  # Single-group LR (used when param_groups == "single")
+  # Single-group LR
   lr:
     distribution: log_uniform_values
     min: 0.0001
     max: 0.003
 
-  # Split LRs (used when param_groups == "split")
+  # Split LRs
   base_lr:
     distribution: log_uniform_values
     min: 0.00002
     max: 0.0001
-  head_multiplier:
-    values: [5.0, 10.0, 15.0]
+  head_multiplier: {values: [5.0, 10.0, 15.0]}
 
-  # --- LR scheduler (epoch-level) ---
-  # "none"    : fixed LR(s)
-  # "cosine"  : CosineAnnealingLR(T_max, eta_min)
-  # "warmcos" : Linear warmup → cosine
-  # "plateau" : ReduceLROnPlateau(monitor, factor, patience)
-  scheduler:
-    values: ["none", "cosine", "warmcos", "plateau"]
+  # ---------------- LR scheduler ----------------
+  lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
 
-  # Cosine-only params (used by "cosine" and cosine part of "warmcos")
-  T_max:   { value: 40 }   # usually tie to epochs
-  eta_min: { value: 0.0 }
+  # Cosine params
+  T_max: {value: 40}
+  eta_min: {value: 0.0}
 
-  # Warmup (only when scheduler == "warmcos")
-  warmup_epochs:       { values: [0, 2, 3] }
-  warmup_start_factor: { values: [0.1, 0.2] }
+  # Warmup params
+  warmup_epochs: {values: [0, 2, 3]}
+  warmup_start_factor: {values: [0.1, 0.2]}
 
-  # Plateau (only when scheduler == "plateau")
-  monitor:      { value: val/loss }
-  monitor_mode: { value: min }
-  patience:     { values: [3, 6] }
-  factor:       { values: [0.5, 0.3] }
+  # Plateau params
+  plateau_metric: {value: val/loss}
+  plateau_mode:   {value: min}
+  patience: {values: [3, 6]}
+  factor:   {values: [0.5, 0.3]}
+  threshold: {value: 0.0001}
 
-# Early termination to save budget
+  # ---------------- Classification decision defaults ----------------
+  binary_single_logit: {value: true}
+  binary_bce_from_two_logits: {value: false}
+  cls_loss: {value: auto}
+  cls_decision:  {value: threshold}
+  cls_threshold: {value: 0.5}
+  positive_index: {value: 1}
+
 early_terminate:
   type: hyperband
   min_iter: 4
+
+# NOTE:
+# val_multi gets registered whenever both val_auc and val_dice exist
+# get_loss_fn reads alpha, beta
+# Optimizer uses cfg.lr and cfg.weight_decay
+# Model reads cfg.dropout_rate
+# Remove/ignore patch_size for UNet, or gate by architecture
+
+# IMPORTANT: make sure we log a scalar macro mean as "val/multi"
+# (or change name below to "val/multi_mean" if that’s what we emit)

@@ -7,26 +7,28 @@ metric:
   goal: maximize
 
 parameters:
-  # --- Core / execution ---
-  architecture:        { value: swin_unetr }
-  task:                { value: segmentation }
-  run_cap:             { value: 20 }
-  epochs:              { value: 40 }
-  num_workers:         { value: 12 }
-  debug:               { value: true }
-  debug_transforms:    { value: false }
+  # ---------------- Fixed experiment knobs ----------------
+  architecture: {value: swin_unetr}
+  task: {value: segmentation}
+  run_cap: {value: 20}
 
-  # --- Data / labels ---
-  in_channels:         { value: 1 }
-  # 2D default for this project; switch to [96, 96, 96] if you run 3D volumes
-  img_size:            { value: [256, 256] }
-  out_channels:        { value: 2 }
-  batch_size:
-    values: [4, 8, 16]
+  # ---------------- Execution ----------------
+  epochs: {value: 40}
+  num_workers: {value: 12}
+  debug: {value: true}
+  debug_transforms: {value: false}
+  console_iter_log: {value: false}
+  console_epoch_log: {value: true}
+  seed: {value: 42}
 
-  # --- Model (SwinUNETR) ---
-  feature_size:
-    values: [24, 32, 48]
+  # ---------------- Data / labels ----------------
+  in_channels: {value: 1}
+  img_size: {value: [256, 256]}
+  out_channels: {value: 2}
+  batch_size: {values: [4, 8, 16]}
+
+  # ---------------- Model (SwinUNETR) ----------------
+  feature_size: {values: [24, 32, 48]}
   depths:
     values:
       - [2, 2, 6, 2]
@@ -35,59 +37,47 @@ parameters:
     values:
       - [3, 6, 12, 24]
       - [2, 4, 8, 16]
-  window_size:
-    values: [7, 8]
-  mlp_ratio:
-    values: [3.0, 4.0]
-  use_checkpoint:
-    values: [false, true]
-  # MONAI expects "norm_name"; your model also accepts legacy "norm_layer"
-  norm_name:
-    values: [instance, batch]
+  window_size: {values: [7, 8]}
+  mlp_ratio: {values: [3.0, 4.0]}
+  use_checkpoint: {values: [false, true]}
+  norm_name: {values: [instance, batch]}
 
-  # --- Loss weighting (centralized get_loss_fn for segmentation) ---
-  # e.g., DiceCE = alpha * Dice + beta * CE
-  alpha: { values: [0.5, 1.0, 2.0] }
-  beta:  { values: [0.25, 0.5, 1.0] }
+  # ---------------- Loss weighting ----------------
+  alpha: {values: [0.5, 1.0, 2.0]}
+  beta:  {values: [0.25, 0.5, 1.0]}
 
-  # --- Optimizer / weight decay ---
-  optimizer: { value: adamw }
+  # ---------------- Optimizer / weight decay ----------------
+  optimizer: {value: adamw}
   weight_decay:
     distribution: log_uniform_values
     min: 0.00001
     max: 0.001
 
-  # --- LR setup ---
-  # Keep a single LR group for SwinUNETR unless you implement param splits
-  param_groups: { value: single }
+  # ---------------- LR setup ----------------
+  param_groups: {value: single}
   lr:
     distribution: log_uniform_values
     min: 0.0001
     max: 0.003
 
-  # --- LR scheduler (epoch-level) ---
-  # "none"    : fixed LR
-  # "cosine"  : CosineAnnealingLR(T_max, eta_min)
-  # "warmcos" : Linear warmup → cosine
-  # "plateau" : ReduceLROnPlateau(monitor, factor, patience)
-  scheduler:
-    values: ["none", "cosine", "warmcos", "plateau"]
+  # ---------------- LR scheduler ----------------
+  lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
 
-  # Cosine-only params (used by "cosine" and cosine part of "warmcos")
-  T_max:   { value: 40 }   # usually tie to epochs
-  eta_min: { value: 0.0 }
+  # Cosine params
+  T_max: {value: 40}
+  eta_min: {value: 0.0}
 
-  # Warmup (only when scheduler == "warmcos")
-  warmup_epochs:       { values: [0, 2, 3] }
-  warmup_start_factor: { values: [0.1, 0.2] }
+  # Warmup params
+  warmup_epochs: {values: [0, 2, 3]}
+  warmup_start_factor: {values: [0.1, 0.2]}
 
-  # Plateau (only when scheduler == "plateau")
-  monitor:      { value: val/loss }
-  monitor_mode: { value: min }
-  patience:     { values: [3, 6] }
-  factor:       { values: [0.5, 0.3] }
+  # Plateau params
+  plateau_metric: {value: val/loss}
+  plateau_mode:   {value: min}
+  patience: {values: [3, 6]}
+  factor:   {values: [0.5, 0.3]}
+  threshold: {value: 0.0001}
 
-# Early termination to save budget
 early_terminate:
   type: hyperband
   min_iter: 4

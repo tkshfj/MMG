@@ -7,90 +7,77 @@ metric:
   goal: maximize
 
 parameters:
-  # --- Core / execution ---
-  architecture:        { value: unet }
-  task:                { value: segmentation }
-  run_cap:             { value: 20 }
-  epochs:              { value: 40 }
-  num_workers:         { value: 12 }
-  debug:               { value: true }
-  debug_transforms:    { value: false }
+  # ---------------- Fixed experiment knobs ----------------
+  architecture: {value: unet}
+  task: {value: segmentation}
+  run_cap: {value: 20}
 
-  # --- Data / labels ---
-  in_channels:         { value: 1 }
-  input_shape:         { value: [256, 256] }
-  out_channels:        { value: 2 }           # background + lesion (adjust if needed)
-  batch_size:
-    values: [8, 16, 32]
+  # ---------------- Execution ----------------
+  epochs: {value: 40}
+  num_workers: {value: 12}
+  debug: {value: true}
+  debug_transforms: {value: false}
+  console_iter_log: {value: false}
+  console_epoch_log: {value: true}
+  seed: {value: 42}
 
-  # (Optional) class weighting for CE part if your centralized loss uses it
-  # class_weights:
-  #   values: [[0.3, 1.7], [0.5, 1.5], [1.0, 1.0]]
+  # ---------------- Data / labels ----------------
+  in_channels: {value: 1}
+  input_shape: {value: [256, 256]}
+  out_channels: {value: 2}
+  batch_size: {values: [8, 16, 32]}
 
-  # --- Model (UNet) ---
-  # MONAI UNet expects explicit "channels" and "strides" (lengths must match: len(strides) = len(channels) - 1)
+  # ---------------- Model (UNet) ----------------
   features:
     values:
       - [16, 32, 64, 128, 256]
       - [32, 64, 128, 256, 512]
-      - [32, 64, 128, 256]      # shallower net
+      - [32, 64, 128, 256]
   strides:
     values:
       - [2, 2, 2, 2]
-      - [2, 2, 2]               # for the 4-level variant above
-  num_res_units:
-    values: [1, 2, 3]
+      - [2, 2, 2]
+  num_res_units: {values: [1, 2, 3]}
 
-  # --- Loss weighting (read by centralized get_loss_fn for segmentation) ---
-  # e.g., DiceCE = alpha * Dice + beta * CE
-  alpha: { values: [0.5, 1.0, 2.0] }
-  beta:  { values: [0.25, 0.5, 1.0] }
+  # ---------------- Loss weighting ----------------
+  alpha: {values: [0.5, 1.0, 2.0]}
+  beta:  {values: [0.25, 0.5, 1.0]}
 
-  # --- Optimizer / weight decay ---
-  optimizer: { value: adamw }
+  # ---------------- Segmentation post-process ----------------
+  seg_threshold: {value: 0.5}
+
+  # ---------------- Optimizer / weight decay ----------------
+  optimizer: {value: adamw}
   weight_decay:
     distribution: log_uniform_values
     min: 0.00001
     max: 0.001
 
-  # --- LR setup ---
-  # Keep a single LR group for UNet unless you explicitly implement param splits
-  param_groups: { value: single }
-
-  # Learning rate (single group)
+  # ---------------- LR setup ----------------
+  param_groups: {value: single}
   lr:
     distribution: log_uniform_values
     min: 0.0001
     max: 0.003
 
-  sampling: {value: "weighted"}
-  num_classes: {value: 2}
-  pos_weight: {value: 2.0}    # defaults to n_neg / n_pos
-  neg_weight: {value: 1.0}
+  # ---------------- LR scheduler ----------------
+  lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
 
-  # --- LR scheduler (epoch-level) ---
-  # "none"    : fixed LR
-  # "cosine"  : CosineAnnealingLR(T_max, eta_min)
-  # "warmcos" : Linear warmup → cosine
-  # "plateau" : ReduceLROnPlateau(monitor, factor, patience)
-  scheduler:
-    values: ["none", "cosine", "warmcos", "plateau"]
+  # Cosine params
+  T_max: {value: 40}
+  eta_min: {value: 0.0}
 
-  # Cosine-only params (used by "cosine" and cosine part of "warmcos")
-  T_max:   { value: 40 }   # typically tie to epochs
-  eta_min: { value: 0.0 }
+  # Warmup params
+  warmup_epochs: {values: [0, 2, 3]}
+  warmup_start_factor: {values: [0.1, 0.2]}
 
-  # Warmup (only when scheduler == "warmcos")
-  warmup_epochs:       { values: [0, 2, 3] }
-  warmup_start_factor: { values: [0.1, 0.2] }
+  # Plateau params
+  plateau_metric: {value: val/loss}
+  plateau_mode:   {value: min}
+  patience: {values: [3, 6]}
+  factor:   {values: [0.5, 0.3]}
+  threshold: {value: 0.0001}
 
-  # Plateau (only when scheduler == "plateau")
-  monitor:      { value: val/loss }
-  monitor_mode: { value: min }
-  patience:     { values: [3, 6] }
-  factor:       { values: [0.5, 0.3] }
-
-# Early termination to save budget
 early_terminate:
   type: hyperband
   min_iter: 4

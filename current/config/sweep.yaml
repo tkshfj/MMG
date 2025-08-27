@@ -1,4 +1,5 @@
-# sweep.yaml
+# sweep.yaml (refactored to match sweep_mtlunet.yaml style)
+
 program: main.py
 method: bayes
 
@@ -7,69 +8,117 @@ metric:
   goal: maximize
 
 parameters:
-  # Fixed experiment knobs
+  # ---------------- Fixed experiment knobs ----------------
   architecture: {value: multitask_unet}
   task: {value: multitask}
   run_cap: {value: 20}
 
-  # Execution
+  # ---------------- Execution ----------------
   epochs: {value: 40}
-  num_workers: {value: 2}
+  num_workers: {value: 12}
   debug: {value: true}
   debug_transforms: {value: false}
+  console_iter_log: {value: false}
+  console_epoch_log: {value: true}
+  seed: {value: 42}
 
-  # Data
+  # ---------------- Two-pass validation / calibration ----------------
+  two_pass_val: {value: true}
+  log_calibrated: {value: true}
+
+  # Calibrator core
+  calibration_method:
+    values: ["youden", "f1", "rate_match"]
+  cal_q_bounds:
+    value: [0.10, 0.90]
+  cal_min_tp:
+    values: [5, 10, 20]
+  cal_bootstraps:
+    values: [0, 25]
+
+  # Stability guards
+  cal_warmup_epochs:
+    values: [1, 2, 3]
+  cal_init_threshold:
+    values: [0.40, 0.50, 0.60]
+  cal_ema_beta:
+    values: [0.10, 0.20, 0.30]
+  cal_max_delta:
+    values: [0.05, 0.10, 0.20]
+
+  # Rate guard
+  cal_rate_tolerance:
+    values: [0.08, 0.10, 0.12, 0.15]
+
+  # Weak-AUC handling
+  cal_auc_floor:
+    values: [0.50, 0.52, 0.55]
+  cal_fallback:
+    values: ["rate_match", "keep_last"]
+
+  # ---------------- Data / model topology ----------------
   in_channels: {value: 1}
   input_shape: {value: [256, 256]}
   num_classes: {value: 2}
   class_counts: {value: [331, 232]}
-  # Optionally sweep this later if classification recall is low:
-  # pos_weight: {values: [1.0, 2.0, 3.3]}
+  class_balance: {value: inverse}
 
-  # Weighting for the combined metric (if used in code)
+  # Binary classifier head behavior
+  binary_single_logit: {value: true}
+  binary_bce_from_two_logits: {value: false}
+
+  # ---------------- Loss options ----------------
+  cls_loss: {value: auto}
+
+  # ---------------- Segmentation post-process ----------------
+  seg_threshold: {value: 0.5}
+
+  # ---------------- Multi-task / objective ----------------
   multi_weight: {value: 0.65}
+  alpha: {values: [1.0, 2.0]}
+  beta:  {values: [0.5, 1.0]}
 
-  # Core tunables (narrowed by evidence)
-  batch_size: {values: [32, 64]}          # 32 slightly best so far
+  # ---------------- Core tunables ----------------
+  batch_size: {values: [32, 64]}
   lr:
     distribution: log_uniform_values
-    min: 0.00003                           # was 1e-5..3e-3; lower lr looked better
+    min: 0.00003
     max: 0.0008
   weight_decay:
     distribution: log_uniform_values
-    min: 0.00001                           # 1e-5
-    max: 0.00005                           # 5e-5
+    min: 0.00001
+    max: 0.00005
   dropout_rate:
     distribution: uniform
-    min: 0.18                              # higher in prior range looked helpful
+    min: 0.18
     max: 0.24
 
-  # Loss weighting (prune weak options)
-  alpha: {values: [1.0, 2.0]}              # 2.0 tended to do best; keep 1.0 as fallback
-  beta:  {values: [0.5, 1.0]}              # 2.0 underperformed
+  # ---------------- LR scheduler ----------------
+  lr_scheduler: {value: "plateau"}
 
-  # LR strategy: keep epoch-level only in this sweep
-  lr_strategy: {values: ["none", "cosine", "warmcos", "plateau"]}
-
-  # Cosine-only params (used by "cosine" and the cosine part of "warmcos")
-  T_max: {value: 40}                        # tie to epochs
+  # Cosine params
+  T_max: {value: 40}
   eta_min: {value: 0.0}
 
-  # Warmup + Cosine
-  warmup_epochs: {values: [0, 2, 3]}        # trim 5 for now
+  # Warmup params
+  warmup_epochs: {values: [0, 2, 3]}
   warmup_start_factor: {values: [0.1, 0.2]}
 
-  # Plateau (AFTER validation) – FIX the pairing to avoid bad combos
-  monitor: {value: val/loss}                # if using slash-style logging
-  monitor_mode: {value: min}
+  # Plateau params
+  plateau_metric: {value: val/auc}
+  plateau_mode:   {value: max}
   patience: {values: [3, 6]}
-  factor: {values: [0.5, 0.3]}
+  factor:   {values: [0.5, 0.3]}
+  threshold: {value: 0.0001}
 
-# (Optional) Early termination to save budget
+  # ---------------- Classification decision defaults ----------------
+  cls_decision:  {value: threshold}
+  cls_threshold: {value: 0.5}
+  positive_index: {value: 1}
+
 early_terminate:
   type: hyperband
   min_iter: 4
-
 
 # NOTE:
 # val_multi gets registered whenever both val_auc and val_dice exist
@@ -80,3 +129,74 @@ early_terminate:
 
 # IMPORTANT: make sure we log a scalar macro mean as "val/multi"
 # (or change name below to "val/multi_mean" if that’s what we emit)
+
+# program: main.py
+# method: bayes
+
+# metric:
+#   name: val/multi
+#   goal: maximize
+
+# parameters:
+#   # Fixed experiment knobs
+#   architecture: {value: multitask_unet}
+#   task: {value: multitask}
+#   run_cap: {value: 20}
+
+#   # Execution
+#   epochs: {value: 40}
+#   num_workers: {value: 2}
+#   debug: {value: true}
+#   debug_transforms: {value: false}
+
+#   # Data
+#   in_channels: {value: 1}
+#   input_shape: {value: [256, 256]}
+#   num_classes: {value: 2}
+#   class_counts: {value: [331, 232]}
+#   # Optionally sweep this later if classification recall is low:
+#   # pos_weight: {values: [1.0, 2.0, 3.3]}
+
+#   # Weighting for the combined metric (if used in code)
+#   multi_weight: {value: 0.65}
+
+#   # Core tunables (narrowed by evidence)
+#   batch_size: {values: [32, 64]}          # 32 slightly best so far
+#   lr:
+#     distribution: log_uniform_values
+#     min: 0.00003                           # was 1e-5..3e-3; lower lr looked better
+#     max: 0.0008
+#   weight_decay:
+#     distribution: log_uniform_values
+#     min: 0.00001                           # 1e-5
+#     max: 0.00005                           # 5e-5
+#   dropout_rate:
+#     distribution: uniform
+#     min: 0.18                              # higher in prior range looked helpful
+#     max: 0.24
+
+#   # Loss weighting (prune weak options)
+#   alpha: {values: [1.0, 2.0]}              # 2.0 tended to do best; keep 1.0 as fallback
+#   beta:  {values: [0.5, 1.0]}              # 2.0 underperformed
+
+#   # LR strategy: keep epoch-level only in this sweep
+#   lr_strategy: {values: ["none", "cosine", "warmcos", "plateau"]}
+
+#   # Cosine-only params (used by "cosine" and the cosine part of "warmcos")
+#   T_max: {value: 40}                        # tie to epochs
+#   eta_min: {value: 0.0}
+
+#   # Warmup + Cosine
+#   warmup_epochs: {values: [0, 2, 3]}        # trim 5 for now
+#   warmup_start_factor: {values: [0.1, 0.2]}
+
+#   # Plateau (AFTER validation) – FIX the pairing to avoid bad combos
+#   monitor: {value: val/loss}                # if using slash-style logging
+#   monitor_mode: {value: min}
+#   patience: {values: [3, 6]}
+#   factor: {values: [0.5, 0.3]}
+
+# # (Optional) Early termination to save budget
+# early_terminate:
+#   type: hyperband
+#   min_iter: 4
