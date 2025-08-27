@@ -25,7 +25,7 @@ DiceFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 IoUFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
-# --- local helper kept here: robust AUC with pure-numpy fallback ---
+# local helper kept here: robust AUC with pure-numpy fallback
 def _safe_auc(labels: np.ndarray, scores: np.ndarray) -> float:
     y = labels.astype(np.int64)
     n_pos = int((y == 1).sum())
@@ -61,7 +61,7 @@ def _default_classify_fn(model, x: torch.Tensor) -> torch.Tensor:
     return extract_cls_logits_from_any(model(x))
 
 
-# ----------------------------- main evaluator -----------------------------
+# main evaluator
 class TwoPassEvaluator:
     """
     Mode-aware two-pass evaluator.
@@ -209,7 +209,7 @@ class TwoPassEvaluator:
                 out = model.segment(x) if hasattr(model, "segment") else model(x)
                 seg_logits = out if (torch.is_tensor(out) and out.ndim >= 3) else extract_seg_logits_from_any(out)
 
-                # --- handle binary vs multi-class correctly ---
+                # handle binary vs multi-class correctly
                 if seg_logits.shape[1] == 1:  # binary
                     prob = torch.sigmoid(seg_logits[:, 0])          # [B,H,W]
                     # pred = (prob >= 0.5).to(y_mask.dtype)           # indices {0,1}
@@ -247,7 +247,6 @@ class TwoPassEvaluator:
         return total / max(1, count)
 
     # main entrypoint
-    # @torch.no_grad()
     @torch.inference_mode()
     def validate(self, epoch: int, model, val_loader, base_rate: Optional[float] = None) -> Tuple[float, Dict, Dict]:
         device = getattr(model, "device", next(model.parameters()).device)
@@ -263,7 +262,7 @@ class TwoPassEvaluator:
         seg_metrics: Dict = {}
         t: float = getattr(self.calibrator, "t_prev", 0.5) if self.calibrator is not None else 0.5
 
-        # Classification (optional)
+        # Classification
         if self.has_cls:
             scores, labels = self._gather_scores_labels(model, val_loader, device)
 
@@ -289,7 +288,7 @@ class TwoPassEvaluator:
             self.last_threshold = t
             cls_metrics = self._compute_cls_metrics(scores, labels, t, base_rate)
 
-        # Segmentation (optional)
+        # Segmentation
         if self.has_seg:
             seg_metrics = self._compute_seg_metrics(model, val_loader)
 
@@ -372,6 +371,28 @@ class TwoPassEvaluator:
         if scores.size and not np.isfinite(scores).all():
             scores = np.nan_to_num(scores, nan=0.5, posinf=1.0, neginf=0.0).astype(np.float32)
         return scores, labels
+
+
+# build a flat, prefixed payload
+def make_val_log_payload(
+    epoch: int,
+    cls_metrics: Dict[str, Any],
+    seg_metrics: Dict[str, Any],
+    *,
+    prefix: str = "val/"
+) -> Dict[str, Any]:
+    """
+    Build a single flat dict for logging, with epoch added and keys prefixed.
+    No side effects; caller decides how/when to log and with which step.
+    """
+    payload: Dict[str, Any] = {"trainer/epoch": int(epoch)}
+    for k, v in cls_metrics.items():
+        payload[f"{prefix}{k}"] = v
+    for k, v in seg_metrics.items():
+        # don't overwrite same key if present on cls side
+        if f"{prefix}{k}" not in payload:
+            payload[f"{prefix}{k}"] = v
+    return payload
 
 
 # tiny factory

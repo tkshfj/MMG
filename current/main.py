@@ -78,15 +78,46 @@ def dict_safe(loss: torch.nn.Module | Callable):
 
 
 def configure_wandb_step_semantics() -> None:
+    """
+    Predeclare W&B step domains so metric groups always use the right axis.
+    - trainer/epoch:    epoch-synchronous logs (validation, epoch aggregates)
+    - trainer/iteration:iteration-synchronous logs (per-batch training)
+    """
     try:
+        # Canonical step axes
+        wandb.define_metric("trainer/epoch")
+        wandb.define_metric("trainer/iteration")
+
+        # Route namespaces to the correct axis
+        wandb.define_metric("val/*",   step_metric="trainer/epoch")
+        wandb.define_metric("eval/*",  step_metric="trainer/epoch")
+        wandb.define_metric("seg/*",   step_metric="trainer/epoch")
+        wandb.define_metric("cls/*",   step_metric="trainer/epoch")
+        wandb.define_metric("train/*", step_metric="trainer/iteration")
+
+        # Back-compat (ONLY if you still log these somewhere)
         wandb.define_metric("epoch")
         wandb.define_metric("global_step")
-        # wandb.define_metric("train/*", step_metric="epoch")
-        wandb.define_metric("train/*", step_metric="global_step")
-        wandb.define_metric("val/*", step_metric="epoch")
-        wandb.define_metric("val_*", step_metric="epoch")
+        # If legacy code logs val_* instead of val/*, keep it mapped to epoch:
+        wandb.define_metric("val_*", step_metric="trainer/epoch")
+
+        # (Optional) seed axes once so they exist in the run
+        wandb.log({"trainer/epoch": 0}, step=0)
+        wandb.log({"trainer/iteration": 0}, step=0)
+
     except Exception:
         pass
+
+
+# def configure_wandb_step_semantics() -> None:
+#     try:
+#         wandb.define_metric("epoch")
+#         wandb.define_metric("global_step")
+#         wandb.define_metric("train/*", step_metric="global_step")
+#         wandb.define_metric("val/*", step_metric="epoch")
+#         wandb.define_metric("val_*", step_metric="epoch")
+#     except Exception:
+#         pass
 
 
 @torch.no_grad()

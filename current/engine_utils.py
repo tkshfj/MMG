@@ -10,10 +10,9 @@ from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Unio
 
 from monai.engines import SupervisedTrainer
 from ignite.engine import Events, Engine
-# from torch.optim.lr_scheduler import ReduceLROnPlateau, OneCycleLR
+
 from protocols import CalibratorProtocol
 from evaluator_two_pass import make_two_pass_evaluator, TwoPassEvaluator
-
 from metrics_utils import (
     to_tensor,
     extract_cls_logits_from_any,
@@ -400,10 +399,12 @@ def attach_two_pass_validation(
     device: torch.device,
     cfg: Any,
     calibrator: Optional[CalibratorProtocol] = None,
+    log_to_wandb: bool = True,
+    wandb_prefix: str = "val/",
 ) -> TwoPassEvaluator:
     """
-    Attach a TwoPassEvaluator run at EPOCH_COMPLETED.
-    Returns the evaluator instance (keeps stateful threshold across epochs).
+    Attach a TwoPassEvaluator at EPOCH_COMPLETED.
+    Evaluator does not log; trainer logs exactly once per epoch with step=epoch.
     """
     ev = make_two_pass_evaluator(
         calibrator=calibrator,
@@ -411,6 +412,7 @@ def attach_two_pass_validation(
         positive_index=int(getattr(cfg, "positive_index", cfg.get("positive_index", 1))),
     )
 
+    # Remove any previous hook to avoid duplicate logging / step desync
     old = getattr(trainer.state, "_val_hook_2pass", None)
     if old is not None:
         try:
@@ -421,30 +423,130 @@ def attach_two_pass_validation(
 
     base_rate = getattr(cfg, "base_rate", cfg.get("base_rate", None))
 
+    # Optional: declare metric step domains once
+    wb = None
+    if log_to_wandb:
+        try:
+            import wandb as _wandb
+            wb = _wandb
+            if not getattr(trainer.state, "_wb_val_defined", False):
+                wb.define_metric("trainer/epoch")
+                wb.define_metric(f"{wandb_prefix}*", step_metric="trainer/epoch")
+                trainer.state._wb_val_defined = True
+        except Exception:
+            wb = None  # keep training even if wandb not available
+
+    def _to_scalar(v):
+        # Safe conversion for numpy/torch scalars
+        try:
+            import torch
+            if isinstance(v, torch.Tensor):
+                if v.numel() == 1:
+                    return float(v.detach().cpu().item())
+                return v.detach().cpu().tolist()
+        except Exception:
+            pass
+        if isinstance(v, (np.floating, np.integer)):
+            return float(v) if isinstance(v, np.floating) else int(v)
+        return v
+
+    def _build_payload(epoch: int, cls_m: Dict[str, Any], seg_m: Dict[str, Any], t: float) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"trainer/epoch": int(epoch)}
+        payload[f"{wandb_prefix}cal_thr"] = float(t)
+        for k, v in cls_m.items():
+            payload[f"{wandb_prefix}{k}"] = _to_scalar(v)
+        for k, v in seg_m.items():
+            key = f"{wandb_prefix}{k}"
+            if key not in payload:
+                payload[key] = _to_scalar(v)
+        return payload
+
     @trainer.on(Events.EPOCH_COMPLETED)
-    def _run_two_pass(_):
-        epoch = int(trainer.state.epoch or 0)
+    def _run_two_pass(engine: Engine):
+        epoch = int(engine.state.epoch or 0)
+
+        # Ensure model has a device attribute for evaluator (harmless if already set)
         if not hasattr(model, "device"):
             try:
                 model.device = device
             except Exception:
                 pass
 
+        # --- Evaluate (no logging here) ---
         t, cls_metrics, seg_metrics = ev.validate(
-            epoch=epoch,
-            model=model,
-            val_loader=val_loader,
-            base_rate=base_rate,
+            epoch=epoch, model=model, val_loader=val_loader, base_rate=base_rate
         )
 
-        trainer.state.metrics = trainer.state.metrics or {}
-        m = trainer.state.metrics
-        m.update({k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in cls_metrics.items()})
-        m.update({k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in seg_metrics.items()})
+        # Update engine metrics (so schedulers/handlers can read them)
+        engine.state.metrics = engine.state.metrics or {}
+        m = engine.state.metrics
+        m.update({k: _to_scalar(v) for k, v in cls_metrics.items()})
+        m.update({k: _to_scalar(v) for k, v in seg_metrics.items()})
         m["cal_thr"] = float(t)
+
+        # --- Single-source logging: epoch step only ---
+        if log_to_wandb and wb is not None:
+            payload = _build_payload(epoch, cls_metrics, seg_metrics, t)
+            wb.log(payload, step=epoch)
 
     trainer.state._val_hook_2pass = _run_two_pass
     return ev
+
+
+# def attach_two_pass_validation(
+#     *,
+#     trainer: Engine,
+#     model,
+#     val_loader,
+#     device: torch.device,
+#     cfg: Any,
+#     calibrator: Optional[CalibratorProtocol] = None,
+#     # base_rate=None
+# ) -> TwoPassEvaluator:
+#     """
+#     Attach a TwoPassEvaluator run at EPOCH_COMPLETED.
+#     Returns the evaluator instance (keeps stateful threshold across epochs).
+#     """
+#     ev = make_two_pass_evaluator(
+#         calibrator=calibrator,
+#         task=str(getattr(cfg, "task", cfg.get("task", "multitask"))),
+#         positive_index=int(getattr(cfg, "positive_index", cfg.get("positive_index", 1))),
+#     )
+
+#     old = getattr(trainer.state, "_val_hook_2pass", None)
+#     if old is not None:
+#         try:
+#             trainer.remove_event_handler(old, Events.EPOCH_COMPLETED)
+#         except Exception:
+#             pass
+#         trainer.state._val_hook_2pass = None
+
+#     base_rate = getattr(cfg, "base_rate", cfg.get("base_rate", None))
+
+#     @trainer.on(Events.EPOCH_COMPLETED)
+#     def _run_two_pass(_):
+#         epoch = int(trainer.state.epoch or 0)
+#         if not hasattr(model, "device"):
+#             try:
+#                 model.device = device
+#             except Exception:
+#                 pass
+
+#         t, cls_metrics, seg_metrics = ev.validate(
+#             epoch=epoch,
+#             model=model,
+#             val_loader=val_loader,
+#             base_rate=base_rate,
+#         )
+
+#         trainer.state.metrics = trainer.state.metrics or {}
+#         m = trainer.state.metrics
+#         m.update({k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in cls_metrics.items()})
+#         m.update({k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in seg_metrics.items()})
+#         m["cal_thr"] = float(t)
+
+#     trainer.state._val_hook_2pass = _run_two_pass
+#     return ev
 
 
 # evaluator builder (uses shared extract_* helpers; removed _extract_outputs)
