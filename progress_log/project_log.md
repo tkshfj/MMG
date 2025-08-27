@@ -4,7 +4,8 @@
 - Refactor MONAI: stabilize cls head, warm up multitask loss, and unify W&B epoch logging to fix step warnings
 
 # 2025-08-26
-- Refactor MONAI pipeline: unify model/evaluator API; add two-pass evaluator with trainer-routed val metrics; fix CM/metric wiring, handler/JSON/tensor-truthiness; standardize keys and W&B step semantics; add single-logit BCE + imbalance tooling; enforce FP32 and spawn-safe loaders; step ReduceLROnPlateau after validation.
+- Refactor MONAI pipeline: unify model/evaluator API; add two-pass evaluator with trainer-routed val metrics; fix CM/metric wiring, handler/JSON/tensor-truthiness; standardize keys and W&B step semantics; add single-logit BCE + imbalance tooling; enforce FP32 and spawn-safe loaders; step ReduceLROnPlateau after validation
+- Save legacy MONAI pipeline as v4 for reference
 
 # 2025-08-21
 - Refactor main: use fork on Linux (spawn elsewhere), build DataLoaders before CUDA init, pass mp context, and set pin_memory=False under fork.
