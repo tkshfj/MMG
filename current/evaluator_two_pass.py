@@ -31,18 +31,18 @@ DiceFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 IoUFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
-def _safe_model_device(model: torch.nn.Module) -> torch.device:
-    """Return a sensible device for a model even if it has no parameters."""
-    dev = getattr(model, "device", None)
-    if isinstance(dev, torch.device):
-        return dev
-    # first parameter (if any)
-    for p in model.parameters(recurse=True):
-        return p.device
-    # first buffer (if any)
-    for b in model.buffers(recurse=True):
-        return b.device
-    return torch.device("cpu")
+# def _safe_model_device(model: torch.nn.Module) -> torch.device:
+#     """Return a sensible device for a model even if it has no parameters."""
+#     dev = getattr(model, "device", None)
+#     if isinstance(dev, torch.device):
+#         return dev
+#     # first parameter (if any)
+#     for p in model.parameters(recurse=True):
+#         return p.device
+#     # first buffer (if any)
+#     for b in model.buffers(recurse=True):
+#         return b.device
+#     return torch.device("cpu")
 
 
 # local helper kept here: robust AUC with pure-numpy fallback
@@ -221,8 +221,8 @@ class TwoPassEvaluator:
 
         # Fallback: naive per-batch dice/iou
         dice_scores, iou_scores = [], []
-        # device = getattr(model, "device", next(model.parameters()).device)
-        device = _safe_model_device(model)
+        device = getattr(model, "device", next(model.parameters()).device)
+        # device = _safe_model_device(model)
         # with torch.no_grad():
         with torch.inference_mode():
             for batch in val_loader:
@@ -278,8 +278,8 @@ class TwoPassEvaluator:
     # main entrypoint
     @torch.inference_mode()
     def validate(self, epoch: int, model, val_loader, base_rate: Optional[float] = None) -> Tuple[float, Dict, Dict]:
-        # device = getattr(model, "device", next(model.parameters()).device)
-        device = _safe_model_device(model)
+        device = getattr(model, "device", next(model.parameters()).device)
+        # device = _safe_model_device(model)
         model.eval()
         self._current_model = model
 
@@ -484,17 +484,17 @@ class TwoPassEvaluator:
         if self._std_engine is not None:
             return
 
-        # def _step(_, batch):
-        #     model = self._current_model
-        #     device = getattr(self._std_engine.state, "device", next(model.parameters()).device)
-        #     nb = bool(getattr(self._std_engine.state, "non_blocking", False))
-        def _step(engine, batch):
+        def _step(_, batch):
             model = self._current_model
-            dev = getattr(engine.state, "device", None) or _safe_model_device(model)
-            engine.state.device = dev
-            pin = bool(getattr(engine.state, "non_blocking", False))
-            # x = batch["image"].to(device, non_blocking=nb)
-            x = batch["image"].to(dev, non_blocking=pin)
+            device = getattr(self._std_engine.state, "device", next(model.parameters()).device)
+            nb = bool(getattr(self._std_engine.state, "non_blocking", False))
+        # def _step(engine, batch):
+        #     model = self._current_model
+        #     dev = getattr(engine.state, "device", None) or _safe_model_device(model)
+        #     engine.state.device = dev
+        #     pin = bool(getattr(engine.state, "non_blocking", False))
+        #     x = batch["image"].to(dev, non_blocking=pin)
+            x = batch["image"].to(device, non_blocking=nb)
             y_any = batch.get("label", batch.get("y"))
             y_mask = get_mask_from_batch(batch)
             with torch.inference_mode():
