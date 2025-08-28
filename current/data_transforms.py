@@ -58,72 +58,141 @@ def make_train_transforms(
     *,
     input_shape: Tuple[int, int] = (256, 256),
     task: str = "multitask",
-    seg_target: str = "indices",
+    seg_target: str = "indices",         # "indices" | "channels"
     num_classes: int = 2,
     bin_thresh: float = 0.5,
     aug_flip_prob: float = 0.5,
     aug_rot90_prob: float = 0.5,
 ) -> Compose:
-    has_seg = task.lower() != "classification"
+    has_masks = task.lower() in {"segmentation", "multitask"}
+
     img_keys = ["image"]
-    mask_keys = ["mask"] if has_seg else []
+    mask_keys = ["mask"] if has_masks else []
+    both_keys = img_keys + (mask_keys if mask_keys else [])
 
-    t = [
-        Lambdad(keys=img_keys, func=_read_dicom, allow_missing_keys=False),
-        Lambdad(keys=mask_keys, func=_read_and_merge_masks, allow_missing_keys=True),
+    t = []
 
-        # add channel dim
-        Lambdad(keys=img_keys + mask_keys, func=lambda x: x[None, ...] if getattr(x, "ndim", None) == 2 else x,
-                allow_missing_keys=True),
+    # IO / load
+    t.append(Lambdad(keys=img_keys, func=_read_dicom, allow_missing_keys=False))
+    if mask_keys:
+        t.append(Lambdad(keys=mask_keys, func=_read_and_merge_masks, allow_missing_keys=True))
 
-        ResizeD(
-            keys=img_keys + mask_keys,
-            spatial_size=input_shape,
-            mode=("bilinear", "nearest") if has_seg else "bilinear",
+    # add channel dim (idempotent)
+    t.append(
+        Lambdad(
+            keys=both_keys,
+            func=lambda x: x[None, ...] if getattr(x, "ndim", None) == 2 else x,
             allow_missing_keys=True,
-        ),
+        )
+    )
 
-        # robust centering
-        ScaleIntensityRangePercentilesd(keys=img_keys, lower=2, upper=98, b_min=-1.0, b_max=1.0, clip=True),
-        NormalizeIntensityd(keys=img_keys, nonzero=True, channel_wise=True),
-        EnsureTyped(keys=img_keys + mask_keys, dtype=torch.float32, allow_missing_keys=True),
-    ]
+    # resize
+    t.append(
+        ResizeD(
+            keys=both_keys,
+            spatial_size=input_shape,
+            mode=("bilinear", "nearest") if has_masks else "bilinear",
+            allow_missing_keys=True,
+        )
+    )
 
-    # augs
-    if has_seg:
-        t += [
-            RandFlipd(keys=img_keys + mask_keys, prob=aug_flip_prob, spatial_axis=-2),
-            RandRotate90d(keys=img_keys + mask_keys, prob=aug_rot90_prob, spatial_axes=(-2, -1)),
-        ]
-    else:
-        t += [
-            RandFlipd(keys=img_keys, prob=aug_flip_prob, spatial_axis=-2),
-            RandRotate90d(keys=img_keys, prob=aug_rot90_prob, spatial_axes=(-2, -1)),
-        ]
+    # intensity & typing (images only for intensity ops)
+    t.append(ScaleIntensityRangePercentilesd(keys=img_keys, lower=2, upper=98, b_min=-1.0, b_max=1.0, clip=True))
+    t.append(NormalizeIntensityd(keys=img_keys, nonzero=True, channel_wise=True))
+    t.append(EnsureTyped(keys=both_keys, dtype=torch.float32, allow_missing_keys=True))
 
-    # mask post
-    if has_seg:
+    # augmentations
+    t.append(RandFlipd(keys=both_keys, prob=aug_flip_prob, spatial_axis=-2))
+    t.append(RandRotate90d(keys=both_keys, prob=aug_rot90_prob, spatial_axes=(-2, -1)))
+
+    # mask post-processing (seg only)
+    if mask_keys:
         if seg_target == "indices":
             if num_classes <= 2:
-                t += [
-                    AsDiscreted(keys=mask_keys, threshold=bin_thresh, allow_missing_keys=True),
-                    SqueezeDimd(keys=mask_keys, dim=0, allow_missing_keys=True),
-                    EnsureTyped(keys=mask_keys, dtype=torch.long, allow_missing_keys=True),
-                ]
+                t.append(AsDiscreted(keys=mask_keys, threshold=bin_thresh, allow_missing_keys=True))
             else:
-                t += [
-                    AsDiscreted(keys=mask_keys, argmax=True, allow_missing_keys=True),
-                    SqueezeDimd(keys=mask_keys, dim=0, allow_missing_keys=True),
-                    EnsureTyped(keys=mask_keys, dtype=torch.long, allow_missing_keys=True),
-                ]
+                t.append(AsDiscreted(keys=mask_keys, argmax=True, allow_missing_keys=True))
+            t.append(SqueezeDimd(keys=mask_keys, dim=0, allow_missing_keys=True))
+            t.append(EnsureTyped(keys=mask_keys, dtype=torch.long, allow_missing_keys=True))
         else:
-            # channels target → keep float
+            # channels target
             if num_classes <= 2:
-                t += [AsDiscreted(keys=mask_keys, threshold=bin_thresh, allow_missing_keys=True)]
+                t.append(AsDiscreted(keys=mask_keys, threshold=bin_thresh, allow_missing_keys=True))
             else:
-                t += [AsDiscreted(keys=mask_keys, to_onehot=num_classes, allow_missing_keys=True)]
+                t.append(AsDiscreted(keys=mask_keys, to_onehot=num_classes, allow_missing_keys=True))
 
     return Compose(t)
+
+# def make_train_transforms(
+#     *,
+#     input_shape: Tuple[int, int] = (256, 256),
+#     task: str = "multitask",
+#     seg_target: str = "indices",
+#     num_classes: int = 2,
+#     bin_thresh: float = 0.5,
+#     aug_flip_prob: float = 0.5,
+#     aug_rot90_prob: float = 0.5,
+# ) -> Compose:
+#     has_seg = task.lower() != "classification"
+#     img_keys = ["image"]
+#     mask_keys = ["mask"] if has_seg else []
+
+#     t = [
+#         Lambdad(keys=img_keys, func=_read_dicom, allow_missing_keys=False),
+#         Lambdad(keys=mask_keys, func=_read_and_merge_masks, allow_missing_keys=True),
+
+#         # add channel dim
+#         Lambdad(keys=img_keys + mask_keys, func=lambda x: x[None, ...] if getattr(x, "ndim", None) == 2 else x,
+#                 allow_missing_keys=True),
+
+#         ResizeD(
+#             keys=img_keys + mask_keys,
+#             spatial_size=input_shape,
+#             mode=("bilinear", "nearest") if has_seg else "bilinear",
+#             allow_missing_keys=True,
+#         ),
+
+#         # robust centering
+#         ScaleIntensityRangePercentilesd(keys=img_keys, lower=2, upper=98, b_min=-1.0, b_max=1.0, clip=True),
+#         NormalizeIntensityd(keys=img_keys, nonzero=True, channel_wise=True),
+#         EnsureTyped(keys=img_keys + mask_keys, dtype=torch.float32, allow_missing_keys=True),
+#     ]
+
+#     # augs
+#     if has_seg:
+#         t += [
+#             RandFlipd(keys=img_keys + mask_keys, prob=aug_flip_prob, spatial_axis=-2),
+#             RandRotate90d(keys=img_keys + mask_keys, prob=aug_rot90_prob, spatial_axes=(-2, -1)),
+#         ]
+#     else:
+#         t += [
+#             RandFlipd(keys=img_keys, prob=aug_flip_prob, spatial_axis=-2),
+#             RandRotate90d(keys=img_keys, prob=aug_rot90_prob, spatial_axes=(-2, -1)),
+#         ]
+
+#     # mask post
+#     if has_seg:
+#         if seg_target == "indices":
+#             if num_classes <= 2:
+#                 t += [
+#                     AsDiscreted(keys=mask_keys, threshold=bin_thresh, allow_missing_keys=True),
+#                     SqueezeDimd(keys=mask_keys, dim=0, allow_missing_keys=True),
+#                     EnsureTyped(keys=mask_keys, dtype=torch.long, allow_missing_keys=True),
+#                 ]
+#             else:
+#                 t += [
+#                     AsDiscreted(keys=mask_keys, argmax=True, allow_missing_keys=True),
+#                     SqueezeDimd(keys=mask_keys, dim=0, allow_missing_keys=True),
+#                     EnsureTyped(keys=mask_keys, dtype=torch.long, allow_missing_keys=True),
+#                 ]
+#         else:
+#             # channels target → keep float
+#             if num_classes <= 2:
+#                 t += [AsDiscreted(keys=mask_keys, threshold=bin_thresh, allow_missing_keys=True)]
+#             else:
+#                 t += [AsDiscreted(keys=mask_keys, to_onehot=num_classes, allow_missing_keys=True)]
+
+#     return Compose(t)
 
 
 def make_val_transforms(
