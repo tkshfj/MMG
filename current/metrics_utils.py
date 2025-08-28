@@ -1,10 +1,9 @@
 # metrics_utils.py
 from __future__ import annotations
-
+import inspect
 from typing import Any, Mapping, Optional, Tuple
 import numpy as np
 import torch
-import inspect
 from monai.data.meta_tensor import MetaTensor
 from ignite.engine import Events, Engine
 from ignite.metrics import Accuracy, Precision, Recall, ROC_AUC, ConfusionMatrix, Metric
@@ -56,6 +55,26 @@ def labels_to_1d_indices(y: Any) -> torch.Tensor:
         else:
             y = y.view(y.shape[0], -1).squeeze(-1)
     return y.view(-1).to(torch.long)
+
+
+def positive_score_from_logits(logits: Any, positive_index: int = 1) -> torch.Tensor:
+    """
+    Return p(pos) for classification, handling:
+      - BCE single-logit:    sigmoid(logit)                     -> [B]
+      - CE 2+ logits:        softmax(logits)[:, positive_index] -> [B]
+    Expects logits shaped [B,C] or [B]; higher dims should be reduced by cls_output_transform first.
+    """
+    t = to_tensor(logits).float()
+    if t.ndim == 1:
+        # [B] -> single-logit BCE
+        return torch.sigmoid(t)
+    if t.ndim == 2:
+        C = t.shape[1]
+        if C == 1:
+            return torch.sigmoid(t.squeeze(1))
+        # CE with C≥2
+        return torch.softmax(t, dim=1)[:, int(positive_index)]
+    raise ValueError(f"positive_score_from_logits: expected [B] or [B,C], got {tuple(t.shape)}")
 
 
 def get_mask_from_batch(batch: Mapping[str, Any]) -> Optional[torch.Tensor]:
@@ -317,15 +336,9 @@ def cls_decision_output_transform(decision="argmax", threshold=0.5, positive_ind
     Returns (y_hat[B], y[B]) according to the decision rule.
     """
     def _ot(output):
-        import torch
-        logits, y = cls_output_transform(output)
-        # B, C = logits.shape
-        _, C = logits.shape  # guaranteed 2-D by cls_output_transform
-        if decision == "threshold" and C in (1, 2):
-            if C == 1:
-                scores = torch.sigmoid(logits.squeeze(1))         # [B]
-            else:
-                scores = torch.softmax(logits, dim=1)[:, int(positive_index)]
+        logits, y = cls_output_transform(output)  # -> logits [B,C], y [B]
+        if str(decision).lower() == "threshold":
+            scores = positive_score_from_logits(logits, positive_index=int(positive_index))
             y_hat = (scores >= float(threshold)).to(torch.long)
         else:
             y_hat = torch.argmax(logits, dim=1).long()
@@ -428,20 +441,13 @@ def cls_confmat_output_transform(output):
 
 
 def make_auc_metric(pos_index: int = 1):
-    """
-    ROC AUC from logits for the positive class (pos_index).
-    Works for binary (C=1 or 2 logits) and multiclass (C>2) by
-    converting logits to probabilities and selecting the pos class.
-    """
     def _ot(output):
-        logits, y = cls_output_transform(output)   # logits [B,C], y [B]
+        logits, y = cls_output_transform(output)
         C = logits.shape[1]
         if C <= 2:
-            # binary
-            scores = torch.softmax(logits, dim=1)[:, int(pos_index)] if C == 2 else torch.sigmoid(logits.squeeze(1))
+            scores = positive_score_from_logits(logits, positive_index=int(pos_index))
             y_bin = (y.view(-1) == int(pos_index)).long()
             return scores, y_bin
-        # multiclass: probs + one-hot labels (OvR)
         probs = torch.softmax(logits, dim=1)
         onehot = torch.nn.functional.one_hot(y.view(-1).to(torch.int64), num_classes=C).to(probs.dtype)
         return probs, onehot
@@ -449,31 +455,12 @@ def make_auc_metric(pos_index: int = 1):
 
 
 def auc_output_transform(output, positive_index=1):
-    """
-    AUROC transform:
-      - binary:  scores[B], labels[B]
-      - multiclass (C>2): probs[B,C], one-hot labels[B,C] (OvR)
-    """
-    import torch
-    import torch.nn.functional as F
-
-    logits, labels = cls_output_transform(output)  # logits [B,C], labels [B]
-    if logits.ndim == 1:
-        # [B] logits (rare) -> binary
-        scores = torch.sigmoid(logits)
+    logits, labels = cls_output_transform(output)
+    if logits.ndim == 1 or logits.shape[1] <= 2:
+        scores = positive_score_from_logits(logits, positive_index=int(positive_index))
         return scores, labels
-
-    B, C = logits.shape
-    if C == 1:
-        scores = torch.sigmoid(logits.squeeze(-1))         # [B]
-        return scores, labels
-    if C == 2:
-        scores = torch.softmax(logits, dim=-1)[:, positive_index]  # [B]
-        return scores, labels
-
-    # C > 2: multiclass -> one-vs-rest
-    probs = torch.softmax(logits, dim=-1)                  # [B,C]
-    onehot = F.one_hot(labels.to(torch.int64), num_classes=C).to(probs.dtype)  # [B,C]
+    probs = torch.softmax(logits, dim=-1)
+    onehot = torch.nn.functional.one_hot(labels.to(torch.int64), num_classes=probs.shape[1]).to(probs.dtype)
     return probs, onehot
 
 
@@ -633,10 +620,6 @@ def cls_decision_output_transform_from_box(thr_box: ThresholdBox, positive_index
 
 def thresholded_pred_transform(thr_box: ThresholdBox, positive_index=1):
     def _xf(o):
-        # probs = torch.softmax(o["y_pred"], dim=1)[:, positive_index]
-        # y = o["y"]
-        # preds = (probs >= thr_box.value).to(y.dtype)
-        # return preds, y
         probs = torch.softmax(o["y_pred"], dim=1)[:, positive_index]
         y = o["y"].view(-1).long()
         preds = (probs >= float(thr_box.value)).long()
@@ -658,15 +641,10 @@ class EvalCollector:
         @engine.on(Events.ITERATION_COMPLETED)
         def _collect(e):
             out = e.state.output
-            logits = extract_cls_logits_from_any(out)  # supports 'cls_out'
-            # labels = out["label"] if "label" in out else out.get("y")
+            logits = extract_cls_logits_from_any(out)
             labels_any = out["label"] if "label" in out else out.get("y")
             labels = labels_to_1d_indices(labels_any)
-            # Convert to positive-class probability for collection
-            if logits.ndim == 1 or (logits.ndim == 2 and logits.size(-1) == 1):
-                probs = torch.sigmoid(logits.reshape(-1)).detach().cpu()
-            else:
-                probs = torch.softmax(logits, dim=1)[:, self.pos].detach().cpu()
+            probs = positive_score_from_logits(logits, positive_index=self.pos).detach().cpu()
             self.p_buf.append(probs)
             self.y_buf.append(labels.detach().cpu())
 
@@ -682,8 +660,6 @@ def make_collect_engine(model, device):
         with torch.no_grad():
             x = batch["image"].to(device)
             y = batch["label"].to(device)
-            # logits = model(x)
-            # return {"y_pred": logits, "y": y, "logits": logits, "label": y}
             pred = model(x)
             logits = extract_cls_logits_from_any(pred)  # <- support dict outputs
             return {"y_pred": logits, "y": y, "logits": logits, "label": y}
@@ -700,12 +676,8 @@ class CalibratedBinaryReport(Metric):
         self._scores, self._labels = [], []
 
     def update(self, output):
-        # output is already (logits, y) thanks to output_transform
         logits, y = output
-        if logits.shape[1] == 1:
-            s = torch.sigmoid(logits.squeeze(1))
-        else:
-            s = torch.softmax(logits, dim=1)[:, self.pos]
+        s = positive_score_from_logits(logits, positive_index=self.pos)
         self._scores.append(s.detach().cpu())
         self._labels.append(y.detach().cpu())
 
@@ -768,7 +740,8 @@ def attach_calibrated_threshold_glue(
         # gs = int(getattr(engine.state, "trainer_iteration", 0))
         # wandb.log({"val/cal_thr": new_thr, "epoch": ep, "global_step": gs}, step=gs)
         # Log only with epoch for validation to keep steps monotonic
-        wandb.log({"cal_thr": new_thr, "epoch": ep})
+        # wandb.log({"cal_thr": new_thr, "epoch": ep})
+        wandb.log({"trainer/epoch": ep, "val/cal_thr": new_thr})
 
 
 # Metric that returns a scalar threshold each epoch
@@ -787,14 +760,20 @@ class CalThreshold(Metric):
 
     def update(self, output):
         logits, y = output
-        if logits.ndim == 1:
-            s = torch.sigmoid(logits)
-        elif logits.shape[1] == 1:
-            s = torch.sigmoid(logits.squeeze(1))
-        else:
-            s = torch.softmax(logits, dim=1)[:, self.pos]
+        s = positive_score_from_logits(logits, positive_index=self.pos)
         self._scores.append(s.detach().cpu())
         self._labels.append(y.detach().cpu())
+
+    # def update(self, output):
+    #     logits, y = output
+    #     if logits.ndim == 1:
+    #         s = torch.sigmoid(logits)
+    #     elif logits.shape[1] == 1:
+    #         s = torch.sigmoid(logits.squeeze(1))
+    #     else:
+    #         s = torch.softmax(logits, dim=1)[:, self.pos]
+    #     self._scores.append(s.detach().cpu())
+    #     self._labels.append(y.detach().cpu())
 
     def compute(self) -> float:
         if not self._scores:
@@ -864,17 +843,10 @@ def make_calibration_probe(*, pos_index: int = 1, method: str = "youden") -> dic
 
 
 def _decision_with_box_transform(thr_box, positive_index=1):
-    """Output transform that thresholds class-1 prob using a live ThresholdBox."""
     def _ot(output):
-        logits, y = cls_output_transform(output)  # logits [B,C], y [B]
-        B, C = logits.shape
-        if C == 1:
-            # binary single-logit head -> sigmoid
-            scores = torch.sigmoid(logits.squeeze(1))
-        else:
-            probs = torch.softmax(logits, dim=1)
-            scores = probs[:, int(positive_index)]
-        y_hat = (scores >= float(thr_box.value)).to(torch.long)   # live threshold
+        logits, y = cls_output_transform(output)
+        scores = positive_score_from_logits(logits, positive_index=int(positive_index))
+        y_hat = (scores >= float(thr_box.value)).to(torch.long)
         return y_hat.view(-1), y.view(-1).long()
     return _ot
 
@@ -939,7 +911,7 @@ def make_std_cls_metrics_with_cal_thr(
     Returns keys compatible with logging: acc, prec, recall, cls_confmat,
     plus pos_rate and gt_pos_rate for the health monitor.
     """
-    import torch.nn.functional as F
+
     dec_ot = _decision_with_box_transform(thr_box, positive_index=pos_index)
     cm_ot = _cm_transform_with_box(thr_box, num_classes=num_classes, positive_index=pos_index)
 
@@ -947,11 +919,11 @@ def make_std_cls_metrics_with_cal_thr(
         logits, y = cls_output_transform(output)
         C = logits.shape[1]
         if C <= 2:
-            scores = F.softmax(logits, dim=1)[:, int(pos_index)] if C == 2 else torch.sigmoid(logits.squeeze(1))
+            scores = positive_score_from_logits(logits, positive_index=int(pos_index))
             y_bin = (y.view(-1) == int(pos_index)).long()
             return scores, y_bin
-        probs = F.softmax(logits, dim=1)
-        onehot = F.one_hot(y.view(-1).to(torch.int64), num_classes=probs.shape[1]).to(probs.dtype)
+        probs = torch.softmax(logits, dim=1)
+        onehot = torch.nn.functional.one_hot(y.view(-1).to(torch.int64), num_classes=probs.shape[1]).to(probs.dtype)
         return probs, onehot
 
     return {

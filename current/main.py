@@ -23,8 +23,7 @@ from data_utils import build_dataloaders
 from model_registry import MODEL_REGISTRY
 from engine_utils import build_trainer, make_prepare_batch, attach_two_pass_validation, attach_lr_scheduling, read_current_lr
 from optim_factory import get_optimizer, make_scheduler
-from wandb_utils import make_wandb_logger
-from handlers import register_handlers
+from handlers import register_handlers, configure_wandb_step_semantics
 from constants import CHECKPOINT_DIR
 from resume_utils import restore_training_state
 from calibrator import Calibrator, CalConfig
@@ -75,49 +74,6 @@ def dict_safe(loss: torch.nn.Module | Callable):
         # normalize to dict for engine_utils.coerce_loss_dict
         return {"loss": val}
     return _fn
-
-
-def configure_wandb_step_semantics() -> None:
-    """
-    Predeclare W&B step domains so metric groups always use the right axis.
-    - trainer/epoch:    epoch-synchronous logs (validation, epoch aggregates)
-    - trainer/iteration:iteration-synchronous logs (per-batch training)
-    """
-    try:
-        # Canonical step axes
-        wandb.define_metric("trainer/epoch")
-        wandb.define_metric("trainer/iteration")
-
-        # Route namespaces to the correct axis
-        wandb.define_metric("val/*",   step_metric="trainer/epoch")
-        wandb.define_metric("eval/*",  step_metric="trainer/epoch")
-        wandb.define_metric("seg/*",   step_metric="trainer/epoch")
-        wandb.define_metric("cls/*",   step_metric="trainer/epoch")
-        wandb.define_metric("train/*", step_metric="trainer/iteration")
-
-        # Back-compat (ONLY if you still log these somewhere)
-        wandb.define_metric("epoch")
-        wandb.define_metric("global_step")
-        # If legacy code logs val_* instead of val/*, keep it mapped to epoch:
-        wandb.define_metric("val_*", step_metric="trainer/epoch")
-
-        # (Optional) seed axes once so they exist in the run
-        wandb.log({"trainer/epoch": 0}, step=0)
-        wandb.log({"trainer/iteration": 0}, step=0)
-
-    except Exception:
-        pass
-
-
-# def configure_wandb_step_semantics() -> None:
-#     try:
-#         wandb.define_metric("epoch")
-#         wandb.define_metric("global_step")
-#         wandb.define_metric("train/*", step_metric="global_step")
-#         wandb.define_metric("val/*", step_metric="epoch")
-#         wandb.define_metric("val_*", step_metric="epoch")
-#     except Exception:
-#         pass
 
 
 @torch.no_grad()
@@ -222,12 +178,6 @@ def run(
         engine.state.metrics = engine.state.metrics or {}
         engine.state.metrics["loss"] = float(loss)
 
-    # TRAIN: per-iteration logging from trainer.state.output, step by global_step
-    trainer.add_event_handler(
-        Events.ITERATION_COMPLETED,
-        make_wandb_logger(prefix="train", source="output", step_by="global", trainer=trainer, debug=False)
-    )
-
     # Scheduler: construct + attach (trainer-only)
     scheduler = make_scheduler(cfg=cfg, optimizer=optimizer, train_loader=train_loader)
 
@@ -249,9 +199,10 @@ def run(
             sched = getattr(engine.state, "_scheduler", None)
             lr = read_current_lr(optimizer, sched)
             if lr is not None:
-                # epoch-only to avoid step metric conflicts
-                wandb.log({"train/lr": float(lr), "epoch": engine.state.epoch})
-
+                wandb.log({"trainer/epoch": int(engine.state.epoch), "opt/lr": float(lr)})
+            # if lr is not None and getattr(wandb, "run", None) is not None:
+            #     ep = int(engine.state.epoch)
+            #     wandb.log({"trainer/epoch": ep, "opt/lr": float(lr)})
         except Exception:
             pass
 

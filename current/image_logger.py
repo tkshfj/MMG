@@ -1,132 +1,305 @@
 # image_logger.py
-import wandb
+from __future__ import annotations
+
+from typing import Any, Dict, List, Optional, Tuple
+
+import numpy as np
+import torch
 
 
-def make_image_logger(num_images: int = 4, threshold: float = 0.5):
-    from ignite.engine import Events
-    from monai.data.meta_tensor import MetaTensor
-    import numpy as np
-    import torch
+def make_image_logger(max_items: int = 8, threshold: float = 0.5, namespace: str = "val"):
+    """
+    Returns a callable:
+        log_fn(payload_like, *, wandb_module=None, epoch_anchor=None)
 
-    buf_imgs, buf_gt, buf_pred = [], [], []
+    - payload_like: either an evaluator output dict (preferred: contains predictions)
+                    or a batch dict (contains input/gt only).
+                    Expected keys (if available): 'image', 'mask', 'seg_logits' / 'pred'
+    - wandb_module: typically the `wandb` module instance returned by your init helper
+    - epoch_anchor: int epoch number; will log with {"trainer/epoch": epoch_anchor}
 
-    def _as_tensor(x):
-        return x.as_tensor() if isinstance(x, MetaTensor) else x
-
-    def _squeeze01(x):
-        return x[:, 0] if (x is not None and x.ndim == 4 and x.shape[1] == 1) else x
-
-    def _to_numpy_image(x: torch.Tensor) -> np.ndarray:
-        if x is None:
-            return None
+    The function logs once per call with:
+        { "trainer/epoch": ep,
+          f"{namespace}/images":      [wandb.Image, ...],
+          f"{namespace}/gt_masks":    [wandb.Image, ...],   (if GT present)
+          f"{namespace}/pred_masks":  [wandb.Image, ...] }  (if preds present)
+    """
+    def _to_cpu_np(x: torch.Tensor) -> np.ndarray:
         t = x.detach().cpu()
-        if t.ndim == 3:
-            c, h, w = t.shape
-            arr = t[0] if c == 1 else t[:3].permute(1, 2, 0)
+        return t.numpy()
+
+    def _to_numpy_image(t: torch.Tensor) -> np.ndarray:
+        # Accept [C,H,W] (C==1 or 3), [H,W], or [B,C,H,W]—caller slices per-item
+        if t.ndim == 3:  # [C,H,W] or [H,W]
+            if t.shape[0] in (1, 3):  # channel-first
+                c, h, w = t.shape
+                arr = t[0] if c == 1 else t[:3].permute(1, 2, 0)
+            else:
+                arr = t  # treat as [H,W,C]? rare for tensors; handled as [H,W,?]
         elif t.ndim == 2:
             arr = t
         else:
+            # fallback to first item
             arr = t.view(-1, *t.shape[-2:])[0]
         arr = arr.float()
         mn, mx = float(arr.min()), float(arr.max())
-        arr = (arr - mn) / (mx - mn) if mx > mn else arr * 0.0
-        return arr.numpy()
+        if mx > mn:
+            arr = (arr - mn) / (mx - mn)
+        else:
+            arr = arr * 0.0
+        return _to_cpu_np(arr)
 
-    def _to_numpy_mask(x: torch.Tensor) -> np.ndarray:
-        if x is None:
-            return None
-        t = x.detach().cpu()
-        if t.ndim == 3:
+    def _to_numpy_mask(t: torch.Tensor) -> np.ndarray:
+        # Accept [H,W] or [C,H,W] (C==1) or [B,H,W]—caller slices per-item
+        if t.ndim == 3 and t.shape[0] == 1:
             t = t[0]
         t = (t > 0.5).to(torch.uint8)
-        return t.numpy()
+        return _to_cpu_np(t)
 
-    def _collect_from_output(out):
-        if not isinstance(out, dict):
-            return None
+    def _as_tensor(x):
+        # Accept torch.Tensor or array-like
+        if isinstance(x, torch.Tensor):
+            return x
+        return torch.as_tensor(x)
 
-        # 1) find image
-        images = out.get("image", None)
+    def _extract_triplet(obj: Dict[str, Any]) -> Tuple[Optional[torch.Tensor], Optional[torch.Tensor], Optional[torch.Tensor]]:
+        """
+        Returns (images, gt_masks, pred_masks) shaped as:
+          images:    [B,1,H,W] or [B,3,H,W] or [B,H,W]
+          gt_masks:  [B,H,W] or [B,1,H,W] or None
+          pred_masks:[B,H,W] or None
+        """
+        images = obj.get("image")
+        gt = obj.get("mask")
 
-        # 2) find mask (support flat and nested)
-        mask = out.get("mask", None)
-        if mask is None:
-            lbl = out.get("label")
-            if isinstance(lbl, dict):
-                mask = lbl.get("mask")
+        # predicted logits / masks may live in various keys
+        pred = obj.get("seg_logits")
+        if pred is None:
+            pr = obj.get("pred")
+            if isinstance(pr, dict):
+                # common nested candidates
+                pred = pr.get("seg_out") or pr.get("logits") or pr.get("seg")
+            elif isinstance(pr, torch.Tensor):
+                pred = pr
 
-        # 3) find segmentation logits (support flat and nested)
-        seg_logits = out.get("seg_logits", None)
-        if seg_logits is None:
-            pred = out.get("pred")
-            if isinstance(pred, dict):
-                seg_logits = pred.get("seg_out") or pred.get("logits") or pred.get("seg")
+        images = _as_tensor(images) if images is not None else None
+        gt = _as_tensor(gt) if gt is not None else None
+        pred = _as_tensor(pred) if pred is not None else None
 
-        if images is None or mask is None or seg_logits is None:
-            # Not a segmentation batch or missing fields
-            return None
+        # convert logits -> mask
+        if pred is not None:
+            if pred.ndim == 4 and pred.shape[1] == 1:
+                pred = (torch.sigmoid(pred) > threshold).float().squeeze(1)  # [B,H,W]
+            elif pred.ndim == 4 and pred.shape[1] > 1:
+                pred = torch.softmax(pred, dim=1).argmax(dim=1).float()      # [B,H,W]
+            elif pred.ndim == 3:
+                # already a mask [B,H,W]
+                pred = (pred > 0.5).float()
+            else:
+                pred = None  # unsupported shape
 
-        # Convert logits -> binary/argmax mask (works for C==1 or C>1)
-        logits = _as_tensor(seg_logits)
-        if logits.ndim == 4 and logits.shape[1] == 1:
-            pmask = (torch.sigmoid(logits) > threshold).float()[:, 0]     # [B,H,W]
-        elif logits.ndim == 4 and logits.shape[1] > 1:
-            pmask = torch.softmax(logits, dim=1).argmax(dim=1).float()    # [B,H,W]
-        else:
-            # unsupported shape
-            return None
+        # squeeze to canonical shapes
+        if images is not None and images.ndim == 4 and images.shape[1] == 1:
+            images = images  # keep [B,1,H,W]
+        elif images is not None and images.ndim == 3:
+            images = images.unsqueeze(1)  # [B,H,W] -> [B,1,H,W]
 
-        masks = _as_tensor(mask)
-        images = _as_tensor(images)
+        if gt is not None:
+            if gt.ndim == 4 and gt.shape[1] == 1:
+                gt = gt.squeeze(1)  # [B,1,H,W] -> [B,H,W]
+            elif gt.ndim == 3:
+                gt = gt  # [B,H,W]
+            else:
+                gt = None
 
-        # squeeze image/mask first channel if [B,1,H,W]
-        if images.ndim == 4 and images.shape[1] == 1:
-            images = images[:, 0]
-        if masks.ndim == 4 and masks.shape[1] == 1:
-            masks = masks[:, 0]
+        if pred is not None and pred.ndim != 3:
+            pred = None
 
-        return images, masks, pmask
+        return images, gt, pred
 
-    def on_iteration(engine):
-        nonlocal buf_imgs, buf_gt, buf_pred
-        if len(buf_imgs) >= num_images:
+    def _build_lists(images: torch.Tensor,
+                     gt: Optional[torch.Tensor],
+                     pred: Optional[torch.Tensor],
+                     limit: int) -> Tuple[List, List, List]:
+        """Return lists of np arrays ready for wandb.Image."""
+        B = int(images.shape[0])
+        n = min(B, max(1, int(limit)))
+        imgs_np: List[np.ndarray] = []
+        gts_np: List[np.ndarray] = []
+        preds_np: List[np.ndarray] = []
+
+        for i in range(n):
+            img_t = images[i]  # [1,H,W]
+            np_img = _to_numpy_image(img_t)
+            imgs_np.append(np_img)
+
+            if gt is not None:
+                gts_np.append(_to_numpy_mask(gt[i]))
+            if pred is not None:
+                preds_np.append(_to_numpy_mask(pred[i]))
+
+        return imgs_np, gts_np, preds_np
+
+    def _log(payload_like: Dict[str, Any],
+             *,
+             wandb_module=None,
+             epoch_anchor: Optional[int] = None):
+        """Main logging callable."""
+        if wandb_module is None or getattr(wandb_module, "run", None) is None:
             return
-        pack = _collect_from_output(engine.state.output)
-        if pack is None:
+        ep = int(epoch_anchor if epoch_anchor is not None else 0)
+
+        # prefer evaluator output dict; fall back to batch dict
+        images, gt, pred = _extract_triplet(payload_like)
+        if images is None:
             return
-        images, masks, pmask = pack
-        b = min(images.shape[0], num_images - len(buf_imgs))
-        for i in range(b):
-            buf_imgs.append(images[i])
-            buf_gt.append(masks[i])
-            buf_pred.append(pmask[i])
 
-    def on_epoch_completed(engine):
-        nonlocal buf_imgs, buf_gt, buf_pred
-        if not buf_imgs:
-            return
-        step = int(getattr(engine.state, "trainer_iteration", getattr(engine.state, "iteration", 0)))
-        ep = int(getattr(engine.state, "trainer_epoch", engine.state.epoch))
-        for i in range(len(buf_imgs)):
-            np_img = _to_numpy_image(buf_imgs[i])
-            np_gt = _to_numpy_mask(buf_gt[i])
-            np_pm = _to_numpy_mask(buf_pred[i])
-            if np_img is None or np_gt is None or np_pm is None:
-                continue
-            wandb.log(
-                {"image": wandb.Image(np_img, caption="input"),
-                 "gt_mask": wandb.Image(np_gt),
-                 "pred_mask": wandb.Image(np_pm),
-                 "epoch": ep},
-                step=step,
-            )
-        buf_imgs.clear()
-        buf_gt.clear()
-        buf_pred.clear()
+        imgs_np, gts_np, preds_np = _build_lists(images, gt, pred, max_items)
 
-    def attach(evaluator):
-        evaluator.add_event_handler(Events.ITERATION_COMPLETED, on_iteration)
-        evaluator.add_event_handler(Events.EPOCH_COMPLETED, on_epoch_completed)
-        return evaluator
+        # Build one payload per epoch (lists so earlier items aren’t overwritten)
+        payload = {"trainer/epoch": ep}
+        # Store as lists of Images (recommended by W&B for multiple examples at the same step)
+        payload[f"{namespace}/images"] = [wandb_module.Image(x, caption=f"{namespace} #{i}")
+                                          for i, x in enumerate(imgs_np)]
+        if gts_np:
+            payload[f"{namespace}/gt_masks"] = [wandb_module.Image(x) for x in gts_np]
+        if preds_np:
+            payload[f"{namespace}/pred_masks"] = [wandb_module.Image(x) for x in preds_np]
 
-    return attach
+        wandb_module.log(payload)  # <-- no step=
+
+    return _log
+
+
+# # image_logger.py
+# import wandb
+
+
+# def make_image_logger(num_images: int = 4, threshold: float = 0.5):
+#     from ignite.engine import Events
+#     from monai.data.meta_tensor import MetaTensor
+#     import numpy as np
+#     import torch
+
+#     buf_imgs, buf_gt, buf_pred = [], [], []
+
+#     def _as_tensor(x):
+#         return x.as_tensor() if isinstance(x, MetaTensor) else x
+
+#     def _squeeze01(x):
+#         return x[:, 0] if (x is not None and x.ndim == 4 and x.shape[1] == 1) else x
+
+#     def _to_numpy_image(x: torch.Tensor) -> np.ndarray:
+#         if x is None:
+#             return None
+#         t = x.detach().cpu()
+#         if t.ndim == 3:
+#             c, h, w = t.shape
+#             arr = t[0] if c == 1 else t[:3].permute(1, 2, 0)
+#         elif t.ndim == 2:
+#             arr = t
+#         else:
+#             arr = t.view(-1, *t.shape[-2:])[0]
+#         arr = arr.float()
+#         mn, mx = float(arr.min()), float(arr.max())
+#         arr = (arr - mn) / (mx - mn) if mx > mn else arr * 0.0
+#         return arr.numpy()
+
+#     def _to_numpy_mask(x: torch.Tensor) -> np.ndarray:
+#         if x is None:
+#             return None
+#         t = x.detach().cpu()
+#         if t.ndim == 3:
+#             t = t[0]
+#         t = (t > 0.5).to(torch.uint8)
+#         return t.numpy()
+
+#     def _collect_from_output(out):
+#         if not isinstance(out, dict):
+#             return None
+
+#         # 1) find image
+#         images = out.get("image", None)
+
+#         # 2) find mask (support flat and nested)
+#         mask = out.get("mask", None)
+#         if mask is None:
+#             lbl = out.get("label")
+#             if isinstance(lbl, dict):
+#                 mask = lbl.get("mask")
+
+#         # 3) find segmentation logits (support flat and nested)
+#         seg_logits = out.get("seg_logits", None)
+#         if seg_logits is None:
+#             pred = out.get("pred")
+#             if isinstance(pred, dict):
+#                 seg_logits = pred.get("seg_out") or pred.get("logits") or pred.get("seg")
+
+#         if images is None or mask is None or seg_logits is None:
+#             # Not a segmentation batch or missing fields
+#             return None
+
+#         # Convert logits -> binary/argmax mask (works for C==1 or C>1)
+#         logits = _as_tensor(seg_logits)
+#         if logits.ndim == 4 and logits.shape[1] == 1:
+#             pmask = (torch.sigmoid(logits) > threshold).float()[:, 0]     # [B,H,W]
+#         elif logits.ndim == 4 and logits.shape[1] > 1:
+#             pmask = torch.softmax(logits, dim=1).argmax(dim=1).float()    # [B,H,W]
+#         else:
+#             # unsupported shape
+#             return None
+
+#         masks = _as_tensor(mask)
+#         images = _as_tensor(images)
+
+#         # squeeze image/mask first channel if [B,1,H,W]
+#         if images.ndim == 4 and images.shape[1] == 1:
+#             images = images[:, 0]
+#         if masks.ndim == 4 and masks.shape[1] == 1:
+#             masks = masks[:, 0]
+
+#         return images, masks, pmask
+
+#     def on_iteration(engine):
+#         nonlocal buf_imgs, buf_gt, buf_pred
+#         if len(buf_imgs) >= num_images:
+#             return
+#         pack = _collect_from_output(engine.state.output)
+#         if pack is None:
+#             return
+#         images, masks, pmask = pack
+#         b = min(images.shape[0], num_images - len(buf_imgs))
+#         for i in range(b):
+#             buf_imgs.append(images[i])
+#             buf_gt.append(masks[i])
+#             buf_pred.append(pmask[i])
+
+#     def on_epoch_completed(engine):
+#         nonlocal buf_imgs, buf_gt, buf_pred
+#         if not buf_imgs:
+#             return
+#         step = int(getattr(engine.state, "trainer_iteration", getattr(engine.state, "iteration", 0)))
+#         ep = int(getattr(engine.state, "trainer_epoch", engine.state.epoch))
+#         for i in range(len(buf_imgs)):
+#             np_img = _to_numpy_image(buf_imgs[i])
+#             np_gt = _to_numpy_mask(buf_gt[i])
+#             np_pm = _to_numpy_mask(buf_pred[i])
+#             if np_img is None or np_gt is None or np_pm is None:
+#                 continue
+#             wandb.log(
+#                 {"image": wandb.Image(np_img, caption="input"),
+#                  "gt_mask": wandb.Image(np_gt),
+#                  "pred_mask": wandb.Image(np_pm),
+#                  "epoch": ep},
+#                 step=step,
+#             )
+#         buf_imgs.clear()
+#         buf_gt.clear()
+#         buf_pred.clear()
+
+#     def attach(evaluator):
+#         evaluator.add_event_handler(Events.ITERATION_COMPLETED, on_iteration)
+#         evaluator.add_event_handler(Events.EPOCH_COMPLETED, on_epoch_completed)
+#         return evaluator
+
+#     return attach

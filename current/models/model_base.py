@@ -202,7 +202,7 @@ class BaseModel(ModelRegistryProtocol):
                     loss_fn = None
 
         # decision settings (config-driven)
-        cls_decision = str(cfg.get("cls_decision", "argmax")).lower()   # "argmax" | "threshold"
+        cls_decision = str(cfg.get("cls_decision", "threshold")).lower()   # "argmax" | "threshold"
         cls_threshold = float(cfg.get("cls_threshold", 0.5))
         positive_index = int(cfg.get("positive_index", 1))
 
@@ -233,7 +233,6 @@ class BaseModel(ModelRegistryProtocol):
             loss_fn=loss_fn,
             cls_ot=cls_ot_factory,  # None | factory | callable(output)->(y_pred, y)
             auc_ot=auc_ot_factory,
-            # seg_cm_ot=seg_cm_ot_factory,
             seg_cm_ot=seg_cm_ot,
             multitask=multitask,
             cls_decision=cls_decision,  # explicit decision for Acc/Prec/Recall/CM

@@ -228,90 +228,90 @@ def is_ignite_engine(obj) -> bool:
         return hasattr(obj, "add_event_handler") and hasattr(obj, "on")
 
 
-def attach_wandb_loggers(
-    trainer: Engine,
-    *,
-    evaluator: Optional[Engine] = None,
-    train_prefix: str = "train",
-    val_prefix: str = "val",
-    log_train: bool = True,
-    log_val: bool = True,
-    debug: bool = False,
-    make_logger=None,  # factory for the handler; if None we'll try to import it
-):
-    """
-    Attach W&B loggers with correct step semantics.
-    - TRAIN: iteration-level logs from engine.state.output, step = global_step
-    - VAL:   epoch-level logs from engine.state.metrics, step = epoch
+# def attach_wandb_loggers(
+#     trainer: Engine,
+#     *,
+#     evaluator: Optional[Engine] = None,
+#     train_prefix: str = "train",
+#     val_prefix: str = "val",
+#     log_train: bool = True,
+#     log_val: bool = True,
+#     debug: bool = False,
+#     make_logger=None,  # factory for the handler; if None we'll try to import it
+# ):
+#     """
+#     Attach W&B loggers with correct step semantics.
+#     - TRAIN: iteration-level logs from engine.state.output, step = global_step
+#     - VAL:   epoch-level logs from engine.state.metrics, step = epoch
 
-    Idempotent: re-calling will remove previous handlers and re-attach.
-    Returns a (train_cb, val_cb) tuple (None if not attached).
-    """
-    # lazy import if a factory wasn't provided
-    if make_logger is None:
-        try:
-            from wandb_utils import make_wandb_logger as make_logger
-        except Exception as e:
-            raise ImportError(
-                "attach_wandb_loggers needs a make_wandb_logger(factory). "
-                "Pass it via make_logger=... or ensure wandb_utils.make_wandb_logger is importable."
-            ) from e
+#     Idempotent: re-calling will remove previous handlers and re-attach.
+#     Returns a (train_cb, val_cb) tuple (None if not attached).
+#     """
+#     # lazy import if a factory wasn't provided
+#     if make_logger is None:
+#         try:
+#             from wandb_utils import make_wandb_logger as make_logger
+#         except Exception as e:
+#             raise ImportError(
+#                 "attach_wandb_loggers needs a make_wandb_logger(factory). "
+#                 "Pass it via make_logger=... or ensure wandb_utils.make_wandb_logger is importable."
+#             ) from e
 
-    # Let W&B know which field is the step for each namespace (best-effort)
-    try:
-        import wandb
-        wandb.define_metric(f"{train_prefix}/*", step_metric="global_step")
-        wandb.define_metric(f"{val_prefix}/*", step_metric="epoch")
-    except Exception:
-        pass
+#     # Let W&B know which field is the step for each namespace (best-effort)
+#     # try:
+#     #     import wandb
+#     #     wandb.define_metric(f"{train_prefix}/*", step_metric="global_step")
+#     #     wandb.define_metric(f"{val_prefix}/*", step_metric="epoch")
+#     # except Exception:
+#     #     pass
 
-    # detach old handlers (idempotent)
-    old_tr = getattr(trainer.state, "_wandb_train_cb", None)
-    if old_tr is not None:
-        try:
-            trainer.remove_event_handler(old_tr, Events.ITERATION_COMPLETED)
-        except Exception:
-            pass
-        trainer.state._wandb_train_cb = None
+#     # detach old handlers (idempotent)
+#     old_tr = getattr(trainer.state, "_wandb_train_cb", None)
+#     if old_tr is not None:
+#         try:
+#             trainer.remove_event_handler(old_tr, Events.ITERATION_COMPLETED)
+#         except Exception:
+#             pass
+#         trainer.state._wandb_train_cb = None
 
-    if evaluator is not None:
-        old_val = getattr(evaluator.state, "_wandb_val_cb", None)
-        if old_val is not None:
-            try:
-                evaluator.remove_event_handler(old_val, Events.COMPLETED)
-            except Exception:
-                pass
-            evaluator.state._wandb_val_cb = None
+#     if evaluator is not None:
+#         old_val = getattr(evaluator.state, "_wandb_val_cb", None)
+#         if old_val is not None:
+#             try:
+#                 evaluator.remove_event_handler(old_val, Events.COMPLETED)
+#             except Exception:
+#                 pass
+#             evaluator.state._wandb_val_cb = None
 
-    # attach new handlers
-    train_cb = None
-    val_cb = None
+#     # attach new handlers
+#     train_cb = None
+#     val_cb = None
 
-    if log_train:
-        train_cb = make_logger(
-            prefix=train_prefix,
-            source="output",
-            step_by="global",
-            trainer=trainer,
-            evaluator=evaluator,
-            debug=debug,
-        )
-        trainer.add_event_handler(Events.ITERATION_COMPLETED, train_cb)
-        trainer.state._wandb_train_cb = train_cb
+#     if log_train:
+#         train_cb = make_logger(
+#             prefix=train_prefix,
+#             source="output",
+#             step_by="global",
+#             trainer=trainer,
+#             evaluator=evaluator,
+#             debug=debug,
+#         )
+#         trainer.add_event_handler(Events.ITERATION_COMPLETED, train_cb)
+#         trainer.state._wandb_train_cb = train_cb
 
-    if log_val and evaluator is not None:
-        val_cb = make_logger(
-            prefix=val_prefix,
-            source="metrics",
-            step_by="epoch",
-            trainer=trainer,
-            evaluator=evaluator,
-            debug=debug,
-        )
-        evaluator.add_event_handler(Events.COMPLETED, val_cb)
-        evaluator.state._wandb_val_cb = val_cb
+#     if log_val and evaluator is not None:
+#         val_cb = make_logger(
+#             prefix=val_prefix,
+#             source="metrics",
+#             step_by="epoch",
+#             trainer=trainer,
+#             evaluator=evaluator,
+#             debug=debug,
+#         )
+#         evaluator.add_event_handler(Events.COMPLETED, val_cb)
+#         evaluator.state._wandb_val_cb = val_cb
 
-    return train_cb, val_cb
+#     return train_cb, val_cb
 
 
 def build_trainer(
@@ -429,7 +429,7 @@ def attach_two_pass_validation(
         try:
             import wandb as _wandb
             wb = _wandb
-            if not getattr(trainer.state, "_wb_val_defined", False):
+            if not getattr(trainer.state, "_wb_val_defined", False) and getattr(wb, "run", None):
                 wb.define_metric("trainer/epoch")
                 wb.define_metric(f"{wandb_prefix}*", step_metric="trainer/epoch")
                 trainer.state._wb_val_defined = True
@@ -487,7 +487,8 @@ def attach_two_pass_validation(
         # --- Single-source logging: epoch step only ---
         if log_to_wandb and wb is not None:
             payload = _build_payload(epoch, cls_metrics, seg_metrics, t)
-            wb.log(payload, step=epoch)
+            # wb.log(payload, step=epoch)
+            wb.log(payload)
 
     trainer.state._val_hook_2pass = _run_two_pass
     return ev
@@ -968,6 +969,6 @@ __all__ = [
     "build_trainer",
     "build_evaluator",
     "attach_scheduler",
-    "attach_wandb_loggers",
+    # "attach_wandb_loggers",
     "attach_lr_scheduling",
 ]

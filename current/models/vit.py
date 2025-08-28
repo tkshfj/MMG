@@ -98,23 +98,63 @@ class ViTModel(BaseModel):
 
     # helpers: make dims sane
     def _sanitize_vit_dims(self, config: Any) -> Any:
+        """
+        Ensure hidden_size is divisible by num_heads.
+        - If *pretrained* is requested, raise with a clear message (no silent snap).
+        - If not pretrained, snap hidden_size downward to the nearest multiple and log it.
+        """
         hs = int(self._cfg_get(config, "hidden_size", 384))
         nh = int(self._cfg_get(config, "num_heads", 8))
+
+        # Treat any of these as intent to load pretrained weights
+        pretrained = bool(
+            self._cfg_get(config, "pretrained", False) or self._cfg_get(config, "pretrained_path", None) or self._cfg_get(
+                config, "weights", None) or self._cfg_get(config, "checkpoint", None) or self._cfg_get(config, "state_dict", None)
+        )
 
         if hs <= 0 or nh <= 0:
             raise ValueError(f"hidden_size and num_heads must be > 0, got {hs}, {nh}")
 
         if hs % nh != 0:
-            new_hs = max(nh, (hs // nh) * nh)
-            logger.warning(
-                "hidden_size %d not divisible by num_heads %d; snapping hidden_size -> %d",
-                hs, nh, new_hs
-            )
-            hs = new_hs
+            if pretrained:
+                # Hard error: caller must fix dims to match pretrained checkpoint.
+                raise ValueError(
+                    f"ViT hidden_size={hs} is not divisible by num_heads={nh}. "
+                    f"This would break pretrained weight loading. "
+                    f"Choose a compatible pair (e.g., change num_heads or set hidden_size "
+                    f"to a multiple of {nh}; for 512 use heads=8, or for heads=6 use 510/516/522/...)."
+                )
+            # Safe to adjust when not loading pretrained weights
+            snapped = max(nh, (hs // nh) * nh)  # snap down; keep at least one head-dim
+            if snapped != hs:
+                logger.info(
+                    "Adjusting ViT hidden_size %d -> %d to be divisible by num_heads=%d (no pretrained).",
+                    hs, snapped, nh
+                )
+            hs = snapped
 
         self._cfg_set(config, "hidden_size", hs)
         self._cfg_set(config, "num_heads", nh)
         return config
+
+    # def _sanitize_vit_dims(self, config: Any) -> Any:
+    #     hs = int(self._cfg_get(config, "hidden_size", 384))
+    #     nh = int(self._cfg_get(config, "num_heads", 8))
+
+    #     if hs <= 0 or nh <= 0:
+    #         raise ValueError(f"hidden_size and num_heads must be > 0, got {hs}, {nh}")
+
+    #     if hs % nh != 0:
+    #         new_hs = max(nh, (hs // nh) * nh)
+    #         logger.warning(
+    #             "hidden_size %d not divisible by num_heads %d; snapping hidden_size -> %d",
+    #             hs, nh, new_hs
+    #         )
+    #         hs = new_hs
+
+    #     self._cfg_set(config, "hidden_size", hs)
+    #     self._cfg_set(config, "num_heads", nh)
+    #     return config
 
     # BaseModel API implementations
     def build_model(self, config: Any) -> Any:
