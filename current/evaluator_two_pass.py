@@ -6,6 +6,8 @@ import numpy as np
 import torch
 
 from protocols import CalibratorProtocol
+from ignite.engine import Engine
+from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
 
 # Shared helpers
 from metrics_utils import (
@@ -16,6 +18,10 @@ from metrics_utils import (
     promote_vec,
     to_py,
     get_mask_from_batch,
+    ThresholdBox,
+    make_std_cls_metrics_with_cal_thr,
+    # cls_output_transform,
+    seg_confmat_output_transform,
 )
 
 logger = logging.getLogger(__name__)
@@ -23,6 +29,20 @@ logger = logging.getLogger(__name__)
 SegEvalFn = Callable[[Any, Any], Dict[str, Any]]  # (model, val_loader) -> seg metrics dict
 DiceFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 IoUFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
+
+
+def _safe_model_device(model: torch.nn.Module) -> torch.device:
+    """Return a sensible device for a model even if it has no parameters."""
+    dev = getattr(model, "device", None)
+    if isinstance(dev, torch.device):
+        return dev
+    # first parameter (if any)
+    for p in model.parameters(recurse=True):
+        return p.device
+    # first buffer (if any)
+    for b in model.buffers(recurse=True):
+        return b.device
+    return torch.device("cpu")
 
 
 # local helper kept here: robust AUC with pure-numpy fallback
@@ -81,6 +101,8 @@ class TwoPassEvaluator:
         iou_fn: Optional[IoUFn] = None,
         rate_tol_override: float | None = None,
         seg_threshold: float = 0.5,
+        num_classes: int = 2,
+        cls_threshold: float = 0.5,
     ):
         self.calibrator = calibrator
         self.pos_idx = int(positive_index)
@@ -95,6 +117,12 @@ class TwoPassEvaluator:
         self.bad_count: int = 0
         self._capabilities_frozen = False
         self.seg_threshold = float(seg_threshold)
+        self.num_classes = int(num_classes)
+        # live threshold box used by decision-OT metrics
+        self._thr_box = ThresholdBox(value=float(cls_threshold))
+        # Ignite standard evaluator (built lazily)
+        self._std_engine: Optional[Engine] = None
+        self._current_model = None
 
     # Public guards
     @property
@@ -193,7 +221,8 @@ class TwoPassEvaluator:
 
         # Fallback: naive per-batch dice/iou
         dice_scores, iou_scores = [], []
-        device = getattr(model, "device", next(model.parameters()).device)
+        # device = getattr(model, "device", next(model.parameters()).device)
+        device = _safe_model_device(model)
         # with torch.no_grad():
         with torch.inference_mode():
             for batch in val_loader:
@@ -249,8 +278,10 @@ class TwoPassEvaluator:
     # main entrypoint
     @torch.inference_mode()
     def validate(self, epoch: int, model, val_loader, base_rate: Optional[float] = None) -> Tuple[float, Dict, Dict]:
-        device = getattr(model, "device", next(model.parameters()).device)
+        # device = getattr(model, "device", next(model.parameters()).device)
+        device = _safe_model_device(model)
         model.eval()
+        self._current_model = model
 
         # One-time auto-detect if user didn't force flags
         if not self._capabilities_frozen and (self._has_cls is None or self._has_seg is None):
@@ -258,12 +289,16 @@ class TwoPassEvaluator:
             self._capabilities_frozen = True
             logger.info("[TwoPass] capabilities: has_cls=%s has_seg=%s", self._has_cls, self._has_seg)
 
-        cls_metrics: Dict = {}
-        seg_metrics: Dict = {}
-        t: float = getattr(self.calibrator, "t_prev", 0.5) if self.calibrator is not None else 0.5
+        # cls_metrics: Dict = {}
+        # seg_metrics: Dict = {}
+        # t: float = getattr(self.calibrator, "t_prev", 0.5) if self.calibrator is not None else 0.5
+        cls_metrics: Dict[str, Any] = {}
+        seg_metrics: Dict[str, Any] = {}
+        t: float = getattr(self.calibrator, "t_prev", 0.5) if self.calibrator is not None else float(self._thr_box.value)
 
         # Classification
         if self.has_cls:
+            # Gather scores for calibration only (AUC/metrics come from Ignite)
             scores, labels = self._gather_scores_labels(model, val_loader, device)
 
             # helpful debug to catch flat/degenerate scores
@@ -286,11 +321,75 @@ class TwoPassEvaluator:
                 t = float(self.last_threshold) if self.last_threshold is not None else 0.5
 
             self.last_threshold = t
-            cls_metrics = self._compute_cls_metrics(scores, labels, t, base_rate)
+            # cls_metrics = self._compute_cls_metrics(scores, labels, t, base_rate)
+            # Inject the new threshold into the decision OT and run Ignite evaluator
+            self._ensure_std_engine()
+            self._thr_box.value = float(t)
+            # allow the step to see the correct device/pin hint
+            pin = bool(getattr(val_loader, "pin_memory", False))
+            setattr(self._std_engine.state, "device", device)
+            setattr(self._std_engine.state, "non_blocking", pin)
+            # run once to populate metrics
+            self._std_engine.run(val_loader)
+            raw = dict(self._std_engine.state.metrics or {})
+            # Flatten/normalize to Python scalars
+            # Acc / Prec / Recall / AUC / pos_rate / gt_pos_rate come directly
+            # ConfMat and per-cell fields need expansion
+            for k in ("acc", "prec", "recall", "auc", "pos_rate", "gt_pos_rate"):
+                if k in raw:
+                    v = raw[k]
+                    cls_metrics[k] = float(v) if isinstance(v, (int, float)) else float(to_py(v))
+            if "cls_confmat" in raw:
+                add_confmat(cls_metrics, "cls_confmat", raw["cls_confmat"])
+            # add the threshold we used
+            cls_metrics["threshold"] = float(t)
+            cls_metrics["cal_thr"] = float(t)
+            # decision-health logging (same behavior as before)
+            if base_rate is not None:
+                pos_rate = float(cls_metrics.get("pos_rate", 0.0))
+                rate_tol = self.rate_tol_override
+                if rate_tol is None and self.calibrator is not None:
+                    rate_tol = getattr(self.calibrator.cfg, "rate_tol", 0.10)
+                if rate_tol is not None:
+                    delta = abs(pos_rate - base_rate)
+                    was_bad = (delta > rate_tol)
+                    self.bad_count = self.bad_count + 1 if was_bad else 0
+                    logger.info(
+                        "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
+                        pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
+                    )
 
         # Segmentation
         if self.has_seg:
-            seg_metrics = self._compute_seg_metrics(model, val_loader)
+            # If the Ignite engine has seg metrics attached, read them; otherwise keep fallback
+            if self._std_engine is not None and "seg_confmat" in (self._std_engine.state.metrics or {}):
+                raw = dict(self._std_engine.state.metrics or {})
+                # dice / iou may be scalars or per-class vectors; promote_vec handles both
+                if "dice" in raw:
+                    promote_vec(seg_metrics, "dice", raw["dice"])
+                if "iou" in raw:
+                    promote_vec(seg_metrics, "iou", raw["iou"])
+                if "seg_confmat" in raw:
+                    add_confmat(seg_metrics, "seg_confmat", raw["seg_confmat"])
+                # keep loss if present
+                if "loss" in raw:
+                    v = to_py(raw["loss"])
+                    if isinstance(v, (int, float)):
+                        seg_metrics["loss"] = float(v)
+            else:
+                seg_metrics = self._compute_seg_metrics(model, val_loader)
+
+            # If the Ignite engine has seg metrics attached, read them; otherwise keep fallback
+            # if self._std_engine is not None and "seg_confmat" in (self._std_engine.state.metrics or {}):
+            #     raw = dict(self._std_engine.state.metrics or {})
+            #     if "dice" in raw:
+            #         seg_metrics["dice"] = float(to_py(raw["dice"]))
+            #     if "iou" in raw:
+            #         seg_metrics["iou"] = float(to_py(raw["iou"]))
+            #     if "seg_confmat" in raw:
+            #         add_confmat(seg_metrics, "seg_confmat", raw["seg_confmat"])
+            # else:
+            #     seg_metrics = self._compute_seg_metrics(model, val_loader)
 
         # Combined scores (linear mix; keep behavior)
         if self.has_cls and self.has_seg and "auc" in cls_metrics and "dice" in seg_metrics:
@@ -372,6 +471,85 @@ class TwoPassEvaluator:
             scores = np.nan_to_num(scores, nan=0.5, posinf=1.0, neginf=0.0).astype(np.float32)
         return scores, labels
 
+    # Ignite engine wiring
+    def _ensure_std_engine(self) -> None:
+        """
+        Build a single Ignite evaluator that:
+        - emits a dict with cls logits/labels and seg logits/masks
+        - has classification metrics wired through:
+                * AUC (raw logits OT)
+                * Acc/Prec/Recall/ConfMat/pos_rate/gt_pos_rate (decision OT via self._thr_box)
+        - has segmentation metrics wired through ConfusionMatrix -> Dice/IoU
+        """
+        if self._std_engine is not None:
+            return
+
+        # def _step(_, batch):
+        #     model = self._current_model
+        #     device = getattr(self._std_engine.state, "device", next(model.parameters()).device)
+        #     nb = bool(getattr(self._std_engine.state, "non_blocking", False))
+        def _step(engine, batch):
+            model = self._current_model
+            dev = getattr(engine.state, "device", None) or _safe_model_device(model)
+            engine.state.device = dev
+            pin = bool(getattr(engine.state, "non_blocking", False))
+            # x = batch["image"].to(device, non_blocking=nb)
+            x = batch["image"].to(dev, non_blocking=pin)
+            y_any = batch.get("label", batch.get("y"))
+            y_mask = get_mask_from_batch(batch)
+            with torch.inference_mode():
+                raw = model(x)
+            out_map: Dict[str, Any] = {}
+            # classification logits (if present)
+            try:
+                cls_logits = extract_cls_logits_from_any(raw)
+                out_map["cls_out"] = cls_logits
+                out_map["logits"] = cls_logits
+                out_map["y_pred"] = cls_logits
+            except Exception:
+                pass
+            # segmentation logits (if present)
+            try:
+                seg_logits = extract_seg_logits_from_any(raw)
+                out_map["seg_out"] = seg_logits
+                out_map["seg_logits"] = seg_logits
+            except Exception:
+                pass
+            # labels / masks
+            label_dict: Dict[str, Any] = {}
+            if y_any is not None:
+                label_dict["label"] = y_any
+                out_map["y"] = y_any
+            if y_mask is not None:
+                label_dict["mask"] = y_mask
+                out_map["mask"] = y_mask
+            if label_dict:
+                out_map["label"] = label_dict
+            return out_map
+
+        self._std_engine = Engine(_step)
+
+        # attach metrics
+        # Classification (AUC from raw logits; thresholded metrics via thr_box)
+        if self.has_cls:
+            cls_metrics = make_std_cls_metrics_with_cal_thr(
+                num_classes=self.num_classes,
+                pos_index=self.pos_idx,
+                thr_box=self._thr_box,
+            )
+            for name, m in cls_metrics.items():
+                m.attach(self._std_engine, name)
+
+        # Segmentation (ConfMat -> Dice/IoU)
+        if self.has_seg:
+            seg_cm = ConfusionMatrix(
+                num_classes=max(2, self.num_classes),
+                output_transform=lambda o: seg_confmat_output_transform(o, threshold=self.seg_threshold),
+            )
+            seg_cm.attach(self._std_engine, "seg_confmat")
+            DiceCoefficient(cm=seg_cm).attach(self._std_engine, "dice")
+            JaccardIndex(cm=seg_cm).attach(self._std_engine, "iou")
+
 
 # build a flat, prefixed payload
 def make_val_log_payload(
@@ -403,6 +581,13 @@ def make_two_pass_evaluator(
     positive_index: int = 1,
     dice_fn: Optional[DiceFn] = None,
     iou_fn: Optional[IoUFn] = None,
+    cls_decision: str = "threshold",
+    cls_threshold: float = 0.5,
+    num_classes: int = 2,
+    multitask: bool = False,
+    seg_num_classes: Optional[int] = None,
+    loss_fn=None,
+    **_
 ) -> TwoPassEvaluator:
     """
     Build the right flavor for:
@@ -416,6 +601,12 @@ def make_two_pass_evaluator(
       • Segmentation tries to import eval.seg_eval.model_eval_seg automatically; if not
         found, it will use dice_fn/iou_fn if provided, else return empty seg metrics.
     """
+    # tasks = (
+    #     {"classification"} if task == "classification"
+    #     else {"segmentation"} if task == "segmentation"
+    #     else {"classification", "segmentation"}
+    # )
+
     t = (task or "multitask").lower()
     has_cls = t != "segmentation"
     has_seg = t != "classification"
@@ -443,4 +634,6 @@ def make_two_pass_evaluator(
         dice_fn=dice_fn if (auto_seg_eval is None and has_seg) else None,
         iou_fn=iou_fn if (auto_seg_eval is None and has_seg) else None,
         seg_threshold=float(getattr(getattr(calibrator, "cfg", None), "seg_threshold", 0.5)),
+        num_classes=int(num_classes),
+        cls_threshold=float(cls_threshold),
     )

@@ -1,5 +1,13 @@
 # Project Log
 
+# 2025-08-28
+- Refactor W&B logging & checkpoints: Anchor all logs on `trainer/iteration` and `trainer/epoch` (no `step=`), harden the image logger, cast confusion-matrix cells to integers, and make checkpointing safe per run.
+- Refactor data transforms & pipeline: Fix MONAI IO/transforms for dtype/shape/channel consistency (CHW images, index masks), and prevent empty-keys errors in classification runs.
+- Refactor model API & binaries: Unify base/wrappers to respect `positive_index`, enforce raw-logit outputs, and stabilize binary losses/metrics.
+- Refactor metrics utilities: Use raw-logits output transform for AUC and a decision transform for thresholded metrics; add vector-metric promotion to scalar keys.
+- Refactor two-pass evaluator: Wire live-thresholded classification metrics, apply segmentation transforms, and verify with a passing smoke test.
+
+
 # 2025-08-27
 - Refactor MONAI: stabilize cls head, warm up multitask loss, and unify W&B epoch logging to fix step warnings
 

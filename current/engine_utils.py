@@ -228,92 +228,6 @@ def is_ignite_engine(obj) -> bool:
         return hasattr(obj, "add_event_handler") and hasattr(obj, "on")
 
 
-# def attach_wandb_loggers(
-#     trainer: Engine,
-#     *,
-#     evaluator: Optional[Engine] = None,
-#     train_prefix: str = "train",
-#     val_prefix: str = "val",
-#     log_train: bool = True,
-#     log_val: bool = True,
-#     debug: bool = False,
-#     make_logger=None,  # factory for the handler; if None we'll try to import it
-# ):
-#     """
-#     Attach W&B loggers with correct step semantics.
-#     - TRAIN: iteration-level logs from engine.state.output, step = global_step
-#     - VAL:   epoch-level logs from engine.state.metrics, step = epoch
-
-#     Idempotent: re-calling will remove previous handlers and re-attach.
-#     Returns a (train_cb, val_cb) tuple (None if not attached).
-#     """
-#     # lazy import if a factory wasn't provided
-#     if make_logger is None:
-#         try:
-#             from wandb_utils import make_wandb_logger as make_logger
-#         except Exception as e:
-#             raise ImportError(
-#                 "attach_wandb_loggers needs a make_wandb_logger(factory). "
-#                 "Pass it via make_logger=... or ensure wandb_utils.make_wandb_logger is importable."
-#             ) from e
-
-#     # Let W&B know which field is the step for each namespace (best-effort)
-#     # try:
-#     #     import wandb
-#     #     wandb.define_metric(f"{train_prefix}/*", step_metric="global_step")
-#     #     wandb.define_metric(f"{val_prefix}/*", step_metric="epoch")
-#     # except Exception:
-#     #     pass
-
-#     # detach old handlers (idempotent)
-#     old_tr = getattr(trainer.state, "_wandb_train_cb", None)
-#     if old_tr is not None:
-#         try:
-#             trainer.remove_event_handler(old_tr, Events.ITERATION_COMPLETED)
-#         except Exception:
-#             pass
-#         trainer.state._wandb_train_cb = None
-
-#     if evaluator is not None:
-#         old_val = getattr(evaluator.state, "_wandb_val_cb", None)
-#         if old_val is not None:
-#             try:
-#                 evaluator.remove_event_handler(old_val, Events.COMPLETED)
-#             except Exception:
-#                 pass
-#             evaluator.state._wandb_val_cb = None
-
-#     # attach new handlers
-#     train_cb = None
-#     val_cb = None
-
-#     if log_train:
-#         train_cb = make_logger(
-#             prefix=train_prefix,
-#             source="output",
-#             step_by="global",
-#             trainer=trainer,
-#             evaluator=evaluator,
-#             debug=debug,
-#         )
-#         trainer.add_event_handler(Events.ITERATION_COMPLETED, train_cb)
-#         trainer.state._wandb_train_cb = train_cb
-
-#     if log_val and evaluator is not None:
-#         val_cb = make_logger(
-#             prefix=val_prefix,
-#             source="metrics",
-#             step_by="epoch",
-#             trainer=trainer,
-#             evaluator=evaluator,
-#             debug=debug,
-#         )
-#         evaluator.add_event_handler(Events.COMPLETED, val_cb)
-#         evaluator.state._wandb_val_cb = val_cb
-
-#     return train_cb, val_cb
-
-
 def build_trainer(
     device,
     max_epochs,
@@ -410,6 +324,10 @@ def attach_two_pass_validation(
         calibrator=calibrator,
         task=str(getattr(cfg, "task", cfg.get("task", "multitask"))),
         positive_index=int(getattr(cfg, "positive_index", cfg.get("positive_index", 1))),
+        cls_decision=str(getattr(cfg, "cls_decision", cfg.get("cls_decision", "threshold"))),
+        cls_threshold=float(getattr(cfg, "cls_threshold", cfg.get("cls_threshold", 0.5))),
+        num_classes=int(getattr(cfg, "num_classes", cfg.get("num_classes", 2))),
+        multitask=bool(getattr(cfg, "multitask", cfg.get("multitask", False))),
     )
 
     # Remove any previous hook to avoid duplicate logging / step desync
@@ -492,62 +410,6 @@ def attach_two_pass_validation(
 
     trainer.state._val_hook_2pass = _run_two_pass
     return ev
-
-
-# def attach_two_pass_validation(
-#     *,
-#     trainer: Engine,
-#     model,
-#     val_loader,
-#     device: torch.device,
-#     cfg: Any,
-#     calibrator: Optional[CalibratorProtocol] = None,
-#     # base_rate=None
-# ) -> TwoPassEvaluator:
-#     """
-#     Attach a TwoPassEvaluator run at EPOCH_COMPLETED.
-#     Returns the evaluator instance (keeps stateful threshold across epochs).
-#     """
-#     ev = make_two_pass_evaluator(
-#         calibrator=calibrator,
-#         task=str(getattr(cfg, "task", cfg.get("task", "multitask"))),
-#         positive_index=int(getattr(cfg, "positive_index", cfg.get("positive_index", 1))),
-#     )
-
-#     old = getattr(trainer.state, "_val_hook_2pass", None)
-#     if old is not None:
-#         try:
-#             trainer.remove_event_handler(old, Events.EPOCH_COMPLETED)
-#         except Exception:
-#             pass
-#         trainer.state._val_hook_2pass = None
-
-#     base_rate = getattr(cfg, "base_rate", cfg.get("base_rate", None))
-
-#     @trainer.on(Events.EPOCH_COMPLETED)
-#     def _run_two_pass(_):
-#         epoch = int(trainer.state.epoch or 0)
-#         if not hasattr(model, "device"):
-#             try:
-#                 model.device = device
-#             except Exception:
-#                 pass
-
-#         t, cls_metrics, seg_metrics = ev.validate(
-#             epoch=epoch,
-#             model=model,
-#             val_loader=val_loader,
-#             base_rate=base_rate,
-#         )
-
-#         trainer.state.metrics = trainer.state.metrics or {}
-#         m = trainer.state.metrics
-#         m.update({k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in cls_metrics.items()})
-#         m.update({k: float(v) if isinstance(v, (int, float, np.floating)) else v for k, v in seg_metrics.items()})
-#         m["cal_thr"] = float(t)
-
-#     trainer.state._val_hook_2pass = _run_two_pass
-#     return ev
 
 
 # evaluator builder (uses shared extract_* helpers; removed _extract_outputs)
