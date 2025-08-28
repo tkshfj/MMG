@@ -331,23 +331,49 @@ class BaseModel(ModelRegistryProtocol):
                     return v
         return None
 
+    def _pos_neg_indices(self) -> tuple[int, int]:
+        """Return (pos, neg) indices based on config. Defaults to pos=1, neg=0."""
+        pos = int(self._get("positive_index", 1))
+        neg = 1 - pos
+        return pos, neg
+
     def _get_cls_logits(self, pred: Dict[str, Any]) -> torch.Tensor:
         import torch
-        # Tensor directly
         if isinstance(pred, torch.Tensor):
             return pred
-        # Tuple/list: pick first tensor-like entry
         if isinstance(pred, (list, tuple)):
             for e in pred:
                 if isinstance(e, torch.Tensor):
                     return e
-                if isinstance(e, dict) and ("cls_out" in e or "class_logits" in e):
-                    return e.get("cls_out", e.get("class_logits"))
-        # Dict keys
-        v = self._pick(pred, "cls_out", "class_logits")
-        if isinstance(v, torch.Tensor):
-            return v
-        raise KeyError("No classification logits found (tensor/tuple) or under 'cls_out'/'class_logits'.")
+                if isinstance(e, dict):
+                    for k in ("cls_out", "class_logits", "logits", "y_pred"):
+                        v = e.get(k, None)
+                        if isinstance(v, torch.Tensor):
+                            return v
+        if isinstance(pred, dict):
+            for k in ("cls_out", "class_logits", "logits", "y_pred"):
+                v = pred.get(k, None)
+                if isinstance(v, torch.Tensor):
+                    return v
+        raise KeyError("No classification logits found under ('cls_out','class_logits','logits','y_pred') or tensor-like.")
+
+    # def _get_cls_logits(self, pred: Dict[str, Any]) -> torch.Tensor:
+    #     import torch
+    #     # Tensor directly
+    #     if isinstance(pred, torch.Tensor):
+    #         return pred
+    #     # Tuple/list: pick first tensor-like entry
+    #     if isinstance(pred, (list, tuple)):
+    #         for e in pred:
+    #             if isinstance(e, torch.Tensor):
+    #                 return e
+    #             if isinstance(e, dict) and ("cls_out" in e or "class_logits" in e):
+    #                 return e.get("cls_out", e.get("class_logits"))
+    #     # Dict keys
+    #     v = self._pick(pred, "cls_out", "class_logits")
+    #     if isinstance(v, torch.Tensor):
+    #         return v
+    #     raise KeyError("No classification logits found (tensor/tuple) or under 'cls_out'/'class_logits'.")
 
     def _get_seg_logits(self, pred: Dict[str, Any]) -> torch.Tensor:
         import torch
@@ -506,30 +532,53 @@ class BaseModel(ModelRegistryProtocol):
         cls_mode = str(self._get("cls_loss", "auto")).lower()
 
         def cls_loss(pred: Dict[str, Any], tgt: Dict[str, Any]) -> torch.Tensor:
-            # logits = self.extract_logits(pred)          # [B, C] or [B, 1]
             logits = self._get_cls_logits(pred)
             if not isinstance(logits, torch.Tensor):
                 logits = torch.as_tensor(logits)
-            y = self._get_cls_target(tgt)               # [B] (int) or similar
+            y = self._get_cls_target(tgt)
             mode = cls_mode
 
-            # Decide BCE vs CE
-            # If 'auto': prefer BCE when logits are single-logit; otherwise allow BCE-from-two-logits for binary.
             if mode == "auto":
                 if logits.dim() == 1 or (logits.dim() == 2 and logits.size(-1) == 1):
                     mode = "bce"
                 elif logits.dim() == 2 and logits.size(-1) == 2 and bool(self._get("binary_bce_from_two_logits", True)):
-                    # Convert 2 logits -> single logit (pos - neg) and use BCE
-                    logits = logits[:, 1] - logits[:, 0]   # (B,)
+                    # Convert 2 logits -> single logit using configured positive_index
+                    pos, neg = self._pos_neg_indices()
+                    logits = logits[:, pos] - logits[:, neg]  # (B,)
                     mode = "bce"
                 else:
                     mode = "ce"
+
             if mode == "bce":
-                # BCE expects float targets with same shape as logits
                 yf = y.float().view_as(logits)
                 return bce_cls(logits, yf)
-            # CE expects class indices [B] (long) for multi-class or 2-logit legacy binary
             return ce_cls(logits, y.long())
+
+        # def cls_loss(pred: Dict[str, Any], tgt: Dict[str, Any]) -> torch.Tensor:
+        #     # logits = self.extract_logits(pred)          # [B, C] or [B, 1]
+        #     logits = self._get_cls_logits(pred)
+        #     if not isinstance(logits, torch.Tensor):
+        #         logits = torch.as_tensor(logits)
+        #     y = self._get_cls_target(tgt)               # [B] (int) or similar
+        #     mode = cls_mode
+
+        #     # Decide BCE vs CE
+        #     # If 'auto': prefer BCE when logits are single-logit; otherwise allow BCE-from-two-logits for binary.
+        #     if mode == "auto":
+        #         if logits.dim() == 1 or (logits.dim() == 2 and logits.size(-1) == 1):
+        #             mode = "bce"
+        #         elif logits.dim() == 2 and logits.size(-1) == 2 and bool(self._get("binary_bce_from_two_logits", True)):
+        #             # Convert 2 logits -> single logit (pos - neg) and use BCE
+        #             logits = logits[:, 1] - logits[:, 0]   # (B,)
+        #             mode = "bce"
+        #         else:
+        #             mode = "ce"
+        #     if mode == "bce":
+        #         # BCE expects float targets with same shape as logits
+        #         yf = y.float().view_as(logits)
+        #         return bce_cls(logits, yf)
+        #     # CE expects class indices [B] (long) for multi-class or 2-logit legacy binary
+        #     return ce_cls(logits, y.long())
 
             # # use_bce = (cls_mode == "bce") or (cls_mode == "auto" and logits.dim() == 2 and logits.size(-1) == 1)
             # use_bce = (cls_mode == "bce" or (cls_mode == "auto" and (logits.dim() == 1 or (logits.dim() == 2 and logits.size(-1) == 1))))  # (B,) (B,1)
