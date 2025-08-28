@@ -486,6 +486,8 @@ def seg_output_transform(output):
 
     pred_logits = to_tensor(pred_logits).float()
     mask = to_tensor(mask).long()
+    if mask.device != pred_logits.device:
+        mask = mask.to(pred_logits.device)
     # normalize shapes
     if pred_logits.ndim == 3:    # [C,H,W] -> [1,C,H,W]
         pred_logits = pred_logits.unsqueeze(0)
@@ -842,6 +844,7 @@ def _decision_with_box_transform(thr_box, positive_index=1):
         logits, y = cls_output_transform(output)
         scores = positive_score_from_logits(logits, positive_index=int(positive_index))
         y_hat = (scores >= float(thr_box.value)).to(torch.long)
+        y = y.view(-1).long().to(y_hat.device)
         return y_hat.view(-1), y.view(-1).long()
     return _ot
 
@@ -852,7 +855,8 @@ def _cm_transform_with_box(thr_box, num_classes=2, positive_index=1):
         import torch.nn.functional as F
         y_hat, y_true = _decision_with_box_transform(thr_box, positive_index)(output)  # [B], [B]
         y_onehot = F.one_hot(y_hat.to(torch.int64), num_classes=int(num_classes)).to(torch.float32)  # [B,C]
-        return y_onehot, y_true
+        # return y_onehot, y_true
+        return y_onehot, y_true.to(y_onehot.device)
     return _ot
 
 

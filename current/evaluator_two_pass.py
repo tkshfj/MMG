@@ -223,7 +223,6 @@ class TwoPassEvaluator:
         dice_scores, iou_scores = [], []
         device = getattr(model, "device", next(model.parameters()).device)
         # device = _safe_model_device(model)
-        # with torch.no_grad():
         with torch.inference_mode():
             for batch in val_loader:
                 x = batch["image"].to(device, non_blocking=True)
