@@ -78,7 +78,7 @@ class SimpleCNNModel(BaseModel):
     # Optional convenience for external callers
     def extract_logits(self, y_pred: Any) -> "torch.Tensor":
         if isinstance(y_pred, dict):
-            for k in ("class_logits", "logits", "y_pred"):
+            for k in ("cls_out", "class_logits", "logits", "y_pred"):
                 v = y_pred.get(k, None)
                 if v is not None:
                     return v

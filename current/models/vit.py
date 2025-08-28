@@ -137,25 +137,6 @@ class ViTModel(BaseModel):
         self._cfg_set(config, "num_heads", nh)
         return config
 
-    # def _sanitize_vit_dims(self, config: Any) -> Any:
-    #     hs = int(self._cfg_get(config, "hidden_size", 384))
-    #     nh = int(self._cfg_get(config, "num_heads", 8))
-
-    #     if hs <= 0 or nh <= 0:
-    #         raise ValueError(f"hidden_size and num_heads must be > 0, got {hs}, {nh}")
-
-    #     if hs % nh != 0:
-    #         new_hs = max(nh, (hs // nh) * nh)
-    #         logger.warning(
-    #             "hidden_size %d not divisible by num_heads %d; snapping hidden_size -> %d",
-    #             hs, nh, new_hs
-    #         )
-    #         hs = new_hs
-
-    #     self._cfg_set(config, "hidden_size", hs)
-    #     self._cfg_set(config, "num_heads", nh)
-    #     return config
-
     # BaseModel API implementations
     def build_model(self, config: Any) -> Any:
         config = self._sanitize_vit_dims(config)
@@ -232,9 +213,8 @@ class ViTModel(BaseModel):
     # Optional convenience for external callers
     def extract_logits(self, y_pred: Any):
         if isinstance(y_pred, dict):
-            for k in ("class_logits", "logits", "y_pred"):
+            for k in ("cls_out", "class_logits", "logits", "y_pred"):
                 v = y_pred.get(k, None)
                 if v is not None:
                     return v
         return y_pred
-        # return y_pred[0] if isinstance(y_pred, tuple) else y_pred
