@@ -331,68 +331,142 @@ def _wrap_output_transform(ot, name="output_transform"):
     return wrapped
 
 
-def cls_decision_output_transform(decision="argmax", threshold=0.5, positive_index=1):
-    """
-    Returns (y_hat[B], y[B]) according to the decision rule.
-    """
-    def _ot(output):
-        logits, y = cls_output_transform(output)  # -> logits [B,C], y [B]
-        if str(decision).lower() == "threshold":
-            scores = positive_score_from_logits(logits, positive_index=int(positive_index))
-            y_hat = (scores >= float(threshold)).to(torch.long)
-        else:
-            y_hat = torch.argmax(logits, dim=1).long()
-        return y_hat.view(-1), y.view(-1).long()
-    return _ot
-
-
 def cls_output_transform(output):
     """
-    Normalize to (logits[B,C] float, labels[B] long).
-    Supports single-logit 'cls_out' and legacy keys. Guarantees 2-D logits.
+    Normalize to (logits[B,C], labels[B]).
+    Keeps single-logit binaries as C=1; reduces higher-dim logits by spatial mean.
     """
-    # Case: already (y_pred, y)
+    # (y_pred, y) already
     if isinstance(output, (tuple, list)) and len(output) >= 2:
         logits, labels = output[0], output[1]
+
+    # Mapping path
     elif isinstance(output, dict):
-        # Robust logits extraction (supports 'cls_out', 'class_logits', 'logits', etc.)
         logits = extract_cls_logits_from_any(output)
-        # Labels from output['label'] or output['y'] (and subfields)
-        lab = output.get("label", None)
+
+        labels = None
+        lab = output.get("label")
         if isinstance(lab, Mapping):
             for k in ("label", "y", "target", "index", "cls"):
-                v = lab.get(k, None)
+                v = lab.get(k)
                 if v is not None:
                     labels = v
                     break
-            else:
-                labels = output.get("y", None)
-        else:
-            labels = lab if lab is not None else output.get("y", None)
         if labels is None:
-            raise ValueError("cls_output_transform: missing labels (label[...] | label | y)")
+            labels = output.get("y")
+        if labels is None:
+            raise ValueError("cls_output_transform: missing labels (label[...] or y).")
+
     else:
         raise TypeError(f"cls_output_transform: unsupported output type: {type(output)}")
 
-    # Tensor-ify
+    # Tensorify & standardize shapes
     logits = to_tensor(logits).float()
-    labels = labels_to_1d_indices(labels)  # -> [B] long
+    labels = labels_to_1d_indices(labels)  # -> [B]
 
-    # Enforce 2-D logits shape [B,C]
-    if logits.ndim == 1:                    # [B] -> [B,1]
+    # Enforce logits [B,C]
+    if logits.ndim == 1:              # [B] -> [B,1]
         logits = logits.unsqueeze(1)
-    elif logits.ndim == 3:                  # [B,T,C] -> take first time step
+    elif logits.ndim == 3:            # [B,T,C] -> first step
         logits = logits[:, 0, :]
-    elif logits.ndim >= 4:                  # [B,C,H,W,...] -> spatial mean
+    elif logits.ndim >= 4:            # [B,C,H,W,...] -> spatial mean
         logits = logits.mean(dim=tuple(range(2, logits.ndim)))
 
     if logits.ndim != 2:
         raise ValueError(f"cls_output_transform: expected [B,C], got {tuple(logits.shape)}")
     if logits.shape[0] != labels.shape[0]:
-        raise ValueError(
-            f"cls_output_transform: batch mismatch logits={tuple(logits.shape)} vs labels={tuple(labels.shape)}"
-        )
+        raise ValueError(f"cls_output_transform: batch mismatch logits={tuple(logits.shape)} vs labels={tuple(labels.shape)}")
+
     return logits, labels
+
+
+def cls_decision_output_transform(decision: str = "threshold", threshold: float = 0.5, positive_index: int = 1):
+    """
+    Decision transform for Acc/Prec/Recall/ConfMat.
+      - decision='threshold': p(pos) via sigmoid (C==1) or softmax[:, positive_index], then compare to threshold
+      - decision='argmax'   : argmax over logits
+    Returns (y_pred[B], y_true[B]).
+    """
+    def _ot(output):
+        logits, y = cls_output_transform(output)  # logits [B,C], y [B]
+        dec = str(decision).lower()
+
+        if dec == "argmax":
+            y_hat = logits.argmax(dim=1).long()
+        else:  # 'threshold' (default)
+            C = logits.shape[1]
+            if C >= 2 and not (0 <= int(positive_index) < C):
+                raise ValueError(f"positive_index {positive_index} out of range for C={C}")
+            scores = positive_score_from_logits(logits, positive_index=int(positive_index))
+            y_hat = (scores >= float(threshold)).to(torch.long)
+
+        return y_hat.view(-1), y.view(-1).long()
+
+    return _ot
+
+
+# def cls_output_transform(output):
+#     """
+#     Normalize to (logits[B,C] float, labels[B] long).
+#     Supports single-logit 'cls_out' and legacy keys. Guarantees 2-D logits.
+#     """
+#     # Case: already (y_pred, y)
+#     if isinstance(output, (tuple, list)) and len(output) >= 2:
+#         logits, labels = output[0], output[1]
+#     elif isinstance(output, dict):
+#         # Robust logits extraction (supports 'cls_out', 'class_logits', 'logits', etc.)
+#         logits = extract_cls_logits_from_any(output)
+#         # Labels from output['label'] or output['y'] (and subfields)
+#         lab = output.get("label", None)
+#         if isinstance(lab, Mapping):
+#             for k in ("label", "y", "target", "index", "cls"):
+#                 v = lab.get(k, None)
+#                 if v is not None:
+#                     labels = v
+#                     break
+#             else:
+#                 labels = output.get("y", None)
+#         else:
+#             labels = lab if lab is not None else output.get("y", None)
+#         if labels is None:
+#             raise ValueError("cls_output_transform: missing labels (label[...] | label | y)")
+#     else:
+#         raise TypeError(f"cls_output_transform: unsupported output type: {type(output)}")
+
+#     # Tensor-ify
+#     logits = to_tensor(logits).float()
+#     labels = labels_to_1d_indices(labels)  # -> [B] long
+
+#     # Enforce 2-D logits shape [B,C]
+#     if logits.ndim == 1:                    # [B] -> [B,1]
+#         logits = logits.unsqueeze(1)
+#     elif logits.ndim == 3:                  # [B,T,C] -> take first time step
+#         logits = logits[:, 0, :]
+#     elif logits.ndim >= 4:                  # [B,C,H,W,...] -> spatial mean
+#         logits = logits.mean(dim=tuple(range(2, logits.ndim)))
+
+#     if logits.ndim != 2:
+#         raise ValueError(f"cls_output_transform: expected [B,C], got {tuple(logits.shape)}")
+#     if logits.shape[0] != labels.shape[0]:
+#         raise ValueError(
+#             f"cls_output_transform: batch mismatch logits={tuple(logits.shape)} vs labels={tuple(labels.shape)}"
+#         )
+#     return logits, labels
+
+
+# def cls_decision_output_transform(decision="argmax", threshold=0.5, positive_index=1):
+#     """
+#     Returns (y_hat[B], y[B]) according to the decision rule.
+#     """
+#     def _ot(output):
+#         logits, y = cls_output_transform(output)  # -> logits [B,C], y [B]
+#         if str(decision).lower() == "threshold":
+#             scores = positive_score_from_logits(logits, positive_index=int(positive_index))
+#             y_hat = (scores >= float(threshold)).to(torch.long)
+#         else:
+#             y_hat = torch.argmax(logits, dim=1).long()
+#         return y_hat.view(-1), y.view(-1).long()
+#     return _ot
 
 
 def make_cls_output_transform(num_classes: int):
