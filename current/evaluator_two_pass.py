@@ -4,12 +4,9 @@ from typing import Callable, Dict, Optional, Tuple, Any
 import logging
 import numpy as np
 import torch
-
 from protocols import CalibratorProtocol
 from ignite.engine import Engine
 from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
-
-# Shared helpers
 from metrics_utils import (
     labels_to_1d_indices,
     extract_cls_logits_from_any,
@@ -20,7 +17,6 @@ from metrics_utils import (
     get_mask_from_batch,
     ThresholdBox,
     make_std_cls_metrics_with_cal_thr,
-    # cls_output_transform,
     seg_confmat_output_transform,
 )
 
@@ -29,20 +25,6 @@ logger = logging.getLogger(__name__)
 SegEvalFn = Callable[[Any, Any], Dict[str, Any]]  # (model, val_loader) -> seg metrics dict
 DiceFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 IoUFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
-
-
-# def _safe_model_device(model: torch.nn.Module) -> torch.device:
-#     """Return a sensible device for a model even if it has no parameters."""
-#     dev = getattr(model, "device", None)
-#     if isinstance(dev, torch.device):
-#         return dev
-#     # first parameter (if any)
-#     for p in model.parameters(recurse=True):
-#         return p.device
-#     # first buffer (if any)
-#     for b in model.buffers(recurse=True):
-#         return b.device
-#     return torch.device("cpu")
 
 
 # local helper kept here: robust AUC with pure-numpy fallback
@@ -277,20 +259,40 @@ class TwoPassEvaluator:
     # main entrypoint
     @torch.inference_mode()
     def validate(self, epoch: int, model, val_loader, base_rate: Optional[float] = None) -> Tuple[float, Dict, Dict]:
+
+        def _ingest_cls_metric_map(dst: Dict[str, Any], raw: Dict[str, Any]) -> None:
+            """
+            Copy classification metrics from Ignite to a flat Python dict.
+            - 'prec'/'recall' may be scalar or per-class vectors -> promote_vec expands as needed.
+            - Scalars (acc/auc/pos_rate/gt_pos_rate) are cast to float safely.
+            - Confusion matrix is expanded into list plus integer cells.
+            """
+            # Scalars we expect to be scalar-like
+            for k in ("acc", "auc", "pos_rate", "gt_pos_rate"):
+                if k in raw:
+                    v = to_py(raw[k])
+                    if isinstance(v, (int, float)):
+                        dst[k] = float(v)
+            # Vector-or-scalar metrics -> promote to per-index keys and mean
+            if "prec" in raw:
+                promote_vec(dst, "prec", raw["prec"])        # yields 'prec', 'prec_0', 'prec_1', ...
+            if "recall" in raw:
+                promote_vec(dst, "recall", raw["recall"])    # yields 'recall', 'recall_0', 'recall_1', ...
+            # Confusion matrix -> matrix list + per-cell ints
+            if "cls_confmat" in raw:
+                add_confmat(dst, "cls_confmat", raw["cls_confmat"])
+
         device = getattr(model, "device", next(model.parameters()).device)
         # device = _safe_model_device(model)
         model.eval()
         self._current_model = model
 
-        # One-time auto-detect if user didn't force flags
+        # One-time auto-detect if flags not forced
         if not self._capabilities_frozen and (self._has_cls is None or self._has_seg is None):
             self._autodetect_capabilities(model, val_loader, device)
             self._capabilities_frozen = True
             logger.info("[TwoPass] capabilities: has_cls=%s has_seg=%s", self._has_cls, self._has_seg)
 
-        # cls_metrics: Dict = {}
-        # seg_metrics: Dict = {}
-        # t: float = getattr(self.calibrator, "t_prev", 0.5) if self.calibrator is not None else 0.5
         cls_metrics: Dict[str, Any] = {}
         seg_metrics: Dict[str, Any] = {}
         t: float = getattr(self.calibrator, "t_prev", 0.5) if self.calibrator is not None else float(self._thr_box.value)
@@ -300,7 +302,7 @@ class TwoPassEvaluator:
             # Gather scores for calibration only (AUC/metrics come from Ignite)
             scores, labels = self._gather_scores_labels(model, val_loader, device)
 
-            # helpful debug to catch flat/degenerate scores
+            # Helpful debug to catch flat/degenerate scores
             try:
                 logger.debug(
                     "scores min/max/mean: %.4f/%.4f/%.4f",
@@ -309,41 +311,39 @@ class TwoPassEvaluator:
             except Exception:
                 pass
 
-            # derive base_rate if not provided
+            # Derive base_rate if not provided
             if base_rate is None and labels.size > 0:
                 base_rate = float((labels == 1).mean())
 
-            # pick threshold (optional calibrator)
+            # Pick threshold (optional calibrator)
             if self.calibrator is not None:
                 t = float(self.calibrator.pick(epoch, scores, labels, base_rate))
             else:
                 t = float(self.last_threshold) if self.last_threshold is not None else 0.5
 
             self.last_threshold = t
-            # cls_metrics = self._compute_cls_metrics(scores, labels, t, base_rate)
+
             # Inject the new threshold into the decision OT and run Ignite evaluator
             self._ensure_std_engine()
             self._thr_box.value = float(t)
-            # allow the step to see the correct device/pin hint
+
+            # Allow the step to see the correct device/pin hint
             pin = bool(getattr(val_loader, "pin_memory", False))
             setattr(self._std_engine.state, "device", device)
             setattr(self._std_engine.state, "non_blocking", pin)
-            # run once to populate metrics
+
+            # Run once to populate metrics
             self._std_engine.run(val_loader)
             raw = dict(self._std_engine.state.metrics or {})
-            # Flatten/normalize to Python scalars
-            # Acc / Prec / Recall / AUC / pos_rate / gt_pos_rate come directly
-            # ConfMat and per-cell fields need expansion
-            for k in ("acc", "prec", "recall", "auc", "pos_rate", "gt_pos_rate"):
-                if k in raw:
-                    v = raw[k]
-                    cls_metrics[k] = float(v) if isinstance(v, (int, float)) else float(to_py(v))
-            if "cls_confmat" in raw:
-                add_confmat(cls_metrics, "cls_confmat", raw["cls_confmat"])
-            # add the threshold we used
+
+            # Ingest classification metrics robustly (handles vectors/scalars)
+            _ingest_cls_metric_map(cls_metrics, raw)
+
+            # Add the threshold we used
             cls_metrics["threshold"] = float(t)
             cls_metrics["cal_thr"] = float(t)
-            # decision-health logging (same behavior as before)
+
+            # Decision-health logging (same behavior as before)
             if base_rate is not None:
                 pos_rate = float(cls_metrics.get("pos_rate", 0.0))
                 rate_tol = self.rate_tol_override
@@ -378,24 +378,12 @@ class TwoPassEvaluator:
             else:
                 seg_metrics = self._compute_seg_metrics(model, val_loader)
 
-            # If the Ignite engine has seg metrics attached, read them; otherwise keep fallback
-            # if self._std_engine is not None and "seg_confmat" in (self._std_engine.state.metrics or {}):
-            #     raw = dict(self._std_engine.state.metrics or {})
-            #     if "dice" in raw:
-            #         seg_metrics["dice"] = float(to_py(raw["dice"]))
-            #     if "iou" in raw:
-            #         seg_metrics["iou"] = float(to_py(raw["iou"]))
-            #     if "seg_confmat" in raw:
-            #         add_confmat(seg_metrics, "seg_confmat", raw["seg_confmat"])
-            # else:
-            #     seg_metrics = self._compute_seg_metrics(model, val_loader)
-
         # Combined scores (linear mix; keep behavior)
         if self.has_cls and self.has_seg and "auc" in cls_metrics and "dice" in seg_metrics:
             dice_mean = float(seg_metrics["dice"])
             w = getattr(getattr(model, "cfg", None), "multi_weight", 0.65)
             cls_metrics["multi"] = (1.0 - w) * float(cls_metrics["auc"]) + w * dice_mean
-            # optional per-class multi with same AUC (binary symmetry)
+            # Optional per-class multi with same AUC (binary symmetry)
             if "dice_0" in seg_metrics:
                 cls_metrics["multi_0"] = (1.0 - w) * float(cls_metrics["auc"]) + w * float(seg_metrics["dice_0"])
             if "dice_1" in seg_metrics:
@@ -483,30 +471,35 @@ class TwoPassEvaluator:
         if self._std_engine is not None:
             return
 
-        def _step(_, batch):
+        def _step(engine, batch):
             model = self._current_model
             device = getattr(self._std_engine.state, "device", next(model.parameters()).device)
             nb = bool(getattr(self._std_engine.state, "non_blocking", False))
-        # def _step(engine, batch):
-        #     model = self._current_model
-        #     dev = getattr(engine.state, "device", None) or _safe_model_device(model)
-        #     engine.state.device = dev
-        #     pin = bool(getattr(engine.state, "non_blocking", False))
-        #     x = batch["image"].to(dev, non_blocking=pin)
-            x = batch["image"].to(device, non_blocking=nb)
+
+            # inputs → device
+            x = batch["image"]
+            if not torch.is_tensor(x):
+                x = torch.as_tensor(x)
+            x = x.float().to(device, non_blocking=nb)
+
+            # optional targets from batch
             y_any = batch.get("label", batch.get("y"))
             y_mask = get_mask_from_batch(batch)
+
             with torch.inference_mode():
                 raw = model(x)
+
             out_map: Dict[str, Any] = {}
+
             # classification logits (if present)
             try:
                 cls_logits = extract_cls_logits_from_any(raw)
                 out_map["cls_out"] = cls_logits
                 out_map["logits"] = cls_logits
-                out_map["y_pred"] = cls_logits
+                out_map["y_pred"] = cls_logits  # Ignite CM wants y_pred/y
             except Exception:
                 pass
+
             # segmentation logits (if present)
             try:
                 seg_logits = extract_seg_logits_from_any(raw)
@@ -514,16 +507,20 @@ class TwoPassEvaluator:
                 out_map["seg_logits"] = seg_logits
             except Exception:
                 pass
-            # labels / masks
+
+            # labels/masks -> SAME device as predictions/evaluator
             label_dict: Dict[str, Any] = {}
             if y_any is not None:
-                label_dict["label"] = y_any
-                out_map["y"] = y_any
+                y = labels_to_1d_indices(y_any).to(device, non_blocking=nb)
+                out_map["y"] = y
+                label_dict["label"] = y
             if y_mask is not None:
-                label_dict["mask"] = y_mask
-                out_map["mask"] = y_mask
+                m = torch.as_tensor(y_mask).long().to(device, non_blocking=nb)
+                out_map["mask"] = m
+                label_dict["mask"] = m
             if label_dict:
                 out_map["label"] = label_dict
+
             return out_map
 
         self._std_engine = Engine(_step)

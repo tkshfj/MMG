@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-08-29
+- Refactor MONAI pipeline: spawn-safe transforms; eliminate cuda/cpu mismatches
+
 # 2025-08-28
 - Refactor W&B logging & checkpoints: Anchor all logs on `trainer/iteration` and `trainer/epoch` (no `step=`), harden the image logger, cast confusion-matrix cells to integers, and make checkpointing safe per run.
 - Refactor data transforms & pipeline: Fix MONAI IO/transforms for dtype/shape/channel consistency (CHW images, index masks), and prevent empty-keys errors in classification runs.

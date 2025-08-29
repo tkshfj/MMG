@@ -964,12 +964,6 @@ def make_metrics(
 
     metrics = {}
 
-    # Resolve base classification OT (may be factory or unary)
-    # base_cls_ot = _as_unary_output_transform(
-    #     cls_ot,
-    #     default_factory=lambda: cls_output_transform,
-    #     name="cls_ot",
-    # )
     # resolve base_cls_ot (raw)
     base_cls_ot = _as_unary_output_transform(cls_ot, default_factory=lambda: cls_output_transform, name="cls_ot")
     # decision OT

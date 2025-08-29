@@ -281,12 +281,6 @@ def build_trainer(
         if lr_val is not None:
             out["lr"] = lr_val
 
-        # # optional: log LR
-        # try:
-        #     out["lr"] = float(optimizer.param_groups[0]["lr"])
-        # except Exception:
-        #     pass
-
         return out  # engine.state.output becomes this dict
 
     trainer = SupervisedTrainer(
@@ -390,7 +384,7 @@ def attach_two_pass_validation(
             except Exception:
                 pass
 
-        # --- Evaluate (no logging here) ---
+        # Evaluate (no logging here)
         t, cls_metrics, seg_metrics = ev.validate(
             epoch=epoch, model=model, val_loader=val_loader, base_rate=base_rate
         )
@@ -402,7 +396,7 @@ def attach_two_pass_validation(
         m.update({k: _to_scalar(v) for k, v in seg_metrics.items()})
         m["cal_thr"] = float(t)
 
-        # --- Single-source logging: epoch step only ---
+        # Single-source logging: epoch step only
         if log_to_wandb and wb is not None:
             payload = _build_payload(epoch, cls_metrics, seg_metrics, t)
             # wb.log(payload, step=epoch)
@@ -831,6 +825,5 @@ __all__ = [
     "build_trainer",
     "build_evaluator",
     "attach_scheduler",
-    # "attach_wandb_loggers",
     "attach_lr_scheduling",
 ]
