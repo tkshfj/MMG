@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-08-31
+- WIP stabilize: warmup-gate two-pass & health logs; remove tensor truthiness
+- Savepoint as of 2025-08-30
+
 # 2025-08-30
 - Refactor MONAI pipeline: Harden decision-health, dedupe two-pass attach, move attach_two_pass_validation, fix Tensor boolean error, refresh SimpleCNN sweep config
 
