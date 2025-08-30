@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-08-30
+- Refactor MONAI pipeline: Harden decision-health, dedupe two-pass attach, move attach_two_pass_validation, fix Tensor boolean error, refresh SimpleCNN sweep config
+
 # 2025-08-29
 - Refactor MONAI pipeline: spawn-safe transforms; eliminate cuda/cpu mismatches
 

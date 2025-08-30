@@ -1,8 +1,7 @@
 # model_base.py
-from typing import Optional, List, Dict, Any
+from typing import Any, Dict, Optional
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 from protocols import ModelRegistryProtocol
 from metrics_utils import (
     cls_output_transform,
@@ -54,14 +53,13 @@ class FocalLoss(nn.Module):
         import torch.nn.functional as F
 
         # Binary case: logits [B] or [B,1]
-        if logits.ndim <= 2 and (logits.shape[-1] == 1 or logits.ndim == 1):
+        if logits.ndim == 1 or (logits.ndim == 2 and logits.size(-1) == 1):
             logits = logits.flatten()
             y = targets.float().flatten()
             # BCE per-sample
             bce = F.binary_cross_entropy_with_logits(logits, y, reduction="none")
             p = torch.sigmoid(logits)
-            pt = torch.where(y > 0.5, p, 1 - p)  # y ∈ {0,1}
-            # pt = p * y + (1 - p) * (1 - y)
+            pt = torch.where(y > 0.5, p, 1 - p)  # p_t
             focal = (1.0 - pt).pow(self.gamma) * bce
             # optional class weights [w_neg, w_pos]
             if self.weight is not None and self.weight.numel() == 2:
@@ -70,7 +68,7 @@ class FocalLoss(nn.Module):
             return focal.mean() if self.reduction == "mean" else focal.sum()
 
         # Multi-class case: logits [B,C], targets [B] (long)
-        else:  # multi-class
+        if logits.ndim == 2:
             y = targets.long().view(-1)
             # CE per-sample without reduction
             ce = F.cross_entropy(logits, y, weight=None, reduction="none")
@@ -123,24 +121,6 @@ class BaseModel(ModelRegistryProtocol):
 
     def get_num_classes(self, config=None) -> int:
         return int(self._get("num_classes", 2, config))
-
-    def _resolve_loss_for(self, task: str, cfg: dict):
-        counts = getattr(self, "class_counts", None) or self._cfg_get(cfg, "class_counts", None)
-        # Prefer the new signature
-        try:
-            return self.get_loss_fn(task=task, cfg=cfg, class_counts=counts)
-        except TypeError:
-            pass
-        # Older signature: (task, cfg)
-        try:
-            return self.get_loss_fn(task, cfg)  # type: ignore[misc]
-        except TypeError:
-            pass
-        # Oldest signature: no args (must infer from cfg)
-        try:
-            return self.get_loss_fn()  # type: ignore[misc]
-        except TypeError:
-            return None
 
     # Output transforms
     def get_output_transform(self):
@@ -211,7 +191,15 @@ class BaseModel(ModelRegistryProtocol):
         seg_cm_ot_factory = getattr(self, "get_seg_confmat_output_transform", None)
 
         # optional combined loss for multitask
-        loss_fn = self._resolve_loss_for("multitask", cfg) if multitask else None
+        loss_fn = None
+        if multitask and hasattr(self, "get_loss_fn"):
+            try:
+                loss_fn = self.get_loss_fn()  # combined
+            except TypeError:
+                try:
+                    loss_fn = self.get_loss_fn("multitask", cfg)
+                except TypeError:
+                    loss_fn = None
 
         # decision settings (config-driven)
         cls_decision = str(cfg.get("cls_decision", "threshold")).lower()   # "argmax" | "threshold"
@@ -302,7 +290,7 @@ class BaseModel(ModelRegistryProtocol):
 
         w = None
 
-        # explicit class_weights
+        # 1) explicit class_weights
         w_seq = _to_seq(explicit_w, float)
         if w_seq is not None:
             if len(w_seq) == 1 and C == 2:
@@ -310,7 +298,7 @@ class BaseModel(ModelRegistryProtocol):
             else:
                 w = torch.as_tensor(w_seq, dtype=torch.float)
 
-        # derive from class_counts
+        # 2) derive from class_counts
         elif (cnt_seq := _to_seq(counts, float)) is not None:
             cnt = cnt_seq
             if balance == "effective":
@@ -323,7 +311,8 @@ class BaseModel(ModelRegistryProtocol):
                 inv = 1.0 / cnt_t
                 w = inv * (inv.numel() / inv.sum())
 
-        # None (no weights)
+        # 3) None (no weights)
+
         # validate length
         if w is not None and w.numel() != C:
             raise ValueError(f"class weights length {w.numel()} != num_classes {C}")
@@ -347,9 +336,25 @@ class BaseModel(ModelRegistryProtocol):
         pos = int(self._get("positive_index", 1))
         return pos, 1 - pos
 
-    # Backward-compat: keep the old name but route to the robust extractor.
     def _get_cls_logits(self, pred: Dict[str, Any]) -> torch.Tensor:
-        return self._extract_cls_logits(pred)
+        import torch
+        if isinstance(pred, torch.Tensor):
+            return pred
+        if isinstance(pred, (list, tuple)):
+            for e in pred:
+                if isinstance(e, torch.Tensor):
+                    return e
+                if isinstance(e, dict):
+                    for k in ("cls_out", "class_logits", "logits", "y_pred"):
+                        v = e.get(k, None)
+                        if isinstance(v, torch.Tensor):
+                            return v
+        if isinstance(pred, dict):
+            for k in ("cls_out", "class_logits", "logits", "y_pred"):
+                v = pred.get(k, None)
+                if isinstance(v, torch.Tensor):
+                    return v
+        raise KeyError("No classification logits found under ('cls_out','class_logits','logits','y_pred') or tensor-like.")
 
     def _get_seg_logits(self, pred: Dict[str, Any]) -> torch.Tensor:
         import torch
@@ -430,154 +435,121 @@ class BaseModel(ModelRegistryProtocol):
             pass
         # derive from class_counts if available
         cnts = self._get("class_counts", None)
-        pos_idx = int(self._get("positive_index", 1))
-        if isinstance(cnts, (list, tuple)) and len(cnts) >= 2 and cnts[pos_idx] > 0:
-            n_pos = float(cnts[pos_idx])
-            n_neg = float(sum(cnts)) - n_pos
+        if isinstance(cnts, (list, tuple)) and len(cnts) == 2 and cnts[1] > 0:
+            n_neg, n_pos = float(cnts[0]), float(cnts[1])
             return torch.tensor([n_neg / max(1.0, n_pos)], device=device, dtype=torch.float32)
         return None
 
-    def _extract_cls_logits(self, y_pred: Any) -> torch.Tensor:
+    def _build_cls_loss(self) -> nn.Module:
         """
-        Robustly extract classification logits from model output.
-        Accepts: tensor, dict, or (list|tuple) of tensors/dicts.
+        Classification criterion (config keys):
+        - cls_loss: "auto"|"ce"|"bce"|"focal"  (default: "auto")
+        - label_smoothing: float (for CE)
+        - ignore_index: int (for CE)
+        - focal_gamma: float (default 2.0)
+        - class_weights / class_counts (+ class_balance, cb_beta): see _get_class_weights
+        - pos_weight: float (BCE only; overrides derived ratio if given)
         """
         import torch
-        if isinstance(y_pred, torch.Tensor):
-            return y_pred
-        if isinstance(y_pred, dict):
-            for k in ("cls_logits", "cls_out", "class_logits", "logits", "y_pred"):
-                v = y_pred.get(k)
-                if isinstance(v, torch.Tensor):
-                    return v
-        if isinstance(y_pred, (list, tuple)):
-            for e in y_pred:
-                try:
-                    return self._extract_cls_logits(e)
-                except Exception:
-                    continue
-        raise KeyError("No classification logits found under ('cls_logits','cls_out','class_logits','logits','y_pred') or tensor-like.")
+        import torch.nn as nn
 
-    def init_bias_from_priors(self, head: nn.Module, class_counts: Optional[List[int]], binary_single_logit: bool, positive_index: int = 1):
-        if not class_counts or not hasattr(head, "bias") or head.bias is None:
-            return
-        counts = torch.tensor(class_counts, dtype=torch.float)
-        priors = counts / counts.sum()
-        with torch.no_grad():
-            if binary_single_logit:
-                p_pos = float(priors[positive_index].clamp_(1e-8, 1 - 1e-8))
-                head.bias.fill_(torch.tensor(p_pos).log() - torch.tensor(1.0 - p_pos).log())
-            else:
-                head.bias.copy_(priors.clamp_(1e-8, 1 - 1e-8).log())
+        device = self._get("device", None)
+        mode = str(self._get("cls_loss", "auto")).lower()
+        ls = self._get("label_smoothing", None)
+        ig = self._get("ignore_index", None)
 
-    def get_loss_fn(
-        self,
-        task: Optional[str] = None,
-        cfg: Optional[dict] = None,
-        class_counts: Optional[List[int]] = None,
-    ):
-        """
-        Return a loss_fn(pred_dict, target) for the resolved task.
-        - classification: CE (multi-class) or BCEWithLogits (binary, 1-logit or 2->1 collapsed)
-        - segmentation:   CE over logits [B,C|1,H,W] (binary auto-expanded) and mask [B,H,W]
-        - multitask:      alpha*cls + beta*seg (alpha/beta from cfg, default 1.0)
-        """
-        cfg = self._cfg(cfg)
-        # Resolve task from arg or config (keeps backward-compat with self.get_loss_fn())
-        t = (task or self._cfg_get(cfg, "task", "classification")).lower()
+        # shared per-class weights (used by CE or focal)
+        weight = None
+        try:
+            weight = self._get_class_weights(device=device, dtype=torch.float32)
+        except Exception:
+            weight = None
 
-        # Core config knobs
-        num_classes = int(self._cfg_get(cfg, "num_classes", self.get_num_classes(cfg)))
-        pos_idx = int(self._cfg_get(cfg, "positive_index", 1))
-        use_single = bool(self._cfg_get(cfg, "binary_single_logit", (num_classes == 2 and self._cfg_get(cfg, "use_single_logit", True))))
-        loss_name = str(self._cfg_get(cfg, "cls_loss", "ce")).lower()
-        two_to_one = bool(self._cfg_get(cfg, "binary_bce_from_two_logits", True))
+        # FOCAL: explicit request
+        if mode == "focal":
+            gamma = float(self._get("focal_gamma", 2.0))
+            return FocalLoss(gamma=gamma, weight=weight, reduction="mean")
 
-        # Resolve class_counts from param, self, or cfg
-        counts = (
-            class_counts or self._get("class_counts", None) or self._cfg_get(cfg, "class_counts", None)
-        )
+        # BCE path (explicit)
+        if mode == "bce":
+            pos_w_tensor = self._compute_pos_weight(device=device)
+            return nn.BCEWithLogitsLoss(pos_weight=pos_w_tensor)
 
-        # Prepare imbalance handling
-        class_w = None  # for CE/focal
-        pos_w = None  # for BCE
-        if isinstance(counts, (list, tuple)):
-            cnt = torch.tensor(counts, dtype=torch.float)
-            if use_single:
-                pos = cnt[pos_idx]
-                neg = cnt.sum() - pos
-                pos_w = (neg / (pos.clamp_min(1e-8))).clamp_max(1e6)  # scalar
-            else:
-                inv = 1.0 / cnt.clamp_min(1e-8)
-                class_w = (inv / inv.mean()).float()  # length C
-
-        # Prebuild criteria (moved out of inner loop)
-        ig = self._cfg_get(cfg, "ignore_index", None)
-        ls = self._cfg_get(cfg, "label_smoothing", None)
-        ce_kwargs: Dict[str, Any] = {}
-        if class_w is not None:
-            ce_kwargs["weight"] = class_w  # moved to device at call
+        # CE path (default / 'auto' / 'ce')
+        ce_kwargs = {}
+        if weight is not None:
+            ce_kwargs["weight"] = weight
         if ls is not None:
             ce_kwargs["label_smoothing"] = float(ls)
         if ig is not None:
             ce_kwargs["ignore_index"] = int(ig)
-        # Created here, tensors are moved to logits' device in-call
-        bce_pos_weight = pos_w
-        focal_gamma = float(self._cfg_get(cfg, "focal_gamma", 2.0))
 
-        # classification loss
-        def cls_loss(pred: Dict[str, Any], tgt: Any) -> torch.Tensor:
-            logits = self._extract_cls_logits(pred)
-            y_idx = self._get_cls_target(tgt)  # [B] long indices
+        return nn.CrossEntropyLoss(**ce_kwargs)
 
-            if use_single:
-                # Accept [B], [B,1], or collapse [B,2] -> [B] via pos-neg
-                if logits.ndim == 2 and logits.size(-1) == 2 and two_to_one:
+    def _build_seg_loss(self) -> nn.Module:
+        # Default seg loss: CE over index masks (compatible with ConfusionMatrix/DiceCE flows)
+        ig = self._get("ignore_index", None)
+        return nn.CrossEntropyLoss(ignore_index=int(ig) if ig is not None else -100)
+
+    def get_loss_fn(self, task: str, cfg: Optional[dict] = None):
+        """
+        Return a loss_fn(pred_dict, target) for the given task:
+        - classification: CE (multi-class) or BCEWithLogits (binary, 1-logit)
+        - segmentation:   CE over logits [B,C|1,H,W] (binary auto-expanded) and mask [B,H,W]
+        - multitask:      alpha*cls + beta*seg (alpha/beta from cfg or default 1.0)
+        """
+        t = (task or "classification").lower()
+        device = (cfg or {}).get("device", None)
+
+        # Base criteria
+        ce_cls = self._build_cls_loss()
+        ce_seg = self._build_seg_loss()
+
+        # Build a BCEWithLogits alternative for binary heads, with consistent pos_weight
+        bce_pos_weight = self._compute_pos_weight(device=device)
+        bce_cls = torch.nn.BCEWithLogitsLoss(pos_weight=bce_pos_weight)
+
+        # Optional override in config: cls_loss: auto|ce|bce
+        cls_mode = str(self._get("cls_loss", "auto")).lower()
+
+        def cls_loss(pred: Dict[str, Any], tgt: Dict[str, Any]) -> torch.Tensor:
+            logits = self._get_cls_logits(pred)
+            if not isinstance(logits, torch.Tensor):
+                logits = torch.as_tensor(logits)
+            y = self._get_cls_target(tgt)
+            mode = cls_mode
+
+            if mode == "auto":
+                if logits.dim() == 1 or (logits.dim() == 2 and logits.size(-1) == 1):
+                    mode = "bce"
+                elif logits.dim() == 2 and logits.size(-1) == 2 and bool(self._get("binary_bce_from_two_logits", True)):
+                    # Convert 2 logits -> single logit using configured positive_index
                     pos, neg = self._pos_neg_indices()
-                    logits = logits[:, pos] - logits[:, neg]
-                if logits.ndim == 2 and logits.size(-1) == 1:
-                    logits = logits.squeeze(-1)
-                # Map indices to binary by positive_index
-                y_bin = (y_idx == pos_idx).float().view_as(logits)  # y_idx.float().view_as(logits)
-                return F.binary_cross_entropy_with_logits(
-                    logits.float(),
-                    y_bin,
-                    pos_weight=(None if bce_pos_weight is None else bce_pos_weight.to(logits))
-                )
+                    logits = logits[:, pos] - logits[:, neg]  # (B,)
+                    mode = "bce"
+                else:
+                    mode = "ce"
 
-            # Multi-class CE or focal
-            if loss_name == "focal":
-                crit = FocalLoss(
-                    gamma=focal_gamma,
-                    weight=(None if class_w is None else class_w.to(logits)),
-                    reduction="mean",
-                )
-                return crit(logits, y_idx.long())
-            # CE with optional weight/ignore_index/label_smoothing
-            if ce_kwargs:
-                k = dict(ce_kwargs)
-                if "weight" in k and k["weight"] is not None:
-                    k["weight"] = k["weight"].to(logits)
-                return F.cross_entropy(logits, y_idx.long(), **k)
-            return F.cross_entropy(logits, y_idx.long())
+            if mode == "bce":
+                yf = y.float().view_as(logits)
+                return bce_cls(logits, yf)
+            return ce_cls(logits, y.long())
 
-        # segmentation loss
-        def seg_loss(pred: Dict[str, Any], tgt: Any) -> torch.Tensor:
-            seg = self._seg_logits_for_ce(self._get_seg_logits(pred))  # -> [B,C>=2,H,W]
-            y = self._get_seg_target(tgt).long()                       # -> [B,H,W]
-            if ig is not None:
-                return F.cross_entropy(seg, y, ignore_index=int(ig))
-            return F.cross_entropy(seg, y)
+        def seg_loss(pred: Dict[str, Any], tgt: Dict[str, Any]) -> torch.Tensor:
+            logits = self._seg_logits_for_ce(self._get_seg_logits(pred))  # ensure [B,C,H,W]
+            y = self._get_seg_target(tgt).long()                           # [B,H,W]
+            return ce_seg(logits, y)
 
         if t in {"classification", "cls"}:
             return cls_loss
         if t in {"segmentation", "seg"}:
             return seg_loss
 
-        # multitask: alpha*cls + beta*seg
-        alpha = float(self._cfg_get(cfg, "alpha", self._cfg_get(cfg, "cls_weight", 1.0)))
-        beta = float(self._cfg_get(cfg, "beta", self._cfg_get(cfg, "seg_weight", 1.0)))
+        # multitask
+        alpha = float(self._cfg_get(self._cfg(cfg), "cls_weight", self._cfg_get(self._cfg(cfg), "alpha", 1.0)))
+        beta = float(self._cfg_get(self._cfg(cfg), "seg_weight", self._cfg_get(self._cfg(cfg), "beta", 1.0)))
 
-        def multitask_loss(pred: Dict[str, Any], tgt: Dict[str, Any]) -> torch.Tensor:
+        def _multitask_loss(pred: Dict[str, Any], tgt: Dict[str, Any]) -> torch.Tensor:
             return alpha * cls_loss(pred, tgt) + beta * seg_loss(pred, tgt)
-        return multitask_loss
+
+        return _multitask_loss

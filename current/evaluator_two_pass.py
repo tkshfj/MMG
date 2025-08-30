@@ -4,9 +4,9 @@ from typing import Callable, Dict, Optional, Tuple, Any
 import logging
 import numpy as np
 import torch
-from protocols import CalibratorProtocol
-from ignite.engine import Engine
+from ignite.engine import Events, Engine
 from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
+from protocols import CalibratorProtocol
 from metrics_utils import (
     labels_to_1d_indices,
     extract_cls_logits_from_any,
@@ -18,6 +18,7 @@ from metrics_utils import (
     ThresholdBox,
     make_std_cls_metrics_with_cal_thr,
     seg_confmat_output_transform,
+    positive_score_from_logits
 )
 
 logger = logging.getLogger(__name__)
@@ -27,7 +28,7 @@ DiceFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 IoUFn = Callable[[torch.Tensor, torch.Tensor], torch.Tensor]
 
 
-# local helper kept here: robust AUC with pure-numpy fallback
+# local helpers
 def _safe_auc(labels: np.ndarray, scores: np.ndarray) -> float:
     y = labels.astype(np.int64)
     n_pos = int((y == 1).sum())
@@ -63,6 +64,21 @@ def _default_classify_fn(model, x: torch.Tensor) -> torch.Tensor:
     return extract_cls_logits_from_any(model(x))
 
 
+def as_bool(x, default: bool = True) -> bool:
+    if x is None:
+        return default
+    if isinstance(x, bool):
+        return x
+    if isinstance(x, (int, float)):
+        return bool(x)
+    s = str(x).strip().lower()
+    if s in {"1", "true", "t", "yes", "y", "on"}:
+        return True
+    if s in {"0", "false", "f", "no", "n", "off", ""}:
+        return False
+    return default
+
+
 # main evaluator
 class TwoPassEvaluator:
     """
@@ -73,6 +89,7 @@ class TwoPassEvaluator:
     def __init__(
         self,
         calibrator: Optional[CalibratorProtocol] = None,
+        trainer: Optional[Engine] = None,
         positive_index: int = 1,
         *,
         has_cls: Optional[bool] = None,
@@ -85,8 +102,12 @@ class TwoPassEvaluator:
         seg_threshold: float = 0.5,
         num_classes: int = 2,
         cls_threshold: float = 0.5,
+        health_tol: float = 0.35,
+        health_need_k: int = 3,
+        health_warmup: Optional[int] = None,
     ):
         self.calibrator = calibrator
+        self._trainer = trainer
         self.pos_idx = int(positive_index)
         self._has_cls = has_cls
         self._has_seg = has_seg
@@ -105,6 +126,10 @@ class TwoPassEvaluator:
         # Ignite standard evaluator (built lazily)
         self._std_engine: Optional[Engine] = None
         self._current_model = None
+        self.health_tol = float(health_tol)
+        self.health_need_k = int(health_need_k)
+        self.health_warmup = health_warmup
+        self._watchdog_active: bool = False   # suppress internal health logs when external watchdog is attached
 
     # Public guards
     @property
@@ -143,10 +168,15 @@ class TwoPassEvaluator:
             delta = abs(pos_rate - base_rate)
             was_bad = (delta > rate_tol)
             self.bad_count = self.bad_count + 1 if was_bad else 0
-            logger.info(
-                "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
-                pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
-            )
+            if not getattr(self, "_watchdog_active", False):
+                # logger.info(
+                #     "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
+                #     pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
+                # )
+                logger.info(
+                    "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
+                    pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
+                )
 
         cm = np.array([[tn, fp], [fn, tp]], dtype=np.int64)
         out = {
@@ -353,10 +383,11 @@ class TwoPassEvaluator:
                     delta = abs(pos_rate - base_rate)
                     was_bad = (delta > rate_tol)
                     self.bad_count = self.bad_count + 1 if was_bad else 0
-                    logger.info(
-                        "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
-                        pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
-                    )
+                    if not getattr(self, "_watchdog_active", False):
+                        logger.info(
+                            "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
+                            pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
+                        )
 
         # Segmentation
         if self.has_seg:
@@ -441,13 +472,8 @@ class TwoPassEvaluator:
             logits = extract_cls_logits_from_any(logits)
             if not torch.is_tensor(logits):
                 logits = torch.as_tensor(logits)
-
-            if logits.ndim == 1 or (logits.ndim == 2 and logits.shape[1] == 1):
-                s = torch.sigmoid(logits.view(-1))
-            else:
-                c = logits.shape[-1]
-                pos_idx = min(self.pos_idx, max(0, c - 1))
-                s = torch.softmax(logits, dim=-1)[:, pos_idx]
+            # unified: BCE(1-logit) or CE(2+ logits)
+            s = positive_score_from_logits(logits, positive_index=self.pos_idx).view(-1)
 
             all_scores.append(s.detach().cpu().numpy())
             all_labels.append(y)
@@ -536,6 +562,25 @@ class TwoPassEvaluator:
             for name, m in cls_metrics.items():
                 m.attach(self._std_engine, name)
 
+        # Decision health on the STANDARD pass (uncalibrated)
+        # Only if a trainer was provided and classification metrics exist.
+        if self._trainer is not None:
+            try:
+                from decision_health import attach_decision_health
+                # warmup: prefer explicit value, else calibrator.cfg.warmup_epochs, else 1
+                warmup = (self.health_warmup if self.health_warmup is not None else int(getattr(getattr(self.calibrator, "cfg", None), "warmup_epochs", 1)))
+                attach_decision_health(
+                    self._std_engine, self._trainer,
+                    num_classes=int(self.num_classes),
+                    positive_index=int(self.pos_idx),
+                    tol=float(self.health_tol),
+                    need_k=int(self.health_need_k),
+                    warmup=int(warmup),
+                    metric_key="cls_confmat",
+                )
+            except Exception as e:
+                logger.warning("attach_decision_health(std) failed: %s", e)
+
         # Segmentation (ConfMat -> Dice/IoU)
         if self.has_seg:
             seg_cm = ConfusionMatrix(
@@ -545,6 +590,157 @@ class TwoPassEvaluator:
             seg_cm.attach(self._std_engine, "seg_confmat")
             DiceCoefficient(cm=seg_cm).attach(self._std_engine, "dice")
             JaccardIndex(cm=seg_cm).attach(self._std_engine, "iou")
+
+
+def attach_two_pass_validation(
+    *,
+    trainer: Engine,
+    model,
+    val_loader,
+    device: torch.device,
+    cfg: Any,
+    calibrator: Optional[CalibratorProtocol] = None,
+    log_to_wandb: bool = True,
+    wandb_prefix: str = "val/",
+) -> TwoPassEvaluator:
+    """
+    Attach a TwoPassEvaluator at EPOCH_COMPLETED.
+    Evaluator does not log; trainer logs exactly once per epoch with step=epoch.
+    """
+    ev = make_two_pass_evaluator(
+        calibrator=calibrator,
+        task=str(getattr(cfg, "task", cfg.get("task", "multitask"))),
+        trainer=trainer,
+        positive_index=int(getattr(cfg, "positive_index", cfg.get("positive_index", 1))),
+        cls_decision=str(getattr(cfg, "cls_decision", cfg.get("cls_decision", "threshold"))),
+        cls_threshold=float(getattr(cfg, "cls_threshold", cfg.get("cls_threshold", 0.5))),
+        num_classes=int(getattr(cfg, "num_classes", cfg.get("num_classes", 2))),
+        multitask=bool(getattr(cfg, "multitask", cfg.get("multitask", False))),
+    )
+
+    # Decision health watchdog on the STANDARD pass (uncalibrated)
+    # We can disable via cfg.enable_decision_health = False
+    # enable_health = bool(getattr(cfg, "enable_decision_health", cfg.get("enable_decision_health", True)))
+    # Decision-health watchdog gating & dedupe
+    raw_flag = getattr(cfg, "enable_decision_health", None)
+    if raw_flag is None and isinstance(cfg, dict):
+        raw_flag = cfg.get("enable_decision_health", None)
+    enable_health = as_bool(raw_flag, default=True)
+    if enable_health:
+        # Build the internal standard Ignite evaluator now so we can attach the watchdog
+        # Only build std engine early if classification is present
+        try:
+            if getattr(ev, "has_cls", False):
+                ev._ensure_std_engine()  # idempotent
+        except Exception:
+            pass
+
+        std_engine = getattr(ev, "_std_engine", None)
+        already = bool(getattr(getattr(std_engine, "state", None), "_decision_health_attached", False))
+        if std_engine is not None and (not already):
+            from decision_health import attach_decision_health
+            try:
+                attach_decision_health(
+                    std_engine,
+                    trainer,
+                    num_classes=int(getattr(cfg, "num_classes", cfg.get("num_classes", 2))),
+                    positive_index=int(getattr(cfg, "positive_index", cfg.get("positive_index", 1))),
+                    tol=float(getattr(cfg, "decision_health_tol", cfg.get("decision_health_tol", 0.35))),
+                    need_k=int(getattr(cfg, "decision_health_need_k", cfg.get("decision_health_need_k", 3))),
+                    warmup=int(getattr(cfg, "cal_warmup_epochs", cfg.get("cal_warmup_epochs", 1))),
+                    metric_key="cls_confmat",
+                    # terminate=True,
+                )
+                # Mark attached to prevent future duplicates
+                if hasattr(std_engine, "state"):
+                    setattr(std_engine.state, "_decision_health_attached", True)
+                # Let TwoPassEvaluator suppress its duplicate health logs if desired
+                setattr(ev, "_watchdog_active", True)
+            except Exception as e:
+                logger.warning("attach_decision_health(std) failed: %s", e)
+    else:
+        logger.info("Decision health disabled via cfg.enable_decision_health=%r", raw_flag)
+
+    # Remove any previous hook to avoid duplicate logging / step desync
+    old = getattr(trainer.state, "_val_hook_2pass", None)
+    if old is not None:
+        try:
+            trainer.remove_event_handler(old, Events.EPOCH_COMPLETED)
+        except Exception:
+            pass
+        trainer.state._val_hook_2pass = None
+
+    base_rate = getattr(cfg, "base_rate", cfg.get("base_rate", None))
+
+    # Optional: declare metric step domains once
+    wb = None
+    if log_to_wandb:
+        try:
+            import wandb as _wandb
+            wb = _wandb
+            if not getattr(trainer.state, "_wb_val_defined", False) and getattr(wb, "run", None):
+                wb.define_metric("trainer/epoch")
+                wb.define_metric(f"{wandb_prefix}*", step_metric="trainer/epoch")
+                trainer.state._wb_val_defined = True
+        except Exception:
+            wb = None  # keep training even if wandb not available
+
+    def _to_scalar(v):
+        # Safe conversion for numpy/torch scalars
+        try:
+            import torch
+            if isinstance(v, torch.Tensor):
+                if v.numel() == 1:
+                    return float(v.detach().cpu().item())
+                return v.detach().cpu().tolist()
+        except Exception:
+            pass
+        if isinstance(v, (np.floating, np.integer)):
+            return float(v) if isinstance(v, np.floating) else int(v)
+        return v
+
+    def _build_payload(epoch: int, cls_m: Dict[str, Any], seg_m: Dict[str, Any], t: float) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {"trainer/epoch": int(epoch)}
+        payload[f"{wandb_prefix}cal_thr"] = float(t)
+        for k, v in cls_m.items():
+            payload[f"{wandb_prefix}{k}"] = _to_scalar(v)
+        for k, v in seg_m.items():
+            key = f"{wandb_prefix}{k}"
+            if key not in payload:
+                payload[key] = _to_scalar(v)
+        return payload
+
+    @trainer.on(Events.EPOCH_COMPLETED)
+    def _run_two_pass(engine: Engine):
+        epoch = int(engine.state.epoch or 0)
+
+        # Ensure model has a device attribute for evaluator (harmless if already set)
+        if not hasattr(model, "device"):
+            try:
+                model.device = device
+            except Exception:
+                pass
+
+        # Evaluate (no logging here)
+        t, cls_metrics, seg_metrics = ev.validate(
+            epoch=epoch, model=model, val_loader=val_loader, base_rate=base_rate
+        )
+
+        # Update engine metrics (so schedulers/handlers can read them)
+        engine.state.metrics = engine.state.metrics or {}
+        m = engine.state.metrics
+        m.update({k: _to_scalar(v) for k, v in cls_metrics.items()})
+        m.update({k: _to_scalar(v) for k, v in seg_metrics.items()})
+        m["cal_thr"] = float(t)
+
+        # Single-source logging: epoch step only
+        if log_to_wandb and wb is not None:
+            payload = _build_payload(epoch, cls_metrics, seg_metrics, t)
+            # wb.log(payload, step=epoch)
+            wb.log(payload)
+
+    trainer.state._val_hook_2pass = _run_two_pass
+    return ev
 
 
 # build a flat, prefixed payload
@@ -574,6 +770,7 @@ def make_two_pass_evaluator(
     *,
     calibrator: Optional[CalibratorProtocol] = None,
     task: str,
+    trainer: Optional[Engine] = None,
     positive_index: int = 1,
     dice_fn: Optional[DiceFn] = None,
     iou_fn: Optional[IoUFn] = None,
@@ -597,11 +794,6 @@ def make_two_pass_evaluator(
       • Segmentation tries to import eval.seg_eval.model_eval_seg automatically; if not
         found, it will use dice_fn/iou_fn if provided, else return empty seg metrics.
     """
-    # tasks = (
-    #     {"classification"} if task == "classification"
-    #     else {"segmentation"} if task == "segmentation"
-    #     else {"classification", "segmentation"}
-    # )
 
     t = (task or "multitask").lower()
     has_cls = t != "segmentation"
@@ -622,6 +814,7 @@ def make_two_pass_evaluator(
 
     return TwoPassEvaluator(
         calibrator=calibrator,
+        trainer=trainer,
         positive_index=positive_index,
         has_cls=has_cls,
         has_seg=has_seg,
@@ -632,4 +825,6 @@ def make_two_pass_evaluator(
         seg_threshold=float(getattr(getattr(calibrator, "cfg", None), "seg_threshold", 0.5)),
         num_classes=int(num_classes),
         cls_threshold=float(cls_threshold),
+        health_tol=float(getattr(getattr(calibrator, "cfg", None), "decision_health_tol", 0.35)),
+        health_need_k=int(getattr(getattr(calibrator, "cfg", None), "decision_health_need_k", 3)),
     )

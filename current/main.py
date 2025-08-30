@@ -17,17 +17,18 @@ from collections.abc import Callable
 
 import torch
 from monai.utils import set_determinism
+from ignite.engine import Events
 
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_registry import MODEL_REGISTRY
-from engine_utils import build_trainer, make_prepare_batch, attach_two_pass_validation, attach_lr_scheduling, read_current_lr
+from engine_utils import build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr, get_label_indices_from_batch
+from evaluator_two_pass import attach_two_pass_validation
 from optim_factory import get_optimizer, make_scheduler
 from handlers import register_handlers, configure_wandb_step_semantics
 from constants import CHECKPOINT_DIR
 from resume_utils import restore_training_state
 from calibrator import Calibrator, CalConfig
-from ignite.engine import Events
 
 # determinism (CPU side + algorithm choices), safe pre-fork
 torch.backends.cudnn.deterministic = True
@@ -115,6 +116,20 @@ def run(
     except KeyError as e:
         raise ValueError(f"Unknown architecture '{arch}'.") from e
 
+    # resolve class_counts once (prefer cfg, else dataset attribute)
+    counts = cfg.get("class_counts", None)
+    if counts is None:
+        ds = getattr(train_loader, "dataset", None)
+        # common attribute names used by custom datasets
+        counts = (
+            getattr(ds, "class_counts", None) or getattr(ds, "label_counts", None) or getattr(ds, "counts", None)
+        )
+        if counts is not None:
+            cfg["class_counts"] = counts  # persist for downstream consumers
+    # expose to wrapper so build_model can init bias from priors
+    setattr(wrapper, "class_counts", cfg.get("class_counts"))
+
+    # build concrete torch.nn.Module
     model = wrapper.build_model(cfg).to(device=device, dtype=torch.float32)
 
     # optim
@@ -132,7 +147,18 @@ def run(
         num_classes=int(cfg.get("num_classes", 2)),
     )
 
-    loss_fn = dict_safe(wrapper.get_loss_fn(task, cfg))
+    # loss with explicit class_counts threading
+    loss_fn_core = None
+    try:
+        loss_fn_core = wrapper.get_loss_fn(task=task, cfg=cfg, class_counts=cfg.get("class_counts"))
+    except TypeError:
+        # backward-compat with older signatures
+        try:
+            loss_fn_core = wrapper.get_loss_fn(task, cfg)  # type: ignore
+        except TypeError:
+            loss_fn_core = wrapper.get_loss_fn()           # type: ignore
+    # If a torch.nn.Module is returned, wrap it so training loop can consume dict or tensor
+    loss_fn = dict_safe(loss_fn_core)
 
     # engines
     trainer = build_trainer(
@@ -200,9 +226,6 @@ def run(
             lr = read_current_lr(optimizer, sched)
             if lr is not None:
                 wandb.log({"trainer/epoch": int(engine.state.epoch), "opt/lr": float(lr)})
-            # if lr is not None and getattr(wandb, "run", None) is not None:
-            #     ep = int(engine.state.epoch)
-            #     wandb.log({"trainer/epoch": ep, "opt/lr": float(lr)})
         except Exception:
             pass
 
@@ -295,6 +318,30 @@ if __name__ == "__main__":
         enforce_fp32_policy()
         device = auto_device()
         cfg["device"] = device
+
+        # derive class_counts from TRAIN set (not val)
+        C = int(cfg.get("num_classes", 2))
+        train_ds = getattr(train_loader, "dataset", None)
+        counts = (
+            cfg.get("class_counts") or getattr(train_ds, "class_counts", None) or getattr(train_ds, "label_counts", None) or getattr(train_ds, "counts", None)
+        )
+        # sanity: length and sum must match TRAIN set
+        if counts is not None:
+            counts = list(map(int, counts))
+            if len(counts) != C or sum(counts) != len(train_ds):
+                print(f"[WARN] ignoring provided class_counts={counts} "
+                      f"(expected len={C}, sum={len(train_ds)}); recomputing from TRAIN")
+                counts = None
+        # recompute from TRAIN if needed (single pass)
+        if counts is None:
+            import torch
+            agg = torch.zeros(C, dtype=torch.long)
+            for batch in train_loader:
+                y = get_label_indices_from_batch(batch, num_classes=C)
+                agg += torch.bincount(y, minlength=C)
+            counts = agg.tolist()
+            print(f"[INFO] computed train class_counts={counts}")
+        cfg["class_counts"] = counts
 
         # Run training with explicit loaders & device
         run(cfg, train_loader, val_loader, test_loader, device)

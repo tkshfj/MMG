@@ -77,6 +77,26 @@ def positive_score_from_logits(logits: Any, positive_index: int = 1) -> torch.Te
     raise ValueError(f"positive_score_from_logits: expected [B] or [B,C], got {tuple(t.shape)}")
 
 
+# def positive_score_from_logits(logits: Any, positive_index: int = 1) -> torch.Tensor:
+#     """
+#     Return p(pos) for classification, handling:
+#       - BCE single-logit:    sigmoid(logit)                     -> [B]
+#       - CE 2+ logits:        softmax(logits)[:, positive_index] -> [B]
+#     Expects logits shaped [B,C] or [B]; higher dims should be reduced by cls_output_transform first.
+#     """
+#     t = to_tensor(logits).float()
+#     if t.ndim == 1:
+#         # [B] -> single-logit BCE
+#         return torch.sigmoid(t)
+#     if t.ndim == 2:
+#         C = t.shape[1]
+#         if C == 1:
+#             return torch.sigmoid(t.squeeze(1))
+#         # CE with C≥2
+#         return torch.softmax(t, dim=1)[:, int(positive_index)]
+#     raise ValueError(f"positive_score_from_logits: expected [B] or [B,C], got {tuple(t.shape)}")
+
+
 def get_mask_from_batch(batch: Mapping[str, Any]) -> Optional[torch.Tensor]:
     """
     Robustly fetch a segmentation mask from common batch layouts:
@@ -393,10 +413,25 @@ def cls_decision_output_transform(decision: str = "threshold", threshold: float 
             y_hat = logits.argmax(dim=1).long()
         else:  # 'threshold' (default)
             C = logits.shape[1]
-            if C >= 2 and not (0 <= int(positive_index) < C):
-                raise ValueError(f"positive_index {positive_index} out of range for C={C}")
-            scores = positive_score_from_logits(logits, positive_index=int(positive_index))
-            y_hat = (scores >= float(threshold)).to(torch.long)
+            if C == 1:
+                # single-logit BCE: sigmoid then threshold
+                probs = torch.sigmoid(logits.squeeze(1))          # [B]
+                # y_hat = (probs >= float(threshold)).long()
+                y_hat = (probs > float(threshold)).long()
+            elif C == 2:
+                # two-logit: softmax then threshold the positive class
+                if not (0 <= int(positive_index) < C):
+                    raise ValueError(f"positive_index {positive_index} out of range for C={C}")
+                probs = torch.softmax(logits, dim=1)[:, int(positive_index)]  # [B]
+                # y_hat = (probs >= float(threshold)).long()
+                y_hat = (probs > float(threshold)).long()
+            else:
+                # multi-class: threshold isn't meaningful; fall back to argmax
+                y_hat = logits.argmax(dim=1).long()
+            # if C >= 2 and not (0 <= int(positive_index) < C):
+            #     raise ValueError(f"positive_index {positive_index} out of range for C={C}")
+            # scores = positive_score_from_logits(logits, positive_index=int(positive_index))
+            # y_hat = (scores >= float(threshold)).to(torch.long)
         return y_hat.view(-1), y.view(-1).long()
     return _ot
 
@@ -745,10 +780,7 @@ def attach_calibrated_threshold_glue(
         evaluator_std.state.cal_thr_prev = new_thr
 
         ep = int(getattr(engine.state, "trainer_epoch", engine.state.epoch))
-        # gs = int(getattr(engine.state, "trainer_iteration", 0))
-        # wandb.log({"val/cal_thr": new_thr, "epoch": ep, "global_step": gs}, step=gs)
         # Log only with epoch for validation to keep steps monotonic
-        # wandb.log({"cal_thr": new_thr, "epoch": ep})
         wandb.log({"trainer/epoch": ep, "val/cal_thr": new_thr})
 
 
@@ -927,8 +959,6 @@ def make_std_cls_metrics_with_cal_thr(
 
     return {
         "acc": Accuracy(output_transform=dec_ot),
-        # "prec": Precision(output_transform=dec_ot, average="binary" if num_classes == 2 else "macro"),
-        # "recall": Recall(output_transform=dec_ot, average="binary" if num_classes == 2 else "macro"),
         "prec": Precision(output_transform=dec_ot, average="macro"),
         "recall": Recall(output_transform=dec_ot, average="macro"),
         "auc": ROC_AUC(output_transform=_auc_ot),
@@ -955,7 +985,7 @@ def make_metrics(
     from ignite.metrics import Accuracy, ConfusionMatrix, Loss, DiceCoefficient, JaccardIndex, Precision, Recall, MetricsLambda
     import torch.nn as nn
     import torch
-    import torch.nn.functional as F
+    # import torch.nn.functional as F
 
     tasks = set(tasks or [])
     has_cls = "classification" in tasks
@@ -974,10 +1004,10 @@ def make_metrics(
         # Decision OT stays a plain unary (already returns (y_hat, y))
         # decision_ot = cls_decision_output_transform(decision=str(cls_decision).lower(), threshold=float(cls_threshold), positive_index=int(positive_index))
 
-        def _cm_ot(output):
-            y_hat, y_true = decision_ot(output)
-            y_onehot = F.one_hot(y_hat.to(torch.int64), num_classes=int(num_classes)).to(torch.float32)
-            return y_onehot, y_true
+        # def _cm_ot(output):
+        #     y_hat, y_true = decision_ot(output)
+        #     y_onehot = F.one_hot(y_hat.to(torch.int64), num_classes=int(num_classes)).to(torch.float32)
+        #     return y_onehot, y_true
 
         class _PositiveRate_local(Metric):
             def reset(self):

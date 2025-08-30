@@ -4,15 +4,11 @@ import logging
 logger = logging.getLogger(__name__)
 
 import torch
-import numpy as np
 from enum import Enum
-from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union
-
+from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union, Mapping
 from monai.engines import SupervisedTrainer
 from ignite.engine import Events, Engine
 
-from protocols import CalibratorProtocol
-from evaluator_two_pass import make_two_pass_evaluator, TwoPassEvaluator
 from metrics_utils import (
     to_tensor,
     extract_cls_logits_from_any,
@@ -299,113 +295,6 @@ def build_trainer(
     return trainer
 
 
-def attach_two_pass_validation(
-    *,
-    trainer: Engine,
-    model,
-    val_loader,
-    device: torch.device,
-    cfg: Any,
-    calibrator: Optional[CalibratorProtocol] = None,
-    log_to_wandb: bool = True,
-    wandb_prefix: str = "val/",
-) -> TwoPassEvaluator:
-    """
-    Attach a TwoPassEvaluator at EPOCH_COMPLETED.
-    Evaluator does not log; trainer logs exactly once per epoch with step=epoch.
-    """
-    ev = make_two_pass_evaluator(
-        calibrator=calibrator,
-        task=str(getattr(cfg, "task", cfg.get("task", "multitask"))),
-        positive_index=int(getattr(cfg, "positive_index", cfg.get("positive_index", 1))),
-        cls_decision=str(getattr(cfg, "cls_decision", cfg.get("cls_decision", "threshold"))),
-        cls_threshold=float(getattr(cfg, "cls_threshold", cfg.get("cls_threshold", 0.5))),
-        num_classes=int(getattr(cfg, "num_classes", cfg.get("num_classes", 2))),
-        multitask=bool(getattr(cfg, "multitask", cfg.get("multitask", False))),
-    )
-
-    # Remove any previous hook to avoid duplicate logging / step desync
-    old = getattr(trainer.state, "_val_hook_2pass", None)
-    if old is not None:
-        try:
-            trainer.remove_event_handler(old, Events.EPOCH_COMPLETED)
-        except Exception:
-            pass
-        trainer.state._val_hook_2pass = None
-
-    base_rate = getattr(cfg, "base_rate", cfg.get("base_rate", None))
-
-    # Optional: declare metric step domains once
-    wb = None
-    if log_to_wandb:
-        try:
-            import wandb as _wandb
-            wb = _wandb
-            if not getattr(trainer.state, "_wb_val_defined", False) and getattr(wb, "run", None):
-                wb.define_metric("trainer/epoch")
-                wb.define_metric(f"{wandb_prefix}*", step_metric="trainer/epoch")
-                trainer.state._wb_val_defined = True
-        except Exception:
-            wb = None  # keep training even if wandb not available
-
-    def _to_scalar(v):
-        # Safe conversion for numpy/torch scalars
-        try:
-            import torch
-            if isinstance(v, torch.Tensor):
-                if v.numel() == 1:
-                    return float(v.detach().cpu().item())
-                return v.detach().cpu().tolist()
-        except Exception:
-            pass
-        if isinstance(v, (np.floating, np.integer)):
-            return float(v) if isinstance(v, np.floating) else int(v)
-        return v
-
-    def _build_payload(epoch: int, cls_m: Dict[str, Any], seg_m: Dict[str, Any], t: float) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"trainer/epoch": int(epoch)}
-        payload[f"{wandb_prefix}cal_thr"] = float(t)
-        for k, v in cls_m.items():
-            payload[f"{wandb_prefix}{k}"] = _to_scalar(v)
-        for k, v in seg_m.items():
-            key = f"{wandb_prefix}{k}"
-            if key not in payload:
-                payload[key] = _to_scalar(v)
-        return payload
-
-    @trainer.on(Events.EPOCH_COMPLETED)
-    def _run_two_pass(engine: Engine):
-        epoch = int(engine.state.epoch or 0)
-
-        # Ensure model has a device attribute for evaluator (harmless if already set)
-        if not hasattr(model, "device"):
-            try:
-                model.device = device
-            except Exception:
-                pass
-
-        # Evaluate (no logging here)
-        t, cls_metrics, seg_metrics = ev.validate(
-            epoch=epoch, model=model, val_loader=val_loader, base_rate=base_rate
-        )
-
-        # Update engine metrics (so schedulers/handlers can read them)
-        engine.state.metrics = engine.state.metrics or {}
-        m = engine.state.metrics
-        m.update({k: _to_scalar(v) for k, v in cls_metrics.items()})
-        m.update({k: _to_scalar(v) for k, v in seg_metrics.items()})
-        m["cal_thr"] = float(t)
-
-        # Single-source logging: epoch step only
-        if log_to_wandb and wb is not None:
-            payload = _build_payload(epoch, cls_metrics, seg_metrics, t)
-            # wb.log(payload, step=epoch)
-            wb.log(payload)
-
-    trainer.state._val_hook_2pass = _run_two_pass
-    return ev
-
-
 # evaluator builder (uses shared extract_* helpers; removed _extract_outputs)
 def build_evaluator(
     *,
@@ -509,6 +398,44 @@ class Task(str, Enum):
     CLASSIFICATION = "classification"
     SEGMENTATION = "segmentation"
     MULTITASK = "multitask"
+
+
+def get_label_indices_from_batch(batch: Mapping[str, Any], *, num_classes: int | None = None) -> torch.Tensor:
+    """
+    Return labels as a 1D LongTensor of class indices [B].
+    Accepts keys: 'label', 'labels', or 'y'. Handles one-hot and [B,1].
+    """
+    if not isinstance(batch, Mapping):
+        raise TypeError(f"Expected dict-like batch, got {type(batch)}")
+
+    if "label" in batch and batch["label"] is not None:
+        y = batch["label"]
+    elif "labels" in batch and batch["labels"] is not None:
+        y = batch["labels"]
+    elif "y" in batch and batch["y"] is not None:
+        y = batch["y"]
+    else:
+        raise KeyError(f"No label key in batch; keys={list(batch.keys())}")
+
+    if hasattr(y, "as_tensor"):
+        y = y.as_tensor()
+    y = torch.as_tensor(y)
+
+    # Normalize to indices [B]
+    if y.ndim >= 2 and y.shape[-1] > 1:
+        y = y.argmax(dim=-1)
+    if y.ndim >= 2 and y.shape[-1] == 1:
+        y = y.squeeze(-1)
+    if y.ndim == 0:
+        y = y.view(1)
+    y = y.long().view(-1)
+
+    if num_classes is not None:
+        if (y < 0).any() or (y >= num_classes).any():
+            mn, mx = int(y.min()), int(y.max())
+            raise ValueError(f"Label indices out of range 0..{num_classes-1} (min={mn}, max={mx})")
+
+    return y
 
 
 def make_prepare_batch(
@@ -681,9 +608,6 @@ def attach_lr_scheduling(trainer: Engine, evaluator: Engine | None, optimizer, s
             # prefer evaluator metrics if provided, otherwise trainer metrics
             source = evaluator if evaluator is not None else trainer
             metrics = getattr(source.state, "metrics", {}) or {}
-            # key = plateau_metric or ("val_auc" if str(plateau_mode).lower() == "max" else "val_loss")
-            # candidates = {key, key.replace("/", "_"), key.replace("_", "/")}
-            # val = next((metrics.get(k) for k in candidates if k in metrics), None)
             key = plateau_metric or ("val_auc" if str(plateau_mode).lower() == "max" else "val_loss")
             # try common variants: "val/auc" -> "val_auc" -> "auc", and vice-versa
             candidates = {key, key.replace("/", "_"), key.replace("_", "/")}
@@ -694,7 +618,6 @@ def attach_lr_scheduling(trainer: Engine, evaluator: Engine | None, optimizer, s
             base = base.split("/")[-1].split("_")[-1]
             candidates.update({base, f"val_{base}", f"val/{base}"})
             val = next((metrics.get(k) for k in candidates if k in metrics), None)
-            # val = metrics.get(plateau_metric, None)
             if val is not None:
                 try:
                     scheduler.step(float(val))
@@ -702,7 +625,6 @@ def attach_lr_scheduling(trainer: Engine, evaluator: Engine | None, optimizer, s
                     pass
             return
             # no-op if metric missing; do NOT call scheduler.step() without a metric
-        # IMPORTANT: do not add the generic epoch step for ReduceLROnPlateau
         return
 
     # Generic epoch-based schedulers (Cosine, StepLR, MultiStep, Exponential, etc.)
@@ -826,4 +748,5 @@ __all__ = [
     "build_evaluator",
     "attach_scheduler",
     "attach_lr_scheduling",
+    "get_label_indices_from_batch",
 ]

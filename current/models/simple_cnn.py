@@ -1,6 +1,6 @@
 # simple_cnn.py
 import logging
-from typing import Any, List, Dict, Callable
+from typing import Any, List, Dict, Callable, Optional
 
 import torch
 import torch.nn as nn
@@ -19,41 +19,33 @@ class SimpleCNNModel(BaseModel):
 
     # Registry / construction
     def build_model(self, config: Any) -> Any:
+        # expose to BaseModel helpers
         self.config = config
+        self.class_counts: Optional[List[int]] = self._cfg_get(config, "class_counts", None)
+
         in_channels: int = int(self._cfg_get(config, "in_channels", 1))
         self.num_classes: int = int(self._cfg_get(config, "num_classes", 2))
-        # Allow either "dropout" or "dropout_rate" in config
         dropout: float = float(self._cfg_get(config, "dropout", self._cfg_get(config, "dropout_rate", 0.5)))
 
-        counts = self._cfg_get(config, "class_counts", None)
-        if counts and isinstance(counts, (list, tuple)) and len(counts) == self.num_classes:
-            counts_t = torch.tensor(counts, dtype=torch.float32)
-            weights = counts_t.sum() / (len(counts_t) * counts_t.clamp_min(1))
-            weights = weights / weights.mean()
-            # Store on cfg regardless of type
-            if isinstance(config, dict):
-                config["class_weights"] = weights.tolist()
-            else:
-                setattr(config, "class_weights", weights.tolist())
-            logger.info("[SimpleCNN] class_counts=%s -> CE class_weights=%s", counts, [round(float(w), 4) for w in weights.tolist()])
+        # unified binary policy
+        pos_idx = int(self._cfg_get(config, "positive_index", 1))
+        use_single = bool(self._cfg_get(config, "binary_single_logit",
+                                        (self.num_classes == 2 and self._cfg_get(config, "use_single_logit", True))))
+        out_dim = 1 if use_single else self.num_classes
 
-        model = SimpleCNN(in_channels=in_channels, num_classes=self.num_classes, dropout=dropout)
+        model = SimpleCNN(in_channels=in_channels, out_dim=out_dim, dropout=dropout)
 
-        # Bias prior: p1 = positives / total, p0 = 1 - p1
+        # initialize classifier bias from dataset priors (no-op if counts missing)
         last = model.classifier[-1]
-        if hasattr(last, "bias") and last.bias is not None:
-            with torch.no_grad():
-                if counts and len(counts) == self.num_classes and sum(counts) > 0:
-                    import math
-                    total = float(sum(counts))
-                    # log priors; any constant shift is OK for softmax
-                    priors = [max(c / total, 1e-6) for c in counts]
-                    bias = torch.tensor([math.log(p) for p in priors], dtype=last.bias.dtype)
-                    # optional: zero-mean the bias to avoid large constant offsets
-                    bias = bias - bias.mean()
-                    last.bias.copy_(bias)
-                    logger.info("[SimpleCNN] init logits prior (classes=%d): %s", self.num_classes, [round(float(b), 4) for b in bias.tolist()])
-
+        self.init_bias_from_priors(
+            head=last,
+            class_counts=self.class_counts,
+            binary_single_logit=use_single,
+            positive_index=pos_idx,
+        )
+        if self.class_counts:
+            logger.info("[SimpleCNN] class_counts=%s -> init_bias applied (single_logit=%s, pos_idx=%d)",
+                        self.class_counts, use_single, pos_idx)
         return model
 
     # Capabilities
@@ -67,22 +59,11 @@ class SimpleCNNModel(BaseModel):
     def get_cls_output_transform(self) -> Callable:
         return cls_output_transform
 
+    # (Optional) keep if external code expects it; otherwise rely on BaseModel.get_metrics()
     def get_handler_kwargs(self) -> Dict[str, Any]:
-        # Keep minimal and consistent with other wrappers
-        return {
-            "num_classes": self.get_num_classes(),
-            "cls_output_transform": cls_output_transform,
-            "seg_output_transform": None,  # uniform signature
-        }
-
-    # Optional convenience for external callers
-    def extract_logits(self, y_pred: Any) -> "torch.Tensor":
-        if isinstance(y_pred, dict):
-            for k in ("cls_out", "class_logits", "logits", "y_pred"):
-                v = y_pred.get(k, None)
-                if v is not None:
-                    return v
-        return y_pred  # tensor passthrough / fallback
+        return {"num_classes": self.get_num_classes(),
+                "cls_output_transform": cls_output_transform,
+                "seg_output_transform": None}
 
 
 class SimpleCNN(nn.Module):
@@ -90,7 +71,7 @@ class SimpleCNN(nn.Module):
     Tiny CNN for binary/multi-class classification.
     Feature stack -> AdaptiveAvgPool -> MLP. No assumption on HxW.
     """
-    def __init__(self, in_channels: int = 1, num_classes: int = 2, dropout: float = 0.5):
+    def __init__(self, in_channels: int = 1, out_dim: int = 2, dropout: float = 0.5):
         super().__init__()
         self.features = nn.Sequential(
             nn.Conv2d(in_channels, 16, kernel_size=3, padding=1),
@@ -111,13 +92,14 @@ class SimpleCNN(nn.Module):
             nn.Linear(64, 128),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
-            nn.Linear(128, num_classes),
+            nn.Linear(128, out_dim),
         )
 
-    def forward(self, x: "torch.Tensor") -> "torch.Tensor":
+    def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         x = self.features(x)
         x = self.gap(x)
         logits = self.classifier(x)
-        if logits.ndim != 2:
-            raise RuntimeError(f"[SimpleCNN] Expected [B, num_classes], got {tuple(logits.shape)}")
-        return logits
+        if logits.ndim not in (1, 2):
+            raise RuntimeError(f"[SimpleCNN] Expected [B] or [B, C], got {tuple(logits.shape)}")
+        # Always return raw logits; BaseModel handles BCE/CE + thresholds
+        return {"cls_logits": logits}
