@@ -6,6 +6,10 @@ metric:
   name: val/multi
   goal: maximize
 
+early_terminate:
+  type: none  # hyperband
+  # min_iter: 4
+
 parameters:
   # ---------------- Fixed experiment knobs ----------------
   architecture: {value: multitask_unet}
@@ -108,7 +112,7 @@ parameters:
   # Plateau params
   plateau_metric: {value: val/auc}         # trainer.state.metrics key; two-pass stores 'loss'
   plateau_mode:   {value: max}          # min | max
-  patience: {values: [3, 6]}
+  patience: {value: 0}  # {values: [3, 6]}
   factor:   {values: [0.5, 0.3]}
   threshold: {value: 0.0001}            # change sensitivity for Plateau
 
@@ -118,16 +122,3 @@ parameters:
   cls_threshold: {value: 0.5}
   positive_index: {value: 1}            # ignored for single-logit, used for 2-logit
 
-early_terminate:
-  type: hyperband
-  min_iter: 4
-
-# NOTE:
-# val_multi gets registered whenever both val_auc and val_dice exist
-# get_loss_fn reads alpha, beta
-# Optimizer uses cfg.lr and cfg.weight_decay
-# Model reads cfg.dropout_rate
-# Remove/ignore patch_size for UNet, or gate by architecture
-
-# IMPORTANT: make sure we log a scalar macro mean as "val/multi"
-# (or change name below to "val/multi_mean" if that’s what we emit)

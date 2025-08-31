@@ -3,6 +3,8 @@
 # 2025-08-31
 - WIP stabilize: warmup-gate two-pass & health logs; remove tensor truthiness
 - Savepoint as of 2025-08-30
+- Gate decision-health & early stopping; fix a threshold-aware confmat output transform
+  - cls_decision_output_transform() missing 1 required positional argument: 'output'
 
 # 2025-08-30
 - Refactor MONAI pipeline: Harden decision-health, dedupe two-pass attach, move attach_two_pass_validation, fix Tensor boolean error, refresh SimpleCNN sweep config

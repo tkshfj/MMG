@@ -4,7 +4,8 @@ from typing import Dict, Any, Literal, Optional, Sequence, Mapping
 import numpy as np
 import torch
 from ignite.engine import Engine
-from metrics_utils import to_float_scalar
+# from metrics_utils import to_float_scalar
+from utils.safe import to_float_scalar  # is_finite_float
 
 logger = logging.getLogger(__name__)
 

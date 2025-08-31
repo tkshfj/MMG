@@ -5,14 +5,13 @@ import logging
 from datetime import datetime
 from typing import Any, Dict, Iterable, Optional
 
-import numpy as np
 import torch
 from ignite.engine import Events, Engine
 from ignite.handlers import ModelCheckpoint, global_step_from_engine
 
 from image_logger import make_image_logger
-from metrics_utils import to_float_scalar, train_loss_output_transform
-from engine_utils import is_ignite_engine
+from metrics_utils import train_loss_output_transform
+from utils.safe import to_float_scalar, is_finite_float
 
 logger = logging.getLogger(__name__)
 
@@ -42,35 +41,9 @@ _INT_PREFIXES = ("cls_confmat_", "seg_confmat_", "tp", "tn", "fp", "fn")
 
 
 def _to_scalar(v: Any) -> Optional[float]:
-    """
-    Return a Python scalar (float) if v is scalar-like; else None.
-    - Accepts: int/float, numpy scalars/0-d arrays, 1-element sequences, 1-element tensors.
-    - Skips: longer lists/arrays/tensors, dicts, etc.
-    """
-    if isinstance(v, (int, float, np.number)):
-        return float(v)
-    if isinstance(v, torch.Tensor):
-        if v.numel() == 1:
-            return float(v.detach().cpu().item())
-        return None
-    if isinstance(v, np.ndarray):
-        if v.ndim == 0:
-            return float(v.item())
-        if v.size == 1:
-            return float(v.reshape(()).item())
-        return None
-    if isinstance(v, (list, tuple)):
-        if len(v) == 1:
-            return _to_scalar(v[0])
-        return None
-    # anything else: try a safe extraction or skip
-    try:
-
-        if hasattr(v, "item"):
-            return float(v.item())  # numpy scalar-like
-    except Exception:
-        pass
-    return None
+    """Unify scalar extraction with NaN guards."""
+    f = to_float_scalar(v, strict=False)
+    return f if is_finite_float(f) else None
 
 
 def _cast_for_logging(metrics: Dict[str, Any]) -> Dict[str, Any]:
@@ -128,7 +101,7 @@ def register_handlers(
     last_model_prefix: str = "last",
     best_model_prefix: str = "best",
     save_last_n: int = 2,
-    watch_metric: str = "val_auc",
+    watch_metric: str = "val/auc",               # <- use val/auc by default
     watch_mode: str = "max",
     metric_names: Optional[Iterable[str]] = None,
     log_images: bool = False,
@@ -148,6 +121,16 @@ def register_handlers(
     Works with either an Ignite evaluator Engine or a non-Engine two-pass evaluator
     that publishes metrics into trainer.state.metrics.
     """
+    def _flatten(d, prefix=""):
+        out = {}
+        for k, v in (d or {}).items():
+            key = f"{prefix}{k}" if not prefix else f"{prefix}/{k}"
+            if isinstance(v, dict):
+                out.update(_flatten(v, key))
+            else:
+                out[key] = v
+        return out
+
     os.makedirs(out_dir, exist_ok=True)
     run_tag = run_tag or datetime.now().strftime("%Y%m%d-%H%M%S")
 
@@ -159,9 +142,9 @@ def register_handlers(
             configure_wandb_step_semantics()
         except Exception as e:
             wb = None
-            print(f"[WARN] W&B init failed: {e}")
+            logger.warning("[WARN] W&B init failed: %s", e)
 
-    # Training logs (per-iteration; commit=False)
+    # -------- train logging (iteration + epoch anchor) --------
     @trainer.on(Events.ITERATION_COMPLETED)
     def _log_train_iter(engine: Engine):
         if wb is None:
@@ -175,39 +158,67 @@ def register_handlers(
             payload["train/lr"] = float(optimizer.param_groups[0].get("lr", 0.0))
         _wb_log(wb, payload, commit=False)
 
-    # Epoch anchor to flush per-iteration buffers
     @trainer.on(Events.EPOCH_COMPLETED)
     def _commit_epoch_anchor(engine: Engine):
         if wb is None:
             return
-        _wb_log(wb, {"trainer/epoch": int(engine.state.epoch)})  # commit=True by default
+        _wb_log(wb, {"trainer/epoch": int(engine.state.epoch)})
 
-    # Eval logging + best checkpoint
-    is_ev_engine = is_ignite_engine(evaluator)
+    # -------- eval logging (inline attach_wandb_eval_logging) --------
+    def _with_val_prefix(d: Dict[str, Any]) -> Dict[str, Any]:
+        if not d:
+            return {}
+        out: Dict[str, Any] = {}
+        for k, v in d.items():
+            out[k if (isinstance(k, str) and k.startswith("val/")) else f"val/{k}"] = v
+        return out
+
+    def _is_engine(x: Any) -> bool:
+        try:
+            return isinstance(x, Engine)
+        except Exception:
+            return False
+
+    is_ev_engine = _is_engine(evaluator)
 
     if is_ev_engine and evaluator is not None:
-        # Console eval stats
-        @evaluator.on(Events.COMPLETED)
-        def _print_eval_metrics(engine: Engine):
-            ep = int(getattr(engine.state, "trainer_epoch", engine.state.epoch))
-            scalars = _cast_for_logging(engine.state.metrics or {})
-            if scalars:
-                parts = [f"{k}: {v}" if isinstance(v, int) else f"{k}: {v:.4f}" for k, v in scalars.items()]
-                logger.info("Epoch[%d] Metrics -- %s", ep, " ".join(parts))
+        # idempotent guard so we don't attach twice
+        if getattr(evaluator, "_wandb_eval_logging_attached", False):
+            logger.debug("W&B eval logging already attached; skipping duplicate attach.")
+        else:
+            setattr(evaluator, "_wandb_eval_logging_attached", True)
 
-        # W&B eval logs on epoch axis
-        if wb is not None:
+            # console pretty-print
             @evaluator.on(Events.COMPLETED)
-            def _log_eval(engine: Engine):
-                scalars = _cast_for_logging(engine.state.metrics or {})
-                if not scalars:
-                    return
+            def _print_eval_metrics(engine: Engine):
                 ep = int(getattr(engine.state, "trainer_epoch", engine.state.epoch))
-                payload = {"trainer/epoch": ep}
-                payload.update({f"val/{k}": v for k, v in scalars.items()})
-                _wb_log(wb, payload)
+                scalars = _cast_for_logging(engine.state.metrics or {})
+                if scalars:
+                    parts = [f"{k}: {v}" if isinstance(v, int) else f"{k}: {v:.4f}" for k, v in scalars.items()]
+                    logger.info("Epoch[%d] Metrics -- %s", ep, " ".join(parts))
 
-        # Best checkpoint (per-run folder, tolerant to non-empty)
+            # wandb log on epoch axis + mirror into trainer.state.metrics
+            if wb is not None:
+                @evaluator.on(Events.COMPLETED)
+                def _log_eval(engine: Engine):
+                    prefixed = _with_val_prefix(engine.state.metrics or {})
+                    flat = _flatten(prefixed)
+                    scalars = _cast_for_logging(flat)
+                    if not scalars:
+                        return
+                    ep = int(getattr(engine.state, "trainer_epoch", engine.state.epoch))
+                    # mirror: make val/* visible to trainer-based schedulers/checkpoints
+                    try:
+                        if getattr(trainer.state, "metrics", None) is None:
+                            trainer.state.metrics = {}
+                        trainer.state.metrics.update(scalars)
+                    except Exception:
+                        pass
+                    payload = {"trainer/epoch": ep}
+                    payload.update(scalars)  # already val/* keys
+                    _wb_log(wb, payload)
+
+        # best checkpoint on evaluator completion
         if model is not None:
             best_dir = os.path.join(out_dir, "checkpoints_best", run_tag)
             os.makedirs(best_dir, exist_ok=True)
@@ -216,8 +227,13 @@ def register_handlers(
 
             def _score_fn(e: Engine):
                 m = e.state.metrics or {}
-                v = to_float_scalar(m.get(watch_metric))
-                return sign * float(v) if v is not None else -float("inf")
+                v = m.get(watch_metric)
+                if v is None and watch_metric.startswith("val/"):
+                    v = m.get(watch_metric[4:])
+                if v is None and not watch_metric.startswith("val/"):
+                    v = m.get(f"val/{watch_metric}")
+                v = to_float_scalar(v, strict=False)
+                return sign * float(v) if is_finite_float(v) else -float("inf")
 
             ckpt_best = ModelCheckpoint(
                 dirname=best_dir,
@@ -231,21 +247,23 @@ def register_handlers(
             )
             evaluator.add_event_handler(Events.COMPLETED, ckpt_best, {"model": model})
 
-    # Two-pass path: metrics live on trainer.state.metrics
+    # two-pass path: eval metrics live on trainer.state.metrics; log them at epoch end
     if (not is_ev_engine) or (evaluator is None):
         @trainer.on(Events.EPOCH_COMPLETED)
         def _log_eval_from_trainer(engine: Engine):
             if wb is None:
                 return
-            scalars = _cast_for_logging(engine.state.metrics or {})
+            prefixed = _with_val_prefix(engine.state.metrics or {})
+            flat = _flatten(prefixed)
+            scalars = _cast_for_logging(flat)
             if not scalars:
                 return
             ep = int(engine.state.epoch)
             payload = {"trainer/epoch": ep}
-            payload.update({f"val/{k}": v for k, v in scalars.items()})
+            payload.update(scalars)
             _wb_log(wb, payload)
 
-    # Last-N checkpoints (every epoch)
+    # last-N checkpoints each epoch
     if model is not None:
         last_dir = os.path.join(out_dir, "checkpoints_last", run_tag)
         os.makedirs(last_dir, exist_ok=True)
@@ -259,7 +277,7 @@ def register_handlers(
         )
         trainer.add_event_handler(Events.EPOCH_COMPLETED, ckpt_last, {"model": model})
 
-    # Image logger (epoch-anchored, no step=)
+    # image logging (optional)
     if log_images:
         try:
             seg_thr = float(cfg.get("seg_threshold", 0.5)) if isinstance(cfg, dict) else 0.5
@@ -284,7 +302,6 @@ def register_handlers(
                 payload = getattr(engine.state, "_last_payload", None)
                 if payload is not None:
                     img_logger(payload, wandb_module=wb, epoch_anchor=ep)
-
         elif img_logger is not None:
             @trainer.on(Events.EPOCH_COMPLETED)
             def _log_train_images(engine: Engine):

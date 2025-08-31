@@ -3,18 +3,22 @@ from __future__ import annotations
 import logging
 logger = logging.getLogger(__name__)
 
+import math
 import torch
 from enum import Enum
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union, Mapping
+
+from ignite.handlers import EarlyStopping, Checkpoint, DiskSaver
 from monai.engines import SupervisedTrainer
 from ignite.engine import Events, Engine
-
+from utils.safe import to_float_scalar, is_finite_float, to_tensor
 from metrics_utils import (
-    to_tensor,
     extract_cls_logits_from_any,
     extract_seg_logits_from_any,
-    to_float_scalar,
     coerce_loss_dict,
+    make_metrics,
+    make_cls_val_metrics,
+    make_seg_val_metrics
 )
 
 
@@ -38,7 +42,7 @@ def get_first(d: Dict[str, Any], *keys: str) -> Any:
     if not isinstance(d, dict):
         return None
     for k in keys:
-        if k in d:
+        if k in d and d[k] is not None:
             return d[k]
     return None
 
@@ -88,7 +92,7 @@ def normalize_target(
             y = y.argmax(dim=-1)
         if y.ndim > 1:
             y = y.squeeze()
-        return y.long()
+        return y.long().view(-1)
 
     if kind == "mask_indices":
         if y.ndim == 2:              # [H,W] -> [1,H,W]
@@ -232,6 +236,7 @@ def build_trainer(
     optimizer,
     loss_function,
     prepare_batch,
+    train_metrics: Optional[Dict[str, Any]] = None,
 ) -> SupervisedTrainer:
     assert callable(loss_function), "loss_function must be callable"
     assert callable(prepare_batch), "prepare_batch must be callable"
@@ -292,99 +297,170 @@ def build_trainer(
 
     # attach device/non_blocking on state AFTER the trainer exists
     _attach_device_state(trainer, device, getattr(train_data_loader, "pin_memory", False))
+
+    # attach training metrics (names MUST be bare, e.g., "auc", "accuracy")
+    if train_metrics:
+        # idempotency guard (avoid double-attach if rebuild/reuse)
+        if not getattr(trainer.state, "_train_metrics_attached", False):
+            for name, metric in train_metrics.items():
+                metric.attach(trainer, name)
+            setattr(trainer.state, "_train_metrics_attached", True)
+
     return trainer
 
 
-# evaluator builder (uses shared extract_* helpers; removed _extract_outputs)
 def build_evaluator(
     *,
-    device,
-    data_loader=None,
-    network,
-    prepare_batch,
-    metrics: dict | None = None,
-    postprocessing=None,
-    inferer=None,
-    non_blocking: bool | None = None,
+    device: torch.device,
+    data_loader,                        # required (val loader)
+    network: torch.nn.Module,
+    prepare_batch: Callable,            # (batch, device, non_blocking) -> (x, targets)
+    metrics: Dict[str, Any] | None = None,
     include_seg: bool = True,
-    **kwargs,
+    inferer: Optional[Callable] = None,
+    non_blocking: Optional[bool] = None,
+    trainer_for_logging: Optional[Engine] = None,
 ) -> Engine:
-
-    if data_loader is None:
-        data_loader = kwargs.pop("val_data_loader", None)
-    kwargs.pop("decollate", None)
-    if data_loader is None:
-        raise ValueError("build_evaluator: data_loader (or val_data_loader) must be provided")
-
+    """Custom evaluator that returns an out_map dict compatible with metrics."""
     nb_default = bool(non_blocking) if non_blocking is not None else False
 
-    def _eval_step(engine, batch):
+    def _eval_step(engine: Engine, batch: Mapping[str, Any]) -> Dict[str, Any]:
         dev = getattr(engine.state, "device", device)
         nb = getattr(engine.state, "non_blocking", nb_default)
         x, targets = prepare_batch(batch, dev, nb)
 
-        # targets can be label (Tensor[B]), mask (Tensor[B,H,W]) or dict({"label":..., "mask":...})
+        # parse targets (can be tensor label, dict with label/mask, etc.)
         y = m = None
         if isinstance(targets, dict):
-            y = targets.get("label", None)
-            m = targets.get("mask", None)
+            y = targets.get("label")
+            m = targets.get("mask")
         else:
             y = targets
 
-        with torch.no_grad():
+        with torch.inference_mode():
             net_out = network(x) if inferer is None else inferer(x, network)
-
-        # Use shared robust extractors
-        logits = None
-        try:
-            logits = extract_cls_logits_from_any(net_out)
-        except Exception:
-            pass
-
-        seg_logits = None
-        if include_seg:
-            try:
-                seg_logits = extract_seg_logits_from_any(net_out)
-            except Exception:
-                pass
 
         out_map: Dict[str, Any] = {}
 
         # classification head
-        if logits is not None:
-            logits = to_tensor(logits).float()
+        try:
+            logits = extract_cls_logits_from_any(net_out)
+            if torch.is_tensor(logits):
+                logits = logits.float()
+            else:
+                logits = torch.as_tensor(logits, dtype=torch.float32, device=dev)
             out_map["y_pred"] = logits
             out_map["logits"] = logits
             out_map["cls_out"] = logits
             if y is not None:
-                out_map["y"] = to_tensor(y).long().view(-1)
+                out_map["y"] = torch.as_tensor(y, device=dev).long().view(-1)
+        except Exception:
+            pass
 
-        # segmentation head (only if allowed and mask exists)
-        if include_seg and (seg_logits is not None):
-            out_map["seg_out"] = to_tensor(seg_logits)
-            out_map["seg_logits"] = out_map["seg_out"]
+        # segmentation head
+        if include_seg:
+            try:
+                seg_logits = extract_seg_logits_from_any(net_out)
+                out_map["seg_out"] = seg_logits
+                out_map["seg_logits"] = seg_logits
+            except Exception:
+                pass
 
-        # pack label dict only with keys we actually have
+        # optional packed label dict
         label_dict: Dict[str, Any] = {}
         if y is not None:
-            label_dict["label"] = y
+            label_dict["label"] = out_map.get("y", torch.as_tensor(y, device=dev).long().view(-1))
         if include_seg and (m is not None):
-            label_dict["mask"] = m
+            label_dict["mask"] = torch.as_tensor(m, device=dev).long()
         if label_dict:
             out_map["label"] = label_dict
 
         return out_map
 
     evaluator = Engine(_eval_step)
-    pin = getattr(data_loader, "pin_memory", False)
-    _attach_device_state(evaluator, device=device, non_blocking=pin)
+    pin = bool(getattr(data_loader, "pin_memory", False))
+    # Persist device hints on the engine (spawn-safe)
+    setattr(evaluator.state, "device", device)
+    setattr(evaluator.state, "non_blocking", pin)
 
     if metrics:
-        for name, metric in metrics.items():
-            metric.attach(evaluator, name)
+        if not getattr(evaluator.state, "_val_metrics_attached", False):
+            for name, metric in metrics.items():
+                metric.attach(evaluator, name)
+            setattr(evaluator.state, "_val_metrics_attached", True)
 
+    # Attach W&B eval logging once the evaluator is fully wired
+    # if trainer_for_logging is not None:
+    #     try:
+    #         attach_wandb_eval_logging(trainer_for_logging, evaluator)
+    #     except Exception:
+    #         # keep training resilient if W&B isn't available
+    #         pass
+
+    # optional: expose for downstream hooks
     evaluator.state.data_loader = data_loader
     return evaluator
+
+
+def attach_engine_metrics(
+    *,
+    trainer: Engine,
+    evaluator: Engine,
+    tasks: Sequence[Literal["classification", "segmentation"]] = ("classification",),
+    num_classes: int,
+    cls_decision: str = "threshold",
+    cls_threshold: float = 0.5,
+    positive_index: int = 1,
+    # new, optional seg controls (default to classification settings when not provided)
+    seg_num_classes: Optional[int] = None,
+    seg_threshold: Optional[float] = None,
+    seg_ignore_index: Optional[int] = None,
+) -> Tuple[Dict[str, Any], Dict[str, Any]]:
+    """
+    Build and attach metrics to trainer and evaluator with bare names.
+    Returns (train_metrics, val_metrics).
+    """
+    task_set = set(tasks)
+
+    # training metrics (keep light; classification-only by default)
+    train_metrics = make_metrics(
+        tasks=task_set,
+        num_classes=num_classes,
+        cls_decision=cls_decision,
+        cls_threshold=cls_threshold,
+        positive_index=positive_index,
+    )
+    if not getattr(trainer.state, "_train_metrics_attached", False):
+        for k, m in train_metrics.items():
+            m.attach(trainer, k)
+        setattr(trainer.state, "_train_metrics_attached", True)
+
+    # validation metrics: start with classification
+    val_metrics = make_cls_val_metrics(
+        num_classes=num_classes,
+        decision=cls_decision,
+        threshold=cls_threshold,
+        positive_index=positive_index,
+    )
+
+    # optional: add segmentation validation metrics
+    if "segmentation" in task_set:
+        seg_nc = int(seg_num_classes) if seg_num_classes is not None else int(num_classes)
+        seg_thr = float(seg_threshold) if seg_threshold is not None else float(cls_threshold)
+        val_metrics.update(
+            make_seg_val_metrics(
+                num_classes=seg_nc,
+                threshold=seg_thr,
+                ignore_index=seg_ignore_index,
+            )
+        )
+
+    if not getattr(evaluator.state, "_val_metrics_attached", False):
+        for k, m in val_metrics.items():
+            m.attach(evaluator, k)
+        setattr(evaluator.state, "_val_metrics_attached", True)
+
+    return train_metrics, val_metrics
 
 
 # prepare_batch & scheduler
@@ -467,6 +543,10 @@ def make_prepare_batch(
         if y_cls is not None:
             y_cls = normalize_target(to_tensor(y_cls), kind="label")
             y_cls = _to_device(y_cls, dev, nb)
+            # enforce 1D long indices for CE / scalar for BCE-with-logits
+            if y_cls.ndim >= 2 and y_cls.shape[-1] > 1:
+                y_cls = y_cls.argmax(dim=-1)
+            y_cls = y_cls.long().view(-1)
 
         # masks (segmentation)
         y_seg = get_first(bdict, "mask", "seg", "segmentation", "mask_label", "mask_true")
@@ -484,11 +564,11 @@ def make_prepare_batch(
         if t is Task.CLASSIFICATION:
             if y_cls is None:
                 raise ValueError("prepare_batch(classification): missing 'label'.")
-            targets = y_cls
+            targets = {"label": y_cls}
         elif t is Task.SEGMENTATION:
             if y_seg is None:
                 raise ValueError("prepare_batch(segmentation): missing 'mask'.")
-            targets = y_seg
+            targets = {"mask": y_seg}
         else:
             if y_cls is None or y_seg is None:
                 raise ValueError("prepare_batch(multitask): need both 'label' and 'mask'.")
@@ -601,36 +681,130 @@ def attach_lr_scheduling(trainer: Engine, evaluator: Engine | None, optimizer, s
 
     if isinstance(scheduler, ReduceLROnPlateau):
         if not plateau_metric:
-            raise ValueError("ReduceLROnPlateau needs plateau_metric='val_loss' or 'val_auc', etc.")
+            raise ValueError("ReduceLROnPlateau needs plateau_metric (e.g., 'val/auc' or 'val/loss').")
 
         @trainer.on(Events.EPOCH_COMPLETED)
-        def _step_plateau(_):
-            # prefer evaluator metrics if provided, otherwise trainer metrics
+        def _step_plateau_after_eval(engine: Engine):
+            # Prefer evaluator metrics (post-validation); fall back to trainer if needed.
             source = evaluator if evaluator is not None else trainer
             metrics = getattr(source.state, "metrics", {}) or {}
-            key = plateau_metric or ("val_auc" if str(plateau_mode).lower() == "max" else "val_loss")
-            # try common variants: "val/auc" -> "val_auc" -> "auc", and vice-versa
-            candidates = {key, key.replace("/", "_"), key.replace("_", "/")}
-            base = key
-            # strip common "val" prefixes
-            base = base.replace("val/", "").replace("val_", "")
-            # also take the last token after a separator just in case
+            key = plateau_metric
+            # Accept common key variants
+            cand = {
+                key,
+                key.replace("/", "_"),
+                key.replace("_", "/"),
+            }
+            base = key.replace("val/", "").replace("val_", "")
             base = base.split("/")[-1].split("_")[-1]
-            candidates.update({base, f"val_{base}", f"val/{base}"})
-            val = next((metrics.get(k) for k in candidates if k in metrics), None)
-            if val is not None:
+            cand.update({base, f"val_{base}", f"val/{base}"})
+            raw = next((metrics.get(k) for k in cand if k in metrics), None)
+            score = to_float_scalar(raw, strict=False)
+            if is_finite_float(score):
                 try:
-                    scheduler.step(float(val))
+                    scheduler.step(score)  # only step with a finite float
                 except Exception:
                     pass
-            return
-            # no-op if metric missing; do NOT call scheduler.step() without a metric
+            # If score is missing/NaN, skip stepping this epoch—never call scheduler.step(None).
         return
 
     # Generic epoch-based schedulers (Cosine, StepLR, MultiStep, Exponential, etc.)
     @trainer.on(Events.EPOCH_COMPLETED)
     def _step_epoch(_):
         scheduler.step()
+
+
+def _make_score_fn(metric_key: str, mode: str = "max"):
+    sign = 1.0 if str(mode).lower() == "max" else -1.0
+
+    def _score(engine):
+        v = to_float_scalar(engine.state.metrics.get(metric_key), strict=False)
+        if not is_finite_float(v):
+            # Return worst possible so Checkpoint won't save on bad/NaN metrics
+            return -math.inf if sign > 0 else math.inf
+        return sign * v
+    return _score
+
+
+def make_warmup_safe_score_fn(
+    *, metric_key: str, mode: str, trainer: Engine, warmup_epochs: int
+):
+    """
+    Returns a score_fn(engine)->float that:
+      - returns NaN during warmup so EarlyStopping ignores early epochs
+      - otherwise delegates to make_score_fn(metric_key, mode)
+    """
+    base = _make_score_fn(metric_key=metric_key, mode=mode)
+    warm = int(warmup_epochs)
+
+    def _score(engine: Engine) -> float:
+        tr_epoch = int(getattr(trainer.state, "epoch", 0) or 0)
+        if tr_epoch < warm:
+            return float("nan")
+        return base(engine)
+
+    return _score
+
+
+def attach_early_stopping(
+    *,
+    trainer: Engine,
+    evaluator: Engine,
+    metric_key: str = "val/auc",
+    mode: str = "max",
+    patience: int = 5,
+    warmup_epochs: int = 1,
+) -> EarlyStopping:
+    """
+    Attaches EarlyStopping to the evaluator, warmup-safe and tensor-proof.
+    """
+    if patience <= 0:
+        return None  # disabled
+
+    def _auc_score_fn(engine):
+        return float(engine.state.metrics.get("auc", 0.0))
+    score_fn = make_warmup_safe_score_fn(metric_key=metric_key, mode=mode, trainer=trainer, warmup_epochs=warmup_epochs)  # noqa: F841
+    # handler = EarlyStopping(patience=int(patience), score_function=score_fn, trainer=trainer)
+    handler = EarlyStopping(patience=int(patience), score_function=_auc_score_fn, trainer=trainer)
+    evaluator.add_event_handler(Events.COMPLETED, handler)
+    return handler
+
+
+def attach_best_checkpoint(
+    trainer,
+    evaluator,
+    model,
+    optimizer,
+    save_dir: str,
+    *,
+    filename_prefix: str = "best",
+    watch_metric: str = "val/auc",
+    watch_mode: str = "max",
+    n_saved: int = 1,
+) -> None:
+    """
+    Save 'best' checkpoints based on `watch_metric` computed by the evaluator.
+    """
+    from ignite.handlers import global_step_from_engine
+    saver = DiskSaver(save_dir, create_dir=True, require_empty=False, atomic=True)
+    to_save = {"model": model}
+    if optimizer is not None:
+        to_save["optimizer"] = optimizer
+    to_save["trainer"] = trainer  # optional but handy for global_step_from_engine
+
+    checkpoint = Checkpoint(
+        to_save=to_save,
+        save_handler=saver,
+        filename_prefix=filename_prefix,
+        n_saved=n_saved,
+        score_function=_make_score_fn(watch_metric, watch_mode),
+        score_name=watch_metric.replace("/", "_"),
+        global_step_transform=global_step_from_engine(trainer),
+    )
+
+    # Save after each evaluator run. If we run evaluator from a trainer hook,
+    # attach to evaluator.COMPLETED so it only triggers once metrics are ready.
+    evaluator.add_event_handler(Events.COMPLETED, checkpoint)
 
 
 def _best_threshold(
@@ -718,7 +892,7 @@ def attach_val_threshold_search(
         m = engine.state.metrics
         m["threshold"] = thr
 
-        # write confusion-matrix-like fields compatible with your logs
+        # write confusion-matrix-like fields compatible with logs
         tp, tn, fp, fn = stats["tp"], stats["tn"], stats["fp"], stats["fn"]
         m["cls_confmat"] = [[tn, fp], [fn, tp]]
         m["cls_confmat_00"] = float(tn)
@@ -740,13 +914,34 @@ def attach_val_threshold_search(
                 pass
 
 
+def maybe_update_best(engine: Engine, *, watch_metric: str, mode: str, state: dict) -> bool:
+    """
+    Update state['best'] with a finite float from engine.state.metrics[watch_metric].
+    Returns True if updated.
+    """
+    cur = to_float_scalar((engine.state.metrics or {}).get(watch_metric), strict=False)
+    if not is_finite_float(cur):
+        return False
+    sign = 1.0 if str(mode).lower() == "max" else -1.0
+    best = state.get("best", -float("inf") if sign > 0 else float("inf"))
+    improved = (cur > best) if sign > 0 else (cur < best)
+    if improved:
+        state["best"] = float(cur)
+    return improved
+
+
 __all__ = [
     "Task",
     "PrepareBatch",
     "make_prepare_batch",
     "build_trainer",
     "build_evaluator",
+    "attach_engine_metrics",
     "attach_scheduler",
     "attach_lr_scheduling",
+    "attach_early_stopping",
+    "attach_best_checkpoint",
+    "make_warmup_safe_score_fn",
     "get_label_indices_from_batch",
+    "maybe_update_best",
 ]

@@ -13,7 +13,6 @@ np.random.seed(seed)
 
 import time
 from typing import Tuple
-from collections.abc import Callable
 
 import torch
 from monai.utils import set_determinism
@@ -21,14 +20,15 @@ from ignite.engine import Events
 
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
-from model_registry import MODEL_REGISTRY
-from engine_utils import build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr, get_label_indices_from_batch
+from model_registry import build_model, make_default_loss
+from engine_utils import (build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr, get_label_indices_from_batch,
+                          build_evaluator, attach_val_threshold_search, attach_early_stopping, attach_best_checkpoint,)
 from evaluator_two_pass import attach_two_pass_validation
+from metrics_utils import make_cls_val_metrics
 from optim_factory import get_optimizer, make_scheduler
 from handlers import register_handlers, configure_wandb_step_semantics
 from constants import CHECKPOINT_DIR
 from resume_utils import restore_training_state
-from calibrator import Calibrator, CalConfig
 
 # determinism (CPU side + algorithm choices), safe pre-fork
 torch.backends.cudnn.deterministic = True
@@ -58,23 +58,6 @@ def normalize_arch(name: str | None) -> str:
 def get_task_flags(task: str | None) -> Tuple[bool, bool]:
     t = (task or "multitask").lower()
     return t != "segmentation", t != "classification"
-
-
-def dict_safe(loss: torch.nn.Module | Callable):
-    if not isinstance(loss, torch.nn.Module):
-        return loss
-    bce = torch.nn.BCEWithLogitsLoss
-
-    def _fn(pred, tgt):
-        pred_t = pred.get("cls_out", pred.get("class_logits", pred)) if isinstance(pred, dict) else pred
-        tgt_t = tgt.get("label", tgt.get("y", tgt)) if isinstance(tgt, dict) else tgt
-        if isinstance(loss, bce):
-            val = loss(pred_t, torch.as_tensor(tgt_t).float().view_as(pred_t))
-        else:
-            val = loss(pred_t, torch.as_tensor(tgt_t).long().view(-1))
-        # normalize to dict for engine_utils.coerce_loss_dict
-        return {"loss": val}
-    return _fn
 
 
 @torch.no_grad()
@@ -111,32 +94,14 @@ def run(
 ) -> None:
     # model
     arch = normalize_arch(cfg.get("architecture"))
-    try:
-        wrapper = MODEL_REGISTRY[arch]()
-    except KeyError as e:
-        raise ValueError(f"Unknown architecture '{arch}'.") from e
-
-    # resolve class_counts once (prefer cfg, else dataset attribute)
-    counts = cfg.get("class_counts", None)
-    if counts is None:
-        ds = getattr(train_loader, "dataset", None)
-        # common attribute names used by custom datasets
-        counts = (
-            getattr(ds, "class_counts", None) or getattr(ds, "label_counts", None) or getattr(ds, "counts", None)
-        )
-        if counts is not None:
-            cfg["class_counts"] = counts  # persist for downstream consumers
-    # expose to wrapper so build_model can init bias from priors
-    setattr(wrapper, "class_counts", cfg.get("class_counts"))
-
-    # build concrete torch.nn.Module
-    model = wrapper.build_model(cfg).to(device=device, dtype=torch.float32)
+    # build torch.nn.Module via the registry adapter
+    model = build_model(cfg).to(device=device, dtype=torch.float32)
 
     # optim
     optimizer = get_optimizer(cfg, model)
 
     # flags
-    task = (cfg.get("task") or wrapper.get_supported_tasks()[0]).lower()
+    task = str(cfg.get("task", "multitask")).lower()
     has_cls, has_seg = get_task_flags(task)
 
     # two prepare_batch functions
@@ -147,18 +112,8 @@ def run(
         num_classes=int(cfg.get("num_classes", 2)),
     )
 
-    # loss with explicit class_counts threading
-    loss_fn_core = None
-    try:
-        loss_fn_core = wrapper.get_loss_fn(task=task, cfg=cfg, class_counts=cfg.get("class_counts"))
-    except TypeError:
-        # backward-compat with older signatures
-        try:
-            loss_fn_core = wrapper.get_loss_fn(task, cfg)  # type: ignore
-        except TypeError:
-            loss_fn_core = wrapper.get_loss_fn()           # type: ignore
-    # If a torch.nn.Module is returned, wrap it so training loop can consume dict or tensor
-    loss_fn = dict_safe(loss_fn_core)
+    # loss (generic, uses class_counts for weights/pos_weight)
+    loss_fn = make_default_loss(cfg, class_counts=cfg.get("class_counts"))
 
     # engines
     trainer = build_trainer(
@@ -171,38 +126,193 @@ def run(
         prepare_batch=prepare_batch_std,   # training remains the std path
     )
 
-    # Set cal_init_threshold; fall back to cls_threshold, then threshold
-    init_thr = float(cfg.get("cal_init_threshold", cfg.get("cls_threshold", cfg.get("threshold", 0.5))))
-    # Two-pass evaluator wiring
-    cal = Calibrator(CalConfig(
-        method=str(cfg.get("calibration_method", "youden")),
-        q_bounds=tuple(cfg.get("cal_q_bounds", (0.10, 0.90))),
-        rate_tol=float(cfg.get("cal_rate_tolerance", 0.15)),
-        warmup_epochs=int(cfg.get("cal_warmup_epochs", 2)),
-        auc_floor=float(cfg.get("cal_auc_floor", 0.52)),
-        fallback=str(cfg.get("cal_fallback", "rate_match")),
-        init_threshold=init_thr,
-        ema_beta=float(cfg.get("cal_ema_beta", 0.2)),
-        max_delta=float(cfg.get("cal_max_delta", 0.10)),
-        min_tp=int(cfg.get("cal_min_tp", 10)),
-        bootstraps=int(cfg.get("cal_bootstraps", 0)),
-    ))
-
-    # Two-pass validation: populate trainer.state.metrics each epoch
-    attach_two_pass_validation(
-        trainer=trainer,
-        model=model,
-        val_loader=val_loader,
+    # Standard evaluator used by the two-pass hook (no direct logging here)
+    std_evaluator = build_evaluator(
         device=device,
-        cfg=cfg,
-        calibrator=cal,
+        data_loader=val_loader,
+        network=model,
+        prepare_batch=prepare_batch_std,
+        metrics=None,            # (optional) attach metrics if we have a factory
+        include_seg=has_seg,
+        trainer_for_logging=trainer,
+    )
+    # Optionally compute per-epoch threshold & confusion stats for classification
+    if has_cls:
+        attach_val_threshold_search(evaluator=std_evaluator, mode="acc")
+        val_metrics = make_cls_val_metrics(
+            num_classes=int(cfg.get("num_classes", 2)),
+            decision=str(cfg.get("cls_decision", "threshold")),
+            threshold=float(cfg.get("cls_threshold", 0.5)),
+            positive_index=int(cfg.get("positive_index", 1)),
+        )
+        for k, m in val_metrics.items():
+            m.attach(std_evaluator, k)
+
+    two_pass_enabled = bool(cfg.get("two_pass_val", False))
+    log_calibrated = bool(cfg.get("log_calibrated", True))
+    default_watch = "auc" if has_cls else "dice"
+    watch_metric = cfg.get("watch_metric", default_watch)
+    cal_warmup = int(cfg.get("cal_warmup_epochs", 1))   # for 2-pass gate
+    es_warmup = int(cfg.get("cal_warmup_epochs", 1))   # for early stop (or a separate cfg key)
+
+    def _cast_loggable(v):
+        try:
+            import numpy as _np
+            import torch as _torch
+            if isinstance(v, (int, float, bool, str)):
+                return v
+            if _torch.is_tensor(v):
+                return float(v.item()) if v.numel() == 1 else v.detach().cpu().tolist()
+            if isinstance(v, _np.ndarray):
+                return float(v.item()) if v.size == 1 else v.tolist()
+            return v
+        except Exception:
+            return v
+
+    if not two_pass_enabled:
+        @trainer.on(Events.EPOCH_COMPLETED)
+        def _run_std_val(engine):
+            # 1) run standard evaluator
+            std_evaluator.run(val_loader)
+
+            # 2) build a flat W&B payload with explicit "val/" prefix
+            ep = int(engine.state.epoch)
+            payload = {"trainer/epoch": ep}
+
+            # evaluator metrics (bare names) → "val/<name>"
+            for k, v in (std_evaluator.state.metrics or {}).items():
+                payload[f"val/{k}"] = _cast_loggable(v)
+
+            # (optional) include val loss for dashboards
+            try:
+                vloss = _compute_loss(model, val_loader, loss_fn, prepare_batch_std, device)
+                payload["val/loss"] = float(vloss)
+            except Exception:
+                pass
+
+            if len(payload) > 1:
+                wandb.log(payload)
+    else:
+        # Preferred path: use a TwoPass evaluator with .validate(...) if available
+        two_pass = None
+        _mk = None
+        try:
+            from evaluator_two_pass import make_two_pass_evaluator as _mk  # prefer a factory if present
+        except Exception:
+            _mk = None
+
+        if _mk is not None:
+            try:
+                two_pass = _mk(
+                    calibrator=None,  # pass Calibrator instance if we enable it
+                    task=cfg.get("task", "multitask"),
+                    trainer=trainer,
+                    positive_index=int(cfg.get("positive_index", 1)),
+                    cls_decision=str(cfg.get("cls_decision", "threshold")),
+                    cls_threshold=float(cfg.get("cls_threshold", 0.5)),
+                    num_classes=int(cfg.get("num_classes", 2)),
+                    multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
+                )
+            except Exception:
+                two_pass = None
+
+        if two_pass is not None:
+            @trainer.on(Events.EPOCH_COMPLETED)
+            def _run_two_pass(engine):
+                ep = int(engine.state.epoch)
+                if ep < int(cfg.cal_warmup_epochs):
+                    return
+                # keep std_evaluator fresh for early-stop/ckpt
+                std_evaluator.run(val_loader)
+
+                # two-pass returns: threshold, cls_metrics (dict), seg_metrics (dict)
+                t, cls_m, seg_m = two_pass.validate(
+                    epoch=ep, model=model, val_loader=val_loader, base_rate=None
+                )
+
+                payload = {"trainer/epoch": ep}
+                if log_calibrated and t is not None:
+                    try:
+                        payload["val/cal_thr"] = float(t)
+                    except Exception:
+                        pass
+
+                # merge cls + seg metrics, prefixing with "val/"
+                for k, v in (cls_m or {}).items():
+                    payload[f"val/{k}"] = _cast_loggable(v)
+                for k, v in (seg_m or {}).items():
+                    payload.setdefault(f"val/{k}", _cast_loggable(v))
+
+                # (optional) include val loss
+                try:
+                    vloss = _compute_loss(model, val_loader, loss_fn, prepare_batch_std, device)
+                    payload["val/loss"] = float(vloss)
+                except Exception:
+                    pass
+
+                if len(payload) > 1:
+                    wandb.log(payload)
+
+        else:
+            # Fallback path: keep existing attach_two_pass_validation(..)
+            # It runs std_evaluator under the hood and merges metrics into trainer.state.metrics
+            def _two_pass_collect(engine):
+                std_evaluator.run(val_loader)
+                em = engine.state.metrics = (engine.state.metrics or {})
+                for k, v in (std_evaluator.state.metrics or {}).items():
+                    # scalarize safely
+                    if hasattr(v, "item") and callable(v.item):
+                        v = float(v.item())
+                    em[k] = v
+
+            attach_two_pass_validation(
+                trainer=trainer,
+                two_pass_fn=_two_pass_collect,
+                cfg=cfg,
+            )
+
+            @trainer.on(Events.EPOCH_COMPLETED)
+            def _log_two_pass(engine):
+                ep = int(engine.state.epoch)
+                if ep < cal_warmup:
+                    return
+
+                payload = {"trainer/epoch": ep}
+                # trainer.state.metrics now contains the latest validation metrics
+                for k, v in (engine.state.metrics or {}).items():
+                    payload[f"val/{k}"] = _cast_loggable(v)
+
+                # (optional) include val loss
+                try:
+                    vloss = _compute_loss(model, val_loader, loss_fn, prepare_batch_std, device)
+                    payload["val/loss"] = float(vloss)
+                except Exception:
+                    pass
+
+                if len(payload) > 1:
+                    wandb.log(payload)
+
+    # watch_metric = cfg.get("watch_metric", "bal_acc")
+    watch_metric = cfg.get("watch_metric", "auc")
+    watch_mode = cfg.get("watch_mode", "max")
+    patience = int(cfg.get("early_stop_patience", 5))
+
+    # Early stopping on evaluator completion (warmup-safe)
+    attach_early_stopping(
+        trainer=trainer,
+        evaluator=std_evaluator,
+        metric_key=watch_metric,
+        mode=watch_mode,
+        patience=patience,
+        warmup_epochs=es_warmup,
     )
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def _store_loss(engine):
         loss = _compute_loss(model, val_loader, loss_fn, prepare_batch_std, device)
         engine.state.metrics = engine.state.metrics or {}
-        engine.state.metrics["loss"] = float(loss)
+        # engine.state.metrics["loss"] = float(loss)
+        engine.state.metrics["val_loss"] = float(loss)
 
     # Scheduler: construct + attach (trainer-only)
     scheduler = make_scheduler(cfg=cfg, optimizer=optimizer, train_loader=train_loader)
@@ -215,6 +325,16 @@ def run(
         scheduler=scheduler,
         plateau_metric=cfg.get("plateau_metric", "val_loss"),
         plateau_mode=cfg.get("plateau_mode", "min"),
+    )
+
+    # Best checkpoint (model only, extend 'objects' as needed)
+    attach_best_checkpoint(
+        trainer, std_evaluator, model, optimizer,
+        save_dir=CHECKPOINT_DIR,
+        filename_prefix="best",
+        watch_metric=watch_metric,
+        watch_mode=watch_mode,
+        n_saved=1,
     )
 
     # log LR right AFTER scheduler.step() has run (per epoch).
@@ -234,7 +354,7 @@ def run(
         from debug_utils import debug_batch
         debug_batch(next(iter(train_loader)), model)
 
-    run_id = str(cfg.get("run_id") or (wandb.run.id if wandb.run else time.strftime("%Y%m%d-%H%M%S")))
+    run_id = str(cfg.get("run_id", time.strftime("%Y%m%d-%H%M%S")))
     ckpt_dir = os.path.join(CHECKPOINT_DIR, run_id)
 
     last_epoch = restore_training_state(
@@ -251,12 +371,12 @@ def run(
 
     register_handlers(
         trainer=trainer,
-        evaluator=None,
+        evaluator=std_evaluator,
         model=model,
         optimizer=optimizer,
         out_dir=getattr(cfg, "out_dir", getattr(cfg, "output_dir", "./outputs")),
-        watch_metric=getattr(getattr(cfg, "early_stop", {}), "metric", "val_auc"),
-        watch_mode=getattr(getattr(cfg, "early_stop", {}), "mode", "max"),
+        watch_metric=watch_metric,
+        watch_mode=watch_mode,
         save_last_n=getattr(cfg, "save_last_n", 2),
         wandb_project=getattr(cfg, "wandb_project", None),
         wandb_run_name=getattr(cfg, "run_name", None),
@@ -270,7 +390,7 @@ def run(
 
     if cfg.get("save_final_state", True):
         os.makedirs("outputs/best_model", exist_ok=True)
-        save_path = f"outputs/best_model/{arch}_{wandb.run.id}.pth"
+        save_path = f"outputs/best_model/{arch}_{run_id}.pth"
         torch.save(model.state_dict(), save_path)
         print(f"[INFO] Training complete. Saved: {save_path}")
 

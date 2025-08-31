@@ -6,6 +6,10 @@ metric:
   name: val/auc
   goal: maximize
 
+early_terminate:
+  type: none  # hyperband
+  # min_iter: 6
+
 parameters:
   # ---------- Fixed ----------
   architecture: {value: simple_cnn}
@@ -88,10 +92,6 @@ parameters:
   # Plateau
   plateau_metric: {value: val/loss}
   plateau_mode:   {value: min}
-  patience: {values: [3, 6]}
+  patience: {value: 0}  # {values: [3, 6]}
   factor:   {values: [0.5, 0.3]}
   threshold: {value: 0.0001}
-
-early_terminate:
-  type: hyperband
-  min_iter: 6

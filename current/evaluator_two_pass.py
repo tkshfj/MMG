@@ -6,20 +6,23 @@ import numpy as np
 import torch
 from ignite.engine import Events, Engine
 from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
+# from ignite.metrics import Metric
 from protocols import CalibratorProtocol
+from utils.safe import to_py, labels_to_1d_indices
 from metrics_utils import (
-    labels_to_1d_indices,
     extract_cls_logits_from_any,
     extract_seg_logits_from_any,
     add_confmat,
     promote_vec,
-    to_py,
     get_mask_from_batch,
-    ThresholdBox,
-    make_std_cls_metrics_with_cal_thr,
     seg_confmat_output_transform,
-    positive_score_from_logits
+    positive_score_from_logits,
+    # cls_output_transform,
+    make_std_cls_metrics_with_cal_thr
 )
+
+Loggable = Dict[str, Any]
+TwoPassRunner = Callable[[int], Tuple[float, Dict[str, Any], Dict[str, Any]]]
 
 logger = logging.getLogger(__name__)
 
@@ -79,12 +82,56 @@ def as_bool(x, default: bool = True) -> bool:
     return default
 
 
+class ThresholdBox:
+    def __init__(self, value=0.5):
+        self.value = float(value)
+
+
+# class _PositiveRate(Metric):
+#     """Predicted positive rate under the live decision rule."""
+#     def __init__(self, decision_transform, positive_index=1):
+#         super().__init__(output_transform=decision_transform)
+#         self.pidx = int(positive_index)
+
+#     def reset(self):
+#         self.k = 0
+#         self.n = 0
+
+#     def update(self, output):
+#         y_hat, _ = output
+#         self.k += int((y_hat == self.pidx).sum().item())
+#         self.n += int(y_hat.numel())
+
+#     def compute(self):
+#         return float(self.k) / max(1, self.n)
+
+
+# class _GroundTruthPositiveRate(Metric):
+#     """Ground-truth positive base rate (independent of threshold)."""
+#     def __init__(self, positive_index=1, output_transform=None):
+#         super().__init__(output_transform=output_transform or cls_output_transform)
+#         self.pidx = int(positive_index)
+
+#     def reset(self):
+#         self.k = 0
+#         self.n = 0
+
+#     def update(self, output):
+#         # When output_transform=cls_output_transform, we get (logits, y)
+#         _, y = output
+#         self.k += int((y == self.pidx).sum().item())
+#         self.n += int(y.numel())
+
+#     def compute(self):
+#         return float(self.k) / max(1, self.n)
+
+
 # main evaluator
 class TwoPassEvaluator:
     """
     Mode-aware two-pass evaluator.
     - If has_cls/has_seg is None, the first validate() auto-detects capability from a batch.
-    - Otherwise respects the flags you pass.
+    - Otherwise respects the flags we pass.
     """
     def __init__(
         self,
@@ -105,6 +152,7 @@ class TwoPassEvaluator:
         health_tol: float = 0.35,
         health_need_k: int = 3,
         health_warmup: Optional[int] = None,
+        enable_decision_health: bool = False,
     ):
         self.calibrator = calibrator
         self._trainer = trainer
@@ -121,14 +169,13 @@ class TwoPassEvaluator:
         self._capabilities_frozen = False
         self.seg_threshold = float(seg_threshold)
         self.num_classes = int(num_classes)
-        # live threshold box used by decision-OT metrics
-        self._thr_box = ThresholdBox(value=float(cls_threshold))
-        # Ignite standard evaluator (built lazily)
         self._std_engine: Optional[Engine] = None
         self._current_model = None
+        self.enable_decision_health = enable_decision_health
         self.health_tol = float(health_tol)
         self.health_need_k = int(health_need_k)
-        self.health_warmup = health_warmup
+        self.health_warmup = int(health_warmup) if health_warmup is not None else int(getattr(getattr(calibrator, "cfg", None), "warmup_epochs", 1))
+        self._thr_box = ThresholdBox(value=float(cls_threshold))
         self._watchdog_active: bool = False   # suppress internal health logs when external watchdog is attached
 
     # Public guards
@@ -143,6 +190,7 @@ class TwoPassEvaluator:
     def _compute_cls_metrics(
         self, scores: np.ndarray, labels: np.ndarray, t: float, base_rate: Optional[float]
     ) -> Dict:
+        eps = 1e-9
         pred = (scores >= t).astype(np.int64)
         tp = int(((labels == 1) & (pred == 1)).sum())
         tn = int(((labels == 0) & (pred == 0)).sum())
@@ -151,10 +199,10 @@ class TwoPassEvaluator:
 
         n = max(1, len(labels))
         acc = (tp + tn) / n
-        prec1 = tp / max(1, tp + fp)  # class-1 precision
-        rec1 = tp / max(1, tp + fn)   # class-1 recall
-        prec0 = tn / max(1, tn + fn)  # class-0 precision
-        rec0 = tn / max(1, tn + fp)   # class-0 recall
+        prec1 = tp / (tp + fp + eps)  # class-1 precision
+        rec1 = tp / (tp + fn + eps)  # class-1 recall
+        prec0 = tn / (tn + fn + eps)  # class-0 precision
+        rec0 = tn / (tn + fp + eps)  # class-0 recall
         auc = _safe_auc(labels, scores)
 
         pos_rate = float(pred.mean())
@@ -169,10 +217,6 @@ class TwoPassEvaluator:
             was_bad = (delta > rate_tol)
             self.bad_count = self.bad_count + 1 if was_bad else 0
             if not getattr(self, "_watchdog_active", False):
-                # logger.info(
-                #     "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
-                #     pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
-                # )
                 logger.info(
                     "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
                     pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
@@ -188,7 +232,7 @@ class TwoPassEvaluator:
             "recall_0": rec0,
             "recall_1": rec1,
             "auc": float(auc),
-            "cls_confmat": cm.tolist(),  # canonical key
+            "cls_confmat": cm.tolist(),
             "cls_confmat_00": int(cm[0, 0]),
             "cls_confmat_01": int(cm[0, 1]),
             "cls_confmat_10": int(cm[1, 0]),
@@ -205,7 +249,7 @@ class TwoPassEvaluator:
             return {}
 
         if self.seg_eval_fn is not None:
-            raw = dict(self.seg_eval_fn(model, val_loader))  # whatever your shim returns
+            raw = dict(self.seg_eval_fn(model, val_loader))  # whatever shim returns
             flat: Dict[str, Any] = {}
 
             # Dice / IoU / Loss
@@ -216,7 +260,7 @@ class TwoPassEvaluator:
             if "loss" in raw:
                 flat["loss"] = float(to_py(raw["loss"]))
 
-            # Confusion matrix (any reasonable key you use)
+            # Confusion matrix (any reasonable key we use)
             for k in ("seg_confmat", "confmat", "seg_cm"):
                 if k in raw:
                     add_confmat(flat, "seg_confmat", raw[k])
@@ -568,16 +612,18 @@ class TwoPassEvaluator:
             try:
                 from decision_health import attach_decision_health
                 # warmup: prefer explicit value, else calibrator.cfg.warmup_epochs, else 1
-                warmup = (self.health_warmup if self.health_warmup is not None else int(getattr(getattr(self.calibrator, "cfg", None), "warmup_epochs", 1)))
-                attach_decision_health(
-                    self._std_engine, self._trainer,
-                    num_classes=int(self.num_classes),
-                    positive_index=int(self.pos_idx),
-                    tol=float(self.health_tol),
-                    need_k=int(self.health_need_k),
-                    warmup=int(warmup),
-                    metric_key="cls_confmat",
-                )
+                # warmup = (self.health_warmup if self.health_warmup is not None else int(getattr(getattr(self.calibrator, "cfg", None), "warmup_epochs", 1)))
+                warmup = int(self.health_warmup)
+                if self.enable_decision_health:
+                    attach_decision_health(
+                        self._std_engine, self._trainer,
+                        num_classes=int(self.num_classes),
+                        positive_index=int(self.pos_idx),
+                        tol=float(self.health_tol),
+                        need_k=int(self.health_need_k),
+                        warmup=int(warmup),
+                        metric_key="cls_confmat",
+                    )
             except Exception as e:
                 logger.warning("attach_decision_health(std) failed: %s", e)
 
@@ -592,155 +638,80 @@ class TwoPassEvaluator:
             JaccardIndex(cm=seg_cm).attach(self._std_engine, "iou")
 
 
+# Two-pass validation attach
+def _to_float(v: Any) -> Any:
+    try:
+        if hasattr(v, "item") and callable(v.item):
+            v = v.item()
+    except Exception:
+        pass
+    return float(v) if isinstance(v, (int, float)) else v
+
+
 def attach_two_pass_validation(
     *,
     trainer: Engine,
-    model,
-    val_loader,
-    device: torch.device,
-    cfg: Any,
-    calibrator: Optional[CalibratorProtocol] = None,
-    log_to_wandb: bool = True,
+    run_two_pass: TwoPassRunner,             # closure that calls your two_pass.validate(...)
+    cal_warmup_epochs: int = 1,
+    disable_std_logging: bool = True,        # turn off any existing 1-pass epoch logger
     wandb_prefix: str = "val/",
-) -> TwoPassEvaluator:
+    log_fn: Callable[[Loggable], None] | None = None,  # e.g., wandb.log
+) -> None:
     """
-    Attach a TwoPassEvaluator at EPOCH_COMPLETED.
-    Evaluator does not log; trainer logs exactly once per epoch with step=epoch.
+    Attach a warmup-guarded, idempotent two-pass validation hook.
+
+    - Metrics MUST already be attached to engines with bare names.
+    - This function only orchestrates the second pass and logs a single
+      epoch-level payload with 'val/' prefix (and 'trainer/epoch' step).
     """
-    ev = make_two_pass_evaluator(
-        calibrator=calibrator,
-        task=str(getattr(cfg, "task", cfg.get("task", "multitask"))),
-        trainer=trainer,
-        positive_index=int(getattr(cfg, "positive_index", cfg.get("positive_index", 1))),
-        cls_decision=str(getattr(cfg, "cls_decision", cfg.get("cls_decision", "threshold"))),
-        cls_threshold=float(getattr(cfg, "cls_threshold", cfg.get("cls_threshold", 0.5))),
-        num_classes=int(getattr(cfg, "num_classes", cfg.get("num_classes", 2))),
-        multitask=bool(getattr(cfg, "multitask", cfg.get("multitask", False))),
-    )
+    st = getattr(trainer, "state", None)
+    if st and getattr(st, "_two_pass_attached", False):
+        return  # idempotent
 
-    # Decision health watchdog on the STANDARD pass (uncalibrated)
-    # We can disable via cfg.enable_decision_health = False
-    # enable_health = bool(getattr(cfg, "enable_decision_health", cfg.get("enable_decision_health", True)))
-    # Decision-health watchdog gating & dedupe
-    raw_flag = getattr(cfg, "enable_decision_health", None)
-    if raw_flag is None and isinstance(cfg, dict):
-        raw_flag = cfg.get("enable_decision_health", None)
-    enable_health = as_bool(raw_flag, default=True)
-    if enable_health:
-        # Build the internal standard Ignite evaluator now so we can attach the watchdog
-        # Only build std engine early if classification is present
+    # Optionally remove an existing 1-pass logging hook to prevent double logs
+    if disable_std_logging and st and hasattr(st, "_std_val_hook") and st._std_val_hook:
         try:
-            if getattr(ev, "has_cls", False):
-                ev._ensure_std_engine()  # idempotent
+            trainer.remove_event_handler(st._std_val_hook, Events.EPOCH_COMPLETED)
         except Exception:
             pass
+        st._std_val_hook = None
 
-        std_engine = getattr(ev, "_std_engine", None)
-        already = bool(getattr(getattr(std_engine, "state", None), "_decision_health_attached", False))
-        if std_engine is not None and (not already):
-            from decision_health import attach_decision_health
-            try:
-                attach_decision_health(
-                    std_engine,
-                    trainer,
-                    num_classes=int(getattr(cfg, "num_classes", cfg.get("num_classes", 2))),
-                    positive_index=int(getattr(cfg, "positive_index", cfg.get("positive_index", 1))),
-                    tol=float(getattr(cfg, "decision_health_tol", cfg.get("decision_health_tol", 0.35))),
-                    need_k=int(getattr(cfg, "decision_health_need_k", cfg.get("decision_health_need_k", 3))),
-                    warmup=int(getattr(cfg, "cal_warmup_epochs", cfg.get("cal_warmup_epochs", 1))),
-                    metric_key="cls_confmat",
-                    # terminate=True,
-                )
-                # Mark attached to prevent future duplicates
-                if hasattr(std_engine, "state"):
-                    setattr(std_engine.state, "_decision_health_attached", True)
-                # Let TwoPassEvaluator suppress its duplicate health logs if desired
-                setattr(ev, "_watchdog_active", True)
-            except Exception as e:
-                logger.warning("attach_decision_health(std) failed: %s", e)
-    else:
-        logger.info("Decision health disabled via cfg.enable_decision_health=%r", raw_flag)
+    # Define the epoch-completed hook
+    @trainer.on(Events.EPOCH_COMPLETED)
+    def _two_pass_hook(engine: Engine) -> None:
+        epoch = int(getattr(engine.state, "epoch", 0) or 0)
+        if epoch < int(cal_warmup_epochs):
+            return
 
-    # Remove any previous hook to avoid duplicate logging / step desync
-    old = getattr(trainer.state, "_val_hook_2pass", None)
-    if old is not None:
         try:
-            trainer.remove_event_handler(old, Events.EPOCH_COMPLETED)
+            thr, cls_m, seg_m = run_two_pass(epoch)  # user-supplied runner
         except Exception:
-            pass
-        trainer.state._val_hook_2pass = None
+            # Never crash training due to two-pass
+            logger.debug("two-pass evaluation raised; skipping this epoch", exc_info=True)
+            return
 
-    base_rate = getattr(cfg, "base_rate", cfg.get("base_rate", None))
-
-    # Optional: declare metric step domains once
-    wb = None
-    if log_to_wandb:
-        try:
-            import wandb as _wandb
-            wb = _wandb
-            if not getattr(trainer.state, "_wb_val_defined", False) and getattr(wb, "run", None):
-                wb.define_metric("trainer/epoch")
-                wb.define_metric(f"{wandb_prefix}*", step_metric="trainer/epoch")
-                trainer.state._wb_val_defined = True
-        except Exception:
-            wb = None  # keep training even if wandb not available
-
-    def _to_scalar(v):
-        # Safe conversion for numpy/torch scalars
-        try:
-            import torch
-            if isinstance(v, torch.Tensor):
-                if v.numel() == 1:
-                    return float(v.detach().cpu().item())
-                return v.detach().cpu().tolist()
-        except Exception:
-            pass
-        if isinstance(v, (np.floating, np.integer)):
-            return float(v) if isinstance(v, np.floating) else int(v)
-        return v
-
-    def _build_payload(epoch: int, cls_m: Dict[str, Any], seg_m: Dict[str, Any], t: float) -> Dict[str, Any]:
-        payload: Dict[str, Any] = {"trainer/epoch": int(epoch)}
-        payload[f"{wandb_prefix}cal_thr"] = float(t)
-        for k, v in cls_m.items():
-            payload[f"{wandb_prefix}{k}"] = _to_scalar(v)
-        for k, v in seg_m.items():
+        # Build a flat payload with the 'val/' prefix
+        payload: Loggable = {"trainer/epoch": epoch, f"{wandb_prefix}cal_thr": _to_float(thr)}
+        for k, v in (cls_m or {}).items():
+            payload[f"{wandb_prefix}{k}"] = _to_float(v)
+        for k, v in (seg_m or {}).items():
             key = f"{wandb_prefix}{k}"
             if key not in payload:
-                payload[key] = _to_scalar(v)
-        return payload
+                payload[key] = _to_float(v)
 
-    @trainer.on(Events.EPOCH_COMPLETED)
-    def _run_two_pass(engine: Engine):
-        epoch = int(engine.state.epoch or 0)
-
-        # Ensure model has a device attribute for evaluator (harmless if already set)
-        if not hasattr(model, "device"):
+        if log_fn is not None and len(payload) > 1:
             try:
-                model.device = device
+                log_fn(payload)  # e.g., wandb.log(payload)
             except Exception:
-                pass
+                logger.debug("two-pass logging failed; continuing.", exc_info=True)
 
-        # Evaluate (no logging here)
-        t, cls_metrics, seg_metrics = ev.validate(
-            epoch=epoch, model=model, val_loader=val_loader, base_rate=base_rate
-        )
+        # Optional: expose results to trainer.state.metrics for schedulers/handlers
+        engine.state.metrics = (engine.state.metrics or {})
+        engine.state.metrics.update({**(cls_m or {}), **(seg_m or {}), "cal_thr": _to_float(thr)})
 
-        # Update engine metrics (so schedulers/handlers can read them)
-        engine.state.metrics = engine.state.metrics or {}
-        m = engine.state.metrics
-        m.update({k: _to_scalar(v) for k, v in cls_metrics.items()})
-        m.update({k: _to_scalar(v) for k, v in seg_metrics.items()})
-        m["cal_thr"] = float(t)
-
-        # Single-source logging: epoch step only
-        if log_to_wandb and wb is not None:
-            payload = _build_payload(epoch, cls_metrics, seg_metrics, t)
-            # wb.log(payload, step=epoch)
-            wb.log(payload)
-
-    trainer.state._val_hook_2pass = _run_two_pass
-    return ev
+    if st is not None:
+        st._two_pass_attached = True
+        st._two_pass_hook = _two_pass_hook
 
 
 # build a flat, prefixed payload
@@ -828,3 +799,6 @@ def make_two_pass_evaluator(
         health_tol=float(getattr(getattr(calibrator, "cfg", None), "decision_health_tol", 0.35)),
         health_need_k=int(getattr(getattr(calibrator, "cfg", None), "decision_health_need_k", 3)),
     )
+
+
+__all__ = ["attach_two_pass_validation"]
