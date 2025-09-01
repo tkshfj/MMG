@@ -22,7 +22,7 @@ from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_registry import build_model, make_default_loss
 from engine_utils import (build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
-                          get_label_indices_from_batch, build_evaluator, attach_early_stopping, attach_best_checkpoint,)
+                          get_label_indices_from_batch, build_evaluator, attach_best_checkpoint,)  # attach_early_stopping
 from evaluator_two_pass import attach_two_pass_validation, make_two_pass_evaluator
 from calibration import build_calibrator
 from metrics_utils import make_cls_val_metrics
@@ -247,7 +247,7 @@ def run(
     default_watch = "auc" if has_cls else "dice"
     watch_metric = cfg.get("watch_metric", default_watch)
     cal_warmup = int(cfg.get("cal_warmup_epochs", 1))   # for 2-pass gate
-    es_warmup = int(cfg.get("cal_warmup_epochs", 1))   # for early stop (or a separate cfg key)
+    es_warmup = int(cfg.get("cal_warmup_epochs", 1))     # noqa unused for early stop (or a separate cfg key)
 
     def _cast_loggable(v):
         try:
@@ -381,20 +381,19 @@ def run(
                 if len(payload) > 1:
                     wandb.log(payload)
 
-    # watch_metric = cfg.get("watch_metric", "bal_acc")
     watch_metric = cfg.get("watch_metric", "auc")
     watch_mode = cfg.get("watch_mode", "max")
-    patience = int(cfg.get("early_stop_patience", 5))
+    patience = int(cfg.get("early_stop_patience", 5))  # noqa unused
 
     # Early stopping on evaluator completion (warmup-safe)
-    attach_early_stopping(
-        trainer=trainer,
-        evaluator=std_evaluator,
-        metric_key=watch_metric,
-        mode=watch_mode,
-        patience=patience,
-        warmup_epochs=es_warmup,
-    )
+    # attach_early_stopping(
+    #     trainer=trainer,
+    #     evaluator=std_evaluator,
+    #     metric_key=watch_metric,
+    #     mode=watch_mode,
+    #     patience=patience,
+    #     warmup_epochs=es_warmup,
+    # )
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def _store_loss(engine):
