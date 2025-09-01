@@ -44,20 +44,20 @@ def positive_score_from_logits(logits: Any, positive_index: int = 1) -> torch.Te
     raise ValueError(f"positive_score_from_logits: expected [B] or [B,C], got {tuple(t.shape)}")
 
 
-# def get_mask_from_batch(batch: Mapping[str, Any]) -> Optional[torch.Tensor]:
-#     """
-#     Robustly fetch a segmentation mask from common batch layouts:
-#       - batch["mask"]
-#       - batch["label"]["mask"]
-#     Returns a tensor or None.
-#     """
-#     y_mask = batch.get("mask")
-#     if y_mask is not None:
-#         return y_mask
-#     lab = batch.get("label")
-#     if isinstance(lab, Mapping):
-#         return lab.get("mask")
-#     return None
+def get_mask_from_batch(batch: Mapping[str, Any]) -> Optional[torch.Tensor]:
+    """
+    Robustly fetch a segmentation mask from common batch layouts:
+      - batch["mask"]
+      - batch["label"]["mask"]
+    Returns a tensor or None.
+    """
+    y_mask = batch.get("mask")
+    if y_mask is not None:
+        return y_mask
+    lab = batch.get("label")
+    if isinstance(lab, Mapping):
+        return lab.get("mask")
+    return None
 
 
 def looks_like_cls_logits(t: torch.Tensor) -> bool:
