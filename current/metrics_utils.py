@@ -7,7 +7,7 @@ import torch
 import torch.nn as nn
 import warnings
 from ignite.engine import Events, Engine
-from ignite.metrics import Metric, Accuracy, ROC_AUC, ConfusionMatrix, DiceCoefficient, JaccardIndex, Precision, Recall, MetricsLambda, EpochMetric
+from ignite.metrics import Metric, Accuracy, ROC_AUC, Precision, Recall, ConfusionMatrix, DiceCoefficient, JaccardIndex, MetricsLambda, EpochMetric
 from monai.data.meta_tensor import MetaTensor
 from utils.safe import to_float_scalar, to_tensor, to_py, labels_to_1d_indices
 from functools import partial
@@ -44,20 +44,20 @@ def positive_score_from_logits(logits: Any, positive_index: int = 1) -> torch.Te
     raise ValueError(f"positive_score_from_logits: expected [B] or [B,C], got {tuple(t.shape)}")
 
 
-def get_mask_from_batch(batch: Mapping[str, Any]) -> Optional[torch.Tensor]:
-    """
-    Robustly fetch a segmentation mask from common batch layouts:
-      - batch["mask"]
-      - batch["label"]["mask"]
-    Returns a tensor or None.
-    """
-    y_mask = batch.get("mask")
-    if y_mask is not None:
-        return y_mask
-    lab = batch.get("label")
-    if isinstance(lab, Mapping):
-        return lab.get("mask")
-    return None
+# def get_mask_from_batch(batch: Mapping[str, Any]) -> Optional[torch.Tensor]:
+#     """
+#     Robustly fetch a segmentation mask from common batch layouts:
+#       - batch["mask"]
+#       - batch["label"]["mask"]
+#     Returns a tensor or None.
+#     """
+#     y_mask = batch.get("mask")
+#     if y_mask is not None:
+#         return y_mask
+#     lab = batch.get("label")
+#     if isinstance(lab, Mapping):
+#         return lab.get("mask")
+#     return None
 
 
 def looks_like_cls_logits(t: torch.Tensor) -> bool:
@@ -404,15 +404,15 @@ def make_cls_val_metrics(
         return prob, y_true.long().view(-1)
 
     # Discrete preds (for Acc/Prec/Rec)
-    def _thr_value():
-        return float(threshold()) if callable(threshold) else float(threshold)
+    # def _thr_value():
+    #     return float(threshold()) if callable(threshold) else float(threshold)
 
     def _ot_thresholded(output):
         prob, y_true = _base_ot(output)
         y_hat = (prob >= _resolve_threshold(threshold)).long()
         return y_hat, y_true
 
-    # --- metrics ---
+    # metrics
     acc = Accuracy(output_transform=_ot_thresholded)
     prec = Precision(output_transform=_ot_thresholded, average=True)
     rec = Recall(output_transform=_ot_thresholded, average=True)
@@ -872,9 +872,9 @@ class CalThreshold(Metric):
         return float(np.clip(picked, qlo, qhi))
 
 
-def make_calibration_probe(*, pos_index: int = 1, method: str = "youden") -> dict:
-    """Return a metric dict that computes a scalar threshold each epoch."""
-    return {"cal_thr": CalThreshold(pos_index=pos_index, method=method)}
+# def make_calibration_probe(*, pos_index: int = 1, method: str = "youden") -> dict:
+#     """Return a metric dict that computes a scalar threshold each epoch."""
+#     return {"cal_thr": CalThreshold(pos_index=pos_index, method=method)}
 
 
 def make_metrics(

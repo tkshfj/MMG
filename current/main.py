@@ -23,7 +23,8 @@ from data_utils import build_dataloaders
 from model_registry import build_model, make_default_loss
 from engine_utils import (build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
                           get_label_indices_from_batch, build_evaluator, attach_early_stopping, attach_best_checkpoint,)
-from evaluator_two_pass import attach_two_pass_validation
+from evaluator_two_pass import attach_two_pass_validation, make_two_pass_evaluator
+from calibration import build_calibrator
 from metrics_utils import make_cls_val_metrics
 from optim_factory import get_optimizer, make_scheduler
 from handlers import register_handlers, configure_wandb_step_semantics
@@ -94,7 +95,7 @@ def sanitize_threshold_keys(cfg: dict, strict: bool = True) -> dict:
     """
     import warnings
 
-    # 1) migrate legacy 'threshold' if present (best-effort)
+    # migrate legacy 'threshold' if present (best-effort)
     if "threshold" in cfg:
         val = cfg.get("threshold")
         # If the LR scheduler is plateau and there's no explicit plateau_threshold,
@@ -114,7 +115,7 @@ def sanitize_threshold_keys(cfg: dict, strict: bool = True) -> dict:
         else:
             warnings.warn(msg, RuntimeWarning)
 
-    # 2) ensure we have defaults (optional)
+    # defaults
     cfg.setdefault("cls_threshold", 0.5)
 
     return cfg
@@ -265,7 +266,7 @@ def run(
     if not two_pass_enabled:
         @trainer.on(Events.EPOCH_COMPLETED)
         def _run_std_val(engine):
-            std_evaluator.run(val_loader)
+            # std_evaluator.run(val_loader)
             ep = int(engine.state.epoch)
             payload = {"trainer/epoch": ep}
             payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
@@ -277,28 +278,36 @@ def run(
                 pass
             wandb.log(payload)
     else:
-        # Preferred path: use a TwoPass evaluator with .validate(...) if available
-        two_pass = None
-        _mk = None
+        # use a TwoPass evaluator with .validate(...)
+        calibrator = None
         try:
-            from evaluator_two_pass import make_two_pass_evaluator as _mk  # prefer a factory if present
+            calibrator = build_calibrator(cfg)
         except Exception:
-            _mk = None
+            calibrator = None
 
-        if _mk is not None:
-            try:
-                two_pass = _mk(
-                    calibrator=None,
-                    task=cfg.get("task", "multitask"),
-                    trainer=trainer,
-                    positive_index=int(cfg.get("positive_index", 1)),
-                    cls_decision=str(cfg.get("cls_decision", "threshold")),
-                    cls_threshold=float(cfg.get("cls_threshold", 0.5)),
-                    num_classes=int(cfg.get("num_classes", 2)),
-                    multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
-                )
-            except Exception:
-                two_pass = None
+        two_pass = make_two_pass_evaluator(
+            calibrator=calibrator,
+            task=cfg.get("task", "multitask"),
+            trainer=trainer,
+            positive_index=int(cfg.get("positive_index", 1)),
+            cls_decision=str(cfg.get("cls_decision", "threshold")),
+            cls_threshold=float(cfg.get("cls_threshold", 0.5)),
+            num_classes=int(cfg.get("num_classes", 2)),
+            multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
+        )
+
+        def _runner(epoch: int):
+            # returns (t, cls_metrics, seg_metrics)
+            return two_pass.validate(epoch=epoch, model=model, val_loader=val_loader, base_rate=None)
+
+        attach_two_pass_validation(
+            trainer=trainer,
+            run_two_pass=_runner,
+            cal_warmup_epochs=int(cfg.get("cal_warmup_epochs", 1)),
+            disable_std_logging=True,
+            wandb_prefix="val/",
+            log_fn=wandb.log,
+        )
 
         if two_pass is not None:
             @trainer.on(Events.EPOCH_COMPLETED)
@@ -306,7 +315,7 @@ def run(
                 ep = int(engine.state.epoch)
                 if ep < int(cfg.get("cal_warmup_epochs", 1)):
                     # no calibration yet; still run evaluator with the initial threshold
-                    std_evaluator.run(val_loader)
+                    # std_evaluator.run(val_loader)
 
                     # inline logging (or call helper if you have one)
                     payload = {"trainer/epoch": ep}
@@ -323,7 +332,7 @@ def run(
                 if t is not None:
                     _thr["v"] = float(t)   # update live threshold
                 # Evaluate with the updated threshold
-                std_evaluator.run(val_loader)
+                # std_evaluator.run(val_loader)
                 # Log evaluator metrics (now consistent with cal_thr)
                 payload = {"trainer/epoch": ep, "val/cal_thr": _thr["v"]}
                 payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
@@ -337,7 +346,7 @@ def run(
             # Fallback path: keep existing attach_two_pass_validation(..)
             # It runs std_evaluator under the hood and merges metrics into trainer.state.metrics
             def _two_pass_collect(engine):
-                std_evaluator.run(val_loader)
+                # std_evaluator.run(val_loader)
                 em = engine.state.metrics = (engine.state.metrics or {})
                 for k, v in (std_evaluator.state.metrics or {}).items():
                     # scalarize safely
@@ -463,9 +472,12 @@ def run(
         log_images=getattr(cfg, "log_images", False),
         image_every_n_epochs=getattr(cfg, "image_every_n_epochs", 1),
         image_max_items=getattr(cfg, "image_max_items", 8),
+        attach_validation=False,
+        validation_interval=1,
+        val_loader=val_loader,
     )
 
-    print("[DEBUG] max_epochs (pre-run) =", trainer.state.max_epochs)
+    # print("[DEBUG] max_epochs (pre-run) =", trainer.state.max_epochs)
     trainer.run()
 
     if cfg.get("save_final_state", True):
