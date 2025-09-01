@@ -87,45 +87,6 @@ class ThresholdBox:
         self.value = float(value)
 
 
-# class _PositiveRate(Metric):
-#     """Predicted positive rate under the live decision rule."""
-#     def __init__(self, decision_transform, positive_index=1):
-#         super().__init__(output_transform=decision_transform)
-#         self.pidx = int(positive_index)
-
-#     def reset(self):
-#         self.k = 0
-#         self.n = 0
-
-#     def update(self, output):
-#         y_hat, _ = output
-#         self.k += int((y_hat == self.pidx).sum().item())
-#         self.n += int(y_hat.numel())
-
-#     def compute(self):
-#         return float(self.k) / max(1, self.n)
-
-
-# class _GroundTruthPositiveRate(Metric):
-#     """Ground-truth positive base rate (independent of threshold)."""
-#     def __init__(self, positive_index=1, output_transform=None):
-#         super().__init__(output_transform=output_transform or cls_output_transform)
-#         self.pidx = int(positive_index)
-
-#     def reset(self):
-#         self.k = 0
-#         self.n = 0
-
-#     def update(self, output):
-#         # When output_transform=cls_output_transform, we get (logits, y)
-#         _, y = output
-#         self.k += int((y == self.pidx).sum().item())
-#         self.n += int(y.numel())
-
-#     def compute(self):
-#         return float(self.k) / max(1, self.n)
-
-
 # main evaluator
 class TwoPassEvaluator:
     """
@@ -373,35 +334,34 @@ class TwoPassEvaluator:
 
         # Classification
         if self.has_cls:
-            # Gather scores for calibration only (AUC/metrics come from Ignite)
+            # Gather scores/labels for calibration
             scores, labels = self._gather_scores_labels(model, val_loader, device)
 
-            # Helpful debug to catch flat/degenerate scores
-            try:
-                logger.debug(
-                    "scores min/max/mean: %.4f/%.4f/%.4f",
-                    float(scores.min()), float(scores.max()), float(scores.mean())
-                )
-            except Exception:
-                pass
-
-            # Derive base_rate if not provided
+            # derive base rate if not provided
             if base_rate is None and labels.size > 0:
                 base_rate = float((labels == 1).mean())
 
-            # Pick threshold (optional calibrator)
+            # ---- Calibrate threshold if available
             if self.calibrator is not None:
-                t = float(self.calibrator.pick(epoch, scores, labels, base_rate))
+                try:
+                    picked = self.calibrator.pick(epoch, scores, labels, base_rate)
+                    # accept float or (t, aux) tuple/list
+                    t_new = picked[0] if isinstance(picked, (tuple, list)) else picked
+                    t = float(t_new)
+                except Exception:
+                    logger.warning("calibrator.pick failed; using previous threshold", exc_info=True)
             else:
-                t = float(self.last_threshold) if self.last_threshold is not None else 0.5
+                # no calibrator -> keep previous if any
+                if self.last_threshold is not None:
+                    t = float(self.last_threshold)
 
             self.last_threshold = t
 
-            # Inject the new threshold into the decision OT and run Ignite evaluator
+            # Inject threshold into the evaluator used for metrics
             self._ensure_std_engine()
             self._thr_box.value = float(t)
 
-            # Allow the step to see the correct device/pin hint
+            # Allow the step to know device & pinning
             pin = bool(getattr(val_loader, "pin_memory", False))
             setattr(self._std_engine.state, "device", device)
             setattr(self._std_engine.state, "non_blocking", pin)
@@ -410,10 +370,10 @@ class TwoPassEvaluator:
             self._std_engine.run(val_loader)
             raw = dict(self._std_engine.state.metrics or {})
 
-            # Ingest classification metrics robustly (handles vectors/scalars)
+            # Ingest metrics (scalars, vectors, confmat)
             _ingest_cls_metric_map(cls_metrics, raw)
 
-            # Add the threshold we used
+            # record the threshold we used this epoch
             cls_metrics["threshold"] = float(t)
             cls_metrics["cal_thr"] = float(t)
 
@@ -598,11 +558,19 @@ class TwoPassEvaluator:
         # attach metrics
         # Classification (AUC from raw logits; thresholded metrics via thr_box)
         if self.has_cls:
+            # thr_getter = lambda: float(self._thr_box.value)
+
+            def _thr_getter() -> float:
+                # Always read the most recent threshold set in validate()
+                return float(self._thr_box.value)
+
             cls_metrics = make_std_cls_metrics_with_cal_thr(
                 num_classes=self.num_classes,
-                pos_index=self.pos_idx,
-                thr_box=self._thr_box,
+                decision="threshold",
+                positive_index=self.pos_idx,
+                thr_getter=_thr_getter,
             )
+
             for name, m in cls_metrics.items():
                 m.attach(self._std_engine, name)
 
@@ -611,8 +579,7 @@ class TwoPassEvaluator:
         if self._trainer is not None:
             try:
                 from decision_health import attach_decision_health
-                # warmup: prefer explicit value, else calibrator.cfg.warmup_epochs, else 1
-                # warmup = (self.health_warmup if self.health_warmup is not None else int(getattr(getattr(self.calibrator, "cfg", None), "warmup_epochs", 1)))
+
                 warmup = int(self.health_warmup)
                 if self.enable_decision_health:
                     attach_decision_health(

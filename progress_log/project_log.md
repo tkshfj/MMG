@@ -2,6 +2,8 @@
 
 # 2025-09-01
 - Refactor MONAI pipeline: dynamic thresholded metrics, split param-groups, two-pass calibrate-then-evaluate, and robust W&B confusion-matrix logging.
+- Refactor MONAI pipeline: eliminate uplicate validation
+- Refactor two-pass validation: wire calibrator threshold into metrics via callable getter, serialize confusion matrices for W&B, and disable duplicate auto-validation.
 
 # 2025-08-31
 - WIP stabilize: warmup-gate two-pass & health logs; remove tensor truthiness
