@@ -6,8 +6,8 @@ metric:
   name: val/auc
   goal: maximize
 
-early_terminate:
-  type: none  # hyperband
+# early_terminate:
+  # type: none  # hyperband
   # min_iter: 6
 
 parameters:
@@ -94,4 +94,5 @@ parameters:
   plateau_mode:   {value: min}
   patience: {value: 0}  # {values: [3, 6]}
   factor:   {values: [0.5, 0.3]}
-  threshold: {value: 0.0001}
+  plateau_threshold:
+    values: [0.0001, 0.0005]  # only meaningful when lr_scheduler=plateau

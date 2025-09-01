@@ -21,8 +21,8 @@ from ignite.engine import Events
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_registry import build_model, make_default_loss
-from engine_utils import (build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr, get_label_indices_from_batch,
-                          build_evaluator, attach_val_threshold_search, attach_early_stopping, attach_best_checkpoint,)
+from engine_utils import (build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
+                          get_label_indices_from_batch, build_evaluator, attach_early_stopping, attach_best_checkpoint,)
 from evaluator_two_pass import attach_two_pass_validation
 from metrics_utils import make_cls_val_metrics
 from optim_factory import get_optimizer, make_scheduler
@@ -85,6 +85,72 @@ def _compute_loss(model, val_loader, loss_fn, prepare_batch, device) -> float:
     return total / max(1, count)
 
 
+def sanitize_threshold_keys(cfg: dict, strict: bool = True) -> dict:
+    """
+    - For classification: only 'cls_threshold' is allowed.
+    - For segmentation:   'seg_threshold' is allowed.
+    - For LR plateau:     use 'plateau_threshold' (or 'lr_plateau_threshold').
+    Any bare 'threshold' key is rejected (or migrated with a warning if strict=False).
+    """
+    import warnings
+
+    # 1) migrate legacy 'threshold' if present (best-effort)
+    if "threshold" in cfg:
+        val = cfg.get("threshold")
+        # If the LR scheduler is plateau and there's no explicit plateau_threshold,
+        # assume the old key belonged to the LR scheduler (most common collision).
+        if str(cfg.get("lr_scheduler", cfg.get("lr_strategy", ""))).lower() in ("plateau", "reduce", "reducelronplateau"):
+            cfg.setdefault("plateau_threshold", float(val))
+        else:
+            # Otherwise, assume it was a (badly named) classification decision threshold.
+            cfg.setdefault("cls_threshold", float(val))
+
+        # Drop the ambiguous key and warn/error
+        cfg.pop("threshold", None)
+        msg = "Found legacy key 'threshold'; migrated to "
+        msg += "'plateau_threshold' (LR) or 'cls_threshold' (classification). Please remove 'threshold' from configs/sweeps."
+        if strict:
+            raise ValueError(msg)
+        else:
+            warnings.warn(msg, RuntimeWarning)
+
+    # 2) ensure we have defaults (optional)
+    cfg.setdefault("cls_threshold", 0.5)
+
+    return cfg
+
+
+def _to_wandb_value(v):
+    if torch.is_tensor(v):
+        v = v.detach().cpu()
+        return float(v.item()) if v.numel() == 1 else v.tolist()
+    if isinstance(v, np.ndarray):
+        return float(v.item()) if v.size == 1 else v.tolist()
+    return v
+
+
+def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
+    out = {}
+    for k, v in (metrics_dict or {}).items():
+        key = f"{prefix}{k}"
+        if "confmat" in k:  # handles cls_confmat and seg_confmat
+            # store the whole matrix as list AND per-cell scalars for easy charting
+            if torch.is_tensor(v):
+                cm = v.detach().cpu().to(torch.int64).numpy()
+            elif isinstance(v, np.ndarray):
+                cm = v.astype(np.int64)
+            else:
+                cm = np.asarray(v, dtype=np.int64)
+            out[key] = cm.tolist()
+            C = int(cm.shape[0])
+            for i in range(C):
+                for j in range(C):
+                    out[f"{key}_{i}{j}"] = int(cm[i, j])
+        else:
+            out[key] = _to_wandb_value(v)
+    return out
+
+
 def run(
     cfg: dict,
     train_loader,
@@ -97,8 +163,29 @@ def run(
     # build torch.nn.Module via the registry adapter
     model = build_model(cfg).to(device=device, dtype=torch.float32)
 
-    # optim
-    optimizer = get_optimizer(cfg, model)
+    use_split = str(cfg.get("param_groups", "single")).lower() == "split"
+
+    if use_split and all(hasattr(model, m) for m in ("backbone_parameters", "head_parameters")):
+        base_lr = float(cfg.get("base_lr", cfg.get("lr", 1e-3)))
+        head_mult = float(cfg.get("head_multiplier", 10.0))
+        wd = float(cfg.get("weight_decay", 1e-4))
+
+        bb = list(model.backbone_parameters())
+        hd = list(model.head_parameters())
+
+        # If something is wrong with grouping, fall back gracefully
+        if len(bb) == 0 or len(hd) == 0:
+            print("[WARN] split requested but backbone/head groups are empty; using single group.")
+            parameters_for_opt = model.parameters()
+        else:
+            parameters_for_opt = [
+                {"params": bb, "lr": base_lr, "weight_decay": wd},             # backbone
+                {"params": hd, "lr": base_lr * head_mult, "weight_decay": wd},             # head
+            ]
+    else:
+        parameters_for_opt = model.parameters()
+
+    optimizer = get_optimizer(cfg, parameters_for_opt, verbose=True)
 
     # flags
     task = str(cfg.get("task", "multitask")).lower()
@@ -126,30 +213,36 @@ def run(
         prepare_batch=prepare_batch_std,   # training remains the std path
     )
 
+    # live threshold store
+    _thr = {"v": float(cfg.get("cls_threshold", 0.5))}
+
+    def get_thr():
+        return _thr["v"]
+
     # Standard evaluator used by the two-pass hook (no direct logging here)
     std_evaluator = build_evaluator(
         device=device,
         data_loader=val_loader,
         network=model,
         prepare_batch=prepare_batch_std,
-        metrics=None,            # (optional) attach metrics if we have a factory
+        metrics=None,
         include_seg=has_seg,
         trainer_for_logging=trainer,
     )
     # Optionally compute per-epoch threshold & confusion stats for classification
     if has_cls:
-        attach_val_threshold_search(evaluator=std_evaluator, mode="acc")
+        # attach_val_threshold_search(evaluator=std_evaluator, mode="acc")
         val_metrics = make_cls_val_metrics(
             num_classes=int(cfg.get("num_classes", 2)),
             decision=str(cfg.get("cls_decision", "threshold")),
-            threshold=float(cfg.get("cls_threshold", 0.5)),
+            threshold=get_thr,
             positive_index=int(cfg.get("positive_index", 1)),
         )
         for k, m in val_metrics.items():
             m.attach(std_evaluator, k)
 
     two_pass_enabled = bool(cfg.get("two_pass_val", False))
-    log_calibrated = bool(cfg.get("log_calibrated", True))
+    log_calibrated = bool(cfg.get("log_calibrated", True))  # noqa unused
     default_watch = "auc" if has_cls else "dice"
     watch_metric = cfg.get("watch_metric", default_watch)
     cal_warmup = int(cfg.get("cal_warmup_epochs", 1))   # for 2-pass gate
@@ -172,26 +265,17 @@ def run(
     if not two_pass_enabled:
         @trainer.on(Events.EPOCH_COMPLETED)
         def _run_std_val(engine):
-            # 1) run standard evaluator
             std_evaluator.run(val_loader)
-
-            # 2) build a flat W&B payload with explicit "val/" prefix
             ep = int(engine.state.epoch)
             payload = {"trainer/epoch": ep}
-
-            # evaluator metrics (bare names) → "val/<name>"
-            for k, v in (std_evaluator.state.metrics or {}).items():
-                payload[f"val/{k}"] = _cast_loggable(v)
-
-            # (optional) include val loss for dashboards
+            payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
+            # threshold and (optional) val loss
+            payload["val/threshold"] = float(get_thr())
             try:
-                vloss = _compute_loss(model, val_loader, loss_fn, prepare_batch_std, device)
-                payload["val/loss"] = float(vloss)
+                payload["val/loss"] = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
             except Exception:
                 pass
-
-            if len(payload) > 1:
-                wandb.log(payload)
+            wandb.log(payload)
     else:
         # Preferred path: use a TwoPass evaluator with .validate(...) if available
         two_pass = None
@@ -204,7 +288,7 @@ def run(
         if _mk is not None:
             try:
                 two_pass = _mk(
-                    calibrator=None,  # pass Calibrator instance if we enable it
+                    calibrator=None,
                     task=cfg.get("task", "multitask"),
                     trainer=trainer,
                     positive_index=int(cfg.get("positive_index", 1)),
@@ -218,41 +302,37 @@ def run(
 
         if two_pass is not None:
             @trainer.on(Events.EPOCH_COMPLETED)
-            def _run_two_pass(engine):
+            def _run_two_pass_then_eval(engine):
                 ep = int(engine.state.epoch)
-                if ep < int(cfg.cal_warmup_epochs):
-                    return
-                # keep std_evaluator fresh for early-stop/ckpt
-                std_evaluator.run(val_loader)
+                if ep < int(cfg.get("cal_warmup_epochs", 1)):
+                    # no calibration yet; still run evaluator with the initial threshold
+                    std_evaluator.run(val_loader)
 
-                # two-pass returns: threshold, cls_metrics (dict), seg_metrics (dict)
-                t, cls_m, seg_m = two_pass.validate(
-                    epoch=ep, model=model, val_loader=val_loader, base_rate=None
-                )
-
-                payload = {"trainer/epoch": ep}
-                if log_calibrated and t is not None:
+                    # inline logging (or call helper if you have one)
+                    payload = {"trainer/epoch": ep}
+                    payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
+                    payload["val/threshold"] = float(get_thr())
                     try:
-                        payload["val/cal_thr"] = float(t)
+                        payload["val/loss"] = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
                     except Exception:
                         pass
-
-                # merge cls + seg metrics, prefixing with "val/"
-                for k, v in (cls_m or {}).items():
-                    payload[f"val/{k}"] = _cast_loggable(v)
-                for k, v in (seg_m or {}).items():
-                    payload.setdefault(f"val/{k}", _cast_loggable(v))
-
-                # (optional) include val loss
+                    wandb.log(payload)
+                    return
+                # Calibrate to get t
+                t, cls_m, seg_m = two_pass.validate(epoch=ep, model=model, val_loader=val_loader, base_rate=None)
+                if t is not None:
+                    _thr["v"] = float(t)   # update live threshold
+                # Evaluate with the updated threshold
+                std_evaluator.run(val_loader)
+                # Log evaluator metrics (now consistent with cal_thr)
+                payload = {"trainer/epoch": ep, "val/cal_thr": _thr["v"]}
+                payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
+                payload["val/threshold"] = float(get_thr())
                 try:
-                    vloss = _compute_loss(model, val_loader, loss_fn, prepare_batch_std, device)
-                    payload["val/loss"] = float(vloss)
+                    payload["val/loss"] = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
                 except Exception:
                     pass
-
-                if len(payload) > 1:
-                    wandb.log(payload)
-
+                wandb.log(payload)
         else:
             # Fallback path: keep existing attach_two_pass_validation(..)
             # It runs std_evaluator under the hood and merges metrics into trainer.state.metrics
@@ -410,6 +490,7 @@ if __name__ == "__main__":
 
     with wandb.init(config={}, dir="outputs") as wb_run:
         cfg = load_and_validate_config(dict(wandb.config))
+        cfg = sanitize_threshold_keys(cfg, strict=True)
         cfg.setdefault("run_id", wb_run.id)
         cfg.setdefault("run_name", wb_run.name)
         configure_wandb_step_semantics()
@@ -442,25 +523,13 @@ if __name__ == "__main__":
         # derive class_counts from TRAIN set (not val)
         C = int(cfg.get("num_classes", 2))
         train_ds = getattr(train_loader, "dataset", None)
-        counts = (
-            cfg.get("class_counts") or getattr(train_ds, "class_counts", None) or getattr(train_ds, "label_counts", None) or getattr(train_ds, "counts", None)
-        )
-        # sanity: length and sum must match TRAIN set
-        if counts is not None:
-            counts = list(map(int, counts))
-            if len(counts) != C or sum(counts) != len(train_ds):
-                print(f"[WARN] ignoring provided class_counts={counts} "
-                      f"(expected len={C}, sum={len(train_ds)}); recomputing from TRAIN")
-                counts = None
-        # recompute from TRAIN if needed (single pass)
-        if counts is None:
-            import torch
-            agg = torch.zeros(C, dtype=torch.long)
-            for batch in train_loader:
-                y = get_label_indices_from_batch(batch, num_classes=C)
-                agg += torch.bincount(y, minlength=C)
-            counts = agg.tolist()
-            print(f"[INFO] computed train class_counts={counts}")
+        import torch
+        agg = torch.zeros(C, dtype=torch.long)
+        for batch in train_loader:
+            y = get_label_indices_from_batch(batch, num_classes=C)
+            agg += torch.bincount(y, minlength=C)
+        counts = agg.tolist()
+        print(f"[INFO] computed train class_counts={counts}")
         cfg["class_counts"] = counts
 
         # Run training with explicit loaders & device

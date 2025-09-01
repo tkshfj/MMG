@@ -51,13 +51,6 @@ def _extract_param_groups(parameters: Any) -> List[Dict[str, Any]]:
 
 # Optimizer factory
 def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = False) -> Optimizer:
-    """
-    Config-driven optimizer:
-      - optimizer: adamw|adam|sgd|rmsprop  (case-insensitive)
-      - lr: float (required unless every param group already provides lr)
-      - weight_decay: float
-      - momentum: float (for sgd/rmsprop)
-    """
     name = str(cfg.get("optimizer", "adamw")).lower()
     lr = cfg.get("lr", None)
     weight_decay = float(cfg.get("weight_decay", 1e-4))
@@ -71,6 +64,45 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
     }
     if name not in opts:
         raise ValueError(f"Unknown optimizer: {name}")
+
+    # handle split param groups here if a model was passed in
+    # and we can identify head vs backbone
+    if str(cfg.get("param_groups", "single")).lower() == "split" and hasattr(parameters, "parameters"):
+        base_lr = float(cfg.get("lr", 1e-3))
+        head_multiplier = float(cfg.get("head_multiplier", 5.0))
+
+        # Prefer explicit helpers on the model (as we suggested for ViT)
+        head_params = None
+        backbone_params = None
+        if hasattr(parameters, "head_parameters") and callable(getattr(parameters, "head_parameters")):
+            head_params = list(parameters.head_parameters())
+        if hasattr(parameters, "backbone_parameters") and callable(getattr(parameters, "backbone_parameters")):
+            backbone_params = list(parameters.backbone_parameters())
+
+        # Fallback: if only head is known, derive backbone as the complement
+        if head_params is not None and backbone_params is None:
+            head_ids = {id(p) for p in head_params}
+            backbone_params = [p for p in parameters.parameters() if getattr(p, "requires_grad", False) and id(p) not in head_ids]
+
+        # Last fallback: if neither provided, just don’t split
+        if head_params and backbone_params:
+            # We can omit per-group weight_decay (the global kwarg will apply).
+            param_groups = [
+                {"params": backbone_params},                                   # uses global lr=base_lr
+                {"params": head_params, "lr": base_lr * head_multiplier},      # head gets boosted LR
+            ]
+            opt_kwargs: Dict[str, Any] = {"weight_decay": weight_decay}
+            if name in ("sgd", "rmsprop"):
+                opt_kwargs["momentum"] = momentum
+
+            optimizer = opts[name](param_groups, lr=base_lr, **opt_kwargs)
+            if verbose:
+                total = sum(p.numel() for p in parameters.parameters() if getattr(p, "requires_grad", False))
+                print("[optim] num trainable params:", total)
+                for i, g in enumerate(optimizer.param_groups):
+                    n = sum(getattr(p, "numel", lambda: 0)() for p in g["params"])
+                    print(f"[optim] group {i}: {len(g['params'])} tensors, {n} params, lr={g.get('lr')}")
+            return optimizer
 
     param_groups = _extract_param_groups(parameters)
     opt_kwargs: Dict[str, Any] = {"weight_decay": weight_decay}
@@ -129,12 +161,15 @@ def get_scheduler(cfg: Mapping[str, Any], optimizer: Optimizer) -> SchedulerSpec
         return spec
 
     if strat == "plateau":
+        plateau_thr = float(
+            cfg.get("plateau_threshold", cfg.get("lr_plateau_threshold", 1e-4))
+        )
         sch = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
             mode=str(cfg.get("plateau_mode", "min")).lower(),
             patience=int(cfg.get("patience", 3)),
             factor=float(cfg.get("factor", 0.5)),
-            threshold=float(cfg.get("threshold", 1e-4)),
+            threshold=plateau_thr,
             threshold_mode=str(cfg.get("threshold_mode", "rel")).lower(),  # 'rel' or 'abs'
             cooldown=int(cfg.get("cooldown", 0)),
         )
@@ -197,7 +232,7 @@ def make_scheduler(cfg: dict, optimizer: torch.optim.Optimizer, train_loader=Non
         mode = str(cfg.get("plateau_mode", "min"))
         factor = float(cfg.get("factor", 0.5))
         patience = int(cfg.get("patience", 3))
-        threshold = float(cfg.get("threshold", 1e-4))
+        threshold = float(cfg.get("plateau_threshold", cfg.get("lr_plateau_threshold", 1e-4)))
         # verbose = bool(cfg.get("plateau_verbose", False))
         return torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode=mode, factor=factor, patience=patience, threshold=threshold

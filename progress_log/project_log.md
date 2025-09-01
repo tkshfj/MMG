@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-09-01
+- Refactor MONAI pipeline: dynamic thresholded metrics, split param-groups, two-pass calibrate-then-evaluate, and robust W&B confusion-matrix logging.
+
 # 2025-08-31
 - WIP stabilize: warmup-gate two-pass & health logs; remove tensor truthiness
 - Savepoint as of 2025-08-30

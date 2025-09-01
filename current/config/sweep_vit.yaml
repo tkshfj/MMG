@@ -6,12 +6,8 @@ metric:
   name: val/auc
   goal: maximize
 
-early_terminate:
-  type: none  # hyperband
-  # min_iter: 6
-
 parameters:
-  # Fixed experiment knobs
+  # Fixed knobs
   architecture: {value: vit}
   task: {value: classification}
   run_cap: {value: 20}
@@ -28,13 +24,11 @@ parameters:
   # Two-pass validation / calibration
   two_pass_val: {value: true}
   log_calibrated: {value: true}
-
   calibration_method:
     values: ["youden", "f1", "rate_match"]
   cal_q_bounds: {value: [0.10, 0.90]}
   cal_min_tp: {values: [5, 10, 20]}
   cal_bootstraps: {values: [0, 25]}
-
   cal_warmup_epochs: {values: [1, 2, 3]}
   cal_init_threshold: {values: [0.40, 0.50, 0.60]}
   cal_ema_beta: {values: [0.10, 0.20, 0.30]}
@@ -48,12 +42,11 @@ parameters:
   input_shape: {value: [256, 256]}
   patch_size: {value: 16}
   num_classes: {value: 2}
-  class_counts: {value: [331, 232]}
   class_balance: {value: inverse}
   batch_size: {values: [32, 64]}
 
   # Model (ViT)
-  hidden_size: {values: [384, 512, 768]}
+  hidden_size: {values: [384, 768]}  # both divisible by 6/8/12
   mlp_dim: {values: [1536, 2048, 3072]}
   num_layers: {values: [8, 10, 12]}
   num_heads: {values: [6, 8, 12]}
@@ -62,10 +55,13 @@ parameters:
     min: 0.18
     max: 0.24
 
-  # Loss weighting
-  alpha: {values: [1.0, 2.0]}
-  beta:  {values: [0.5, 1.0]}
-  multi_weight: {value: 0.65}
+  # Classification
+  binary_single_logit: {value: true}
+  binary_bce_from_two_logits: {value: false}
+  cls_loss: {value: auto}
+  cls_decision: {value: threshold}
+  cls_threshold: {values: [0.4, 0.5, 0.6]}
+  positive_index: {value: 1}
 
   # Optimizer / weight decay
   optimizer: {value: adamw}
@@ -74,21 +70,19 @@ parameters:
     min: 0.00001
     max: 0.00005
 
-  # Param-group strategy
-  param_groups: {values: ["single", "split"]}
+  # Param-group strategy (exercise split path)
+  param_groups: {value: split}  # or values: [single, split]
+  base_lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0003
+  head_multiplier: {values: [5, 10, 15]}
 
-  # Single-group LR
+  # Single-group LR (ignored when split groups are provided, kept for completeness)
   lr:
     distribution: log_uniform_values
     min: 0.00003
     max: 0.0008
-
-  # Split LRs
-  base_lr:
-    distribution: log_uniform_values
-    min: 0.00002
-    max: 0.0001
-  head_multiplier: {values: [5.0, 10.0, 15.0]}
 
   # LR scheduler
   lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
@@ -97,24 +91,16 @@ parameters:
   T_max: {value: 40}
   eta_min: {value: 0.0}
 
-  # Warmup params
+  # Warmup params (used by warmcos / onecycle-like)
   warmup_epochs: {values: [0, 2, 3]}
   warmup_start_factor: {values: [0.1, 0.2]}
 
-  # Plateau params
+  # Plateau params (only meaningful when lr_scheduler=plateau)
   plateau_metric: {value: val/loss}
   plateau_mode:   {value: min}
-  patience: {value: 0}  # {values: [3, 6]}
+  patience: {value: 0}
   factor:   {values: [0.5, 0.3]}
-  threshold: {value: 0.0001}
-
-  # Classification decision defaults
-  binary_single_logit: {value: true}
-  binary_bce_from_two_logits: {value: false}
-  cls_loss: {value: auto}
-  cls_decision:  {value: threshold}
-  cls_threshold: {value: 0.5}
-  positive_index: {value: 1}
+  plateau_threshold: {values: [0.0001, 0.0005]}
 
   # Binary with BCE, keep two logits:
   # num_classes: 2
@@ -134,4 +120,3 @@ parameters:
   # num_classes: 3  # or more
   # cls_loss: "ce"
   # binary_single_logit: false
-
