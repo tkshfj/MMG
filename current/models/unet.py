@@ -1,6 +1,6 @@
 # unet.py
 import logging
-from typing import Any, List, Dict, Callable, Sequence, Tuple
+from typing import Any, List, Dict, Sequence, Tuple
 
 from models.model_base import BaseModel
 from metrics_utils import seg_output_transform
@@ -74,10 +74,6 @@ class UNetModel(BaseModel):
 
     def get_supported_tasks(self) -> List[str]:
         return ["segmentation"]
-
-    def get_seg_output_transform(self) -> Callable:
-        # Standard logits -> (y_pred, y_true) for segmentation metrics
-        return seg_output_transform
 
     def get_handler_kwargs(self) -> Dict[str, Any]:
         # Keep minimal and uniform with other wrappers

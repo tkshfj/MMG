@@ -19,27 +19,6 @@ class ModelRegistryProtocol(ABC):
         """Return a torch.nn.Module."""
         pass
 
-    # Output transforms (factories or callables are fine)
-    @abstractmethod
-    def get_cls_output_transform(self) -> Callable:
-        pass
-
-    @abstractmethod
-    def get_seg_output_transform(self) -> Callable:
-        pass
-
-    @abstractmethod
-    def get_auc_output_transform(self) -> Callable:
-        pass
-
-    @abstractmethod
-    def get_cls_confmat_output_transform(self) -> Callable:
-        pass
-
-    @abstractmethod
-    def get_seg_confmat_output_transform(self) -> Callable:
-        pass
-
     # Capabilities
     @abstractmethod
     def get_supported_tasks(self) -> List[str]:

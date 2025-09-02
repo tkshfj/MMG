@@ -1,6 +1,6 @@
 # densenet121.py
 import logging
-from typing import Any, List, Dict, Callable
+from typing import Any, List, Dict
 
 import torch
 from models.model_base import BaseModel
@@ -53,10 +53,6 @@ class DenseNet121Model(BaseModel):
     def get_supported_tasks(self) -> List[str]:
         # Classification only
         return ["classification"]
-
-    def get_cls_output_transform(self) -> Callable:
-        # Provide the standard logits->labels transform for metrics
-        return cls_output_transform
 
     def get_handler_kwargs(self) -> Dict[str, Any]:
         # Keep a minimal, uniform signature with other wrappers

@@ -4,14 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from protocols import ModelRegistryProtocol
-from metrics_utils import (
-    cls_output_transform,
-    auc_output_transform,
-    seg_output_transform,
-    cls_confmat_output_transform,
-    seg_confmat_output_transform,
-    make_metrics,
-)
+from metrics_utils import make_default_cls_output_transforms, make_metrics
 
 
 # class-balanced weighting (Effective Number of Samples)
@@ -142,26 +135,6 @@ class BaseModel(ModelRegistryProtocol):
         except TypeError:
             return None
 
-    # Output transforms
-    def get_output_transform(self):
-        return self.get_cls_output_transform()
-
-    def get_cls_output_transform(self):
-        return cls_output_transform
-
-    def get_cls_confmat_output_transform(self):
-        return cls_confmat_output_transform
-
-    def get_auc_output_transform(self):
-        return auc_output_transform
-
-    def get_seg_output_transform(self):
-        return seg_output_transform
-
-    def get_seg_confmat_output_transform(self):
-        return seg_confmat_output_transform
-
-    # task-aware metrics factory
     def get_metrics(
         self,
         config: Optional[dict] = None,
@@ -170,23 +143,15 @@ class BaseModel(ModelRegistryProtocol):
         has_cls: Optional[bool] = None,
         has_seg: Optional[bool] = None,
     ) -> Dict[str, Any]:
-        """
-        Build a task-aware metrics dict for Ignite:
-        - classification only: cls metrics (+ loss CE)
-        - segmentation only:   seg metrics (+ loss CE over indices)
-        - multitask:           both sets (+ unified loss with combined loss_fn)
-        Uses explicit decision rule for Acc/Prec/Recall/CM; AUC stays threshold-free.
-        """
         cfg = self._cfg(config)
 
-        # infer task flags (explicit args override inferred)
+        # infer task flags
         t = (task if task is not None else self._cfg_get(cfg, "task", "multitask")).lower()
         inferred_has_cls = t in ("classification", "multitask")
         inferred_has_seg = t in ("segmentation", "multitask")
         has_cls = inferred_has_cls if has_cls is None else bool(has_cls)
         has_seg = inferred_has_seg if has_seg is None else bool(has_seg)
         multitask = (t == "multitask") and has_cls and has_seg
-
         if not (has_cls or has_seg):
             raise ValueError("get_metrics: at least one of classification/segmentation must be enabled.")
 
@@ -196,7 +161,7 @@ class BaseModel(ModelRegistryProtocol):
         if has_seg:
             tasks.append("segmentation")
 
-        # class counts
+        # classes
         cls_classes = int(self.get_num_classes(cfg))
         seg_classes = self._get("seg_out_channels", None, cfg)
         if seg_classes is None:
@@ -205,49 +170,38 @@ class BaseModel(ModelRegistryProtocol):
             seg_classes = cls_classes
         seg_classes = max(2, int(seg_classes))
 
-        # optional transform factories (pass through directly if present)
-        cls_ot_factory = getattr(self, "get_cls_output_transform", None)
-        auc_ot_factory = getattr(self, "get_auc_output_transform", None)
-        seg_cm_ot_factory = getattr(self, "get_seg_confmat_output_transform", None)
+        # decision settings
+        cls_decision = str(cfg.get("cls_decision", "threshold")).lower()  # "threshold" | "argmax"
+        cls_threshold = cfg.get("cls_threshold", 0.5)  # float or callable allowed downstream
+        positive_index = int(cfg.get("positive_index", 1))
+        seg_thr = float(cfg.get("seg_threshold", 0.5))
+
+        # Classification OTs
+        cls_ots = make_default_cls_output_transforms(
+            decision=cls_decision,
+            threshold=cls_threshold,
+            positive_index=positive_index,
+        )
+        # AUC uses base OT; no model hook needed
+        auc_ot = cls_ots.base
 
         # optional combined loss for multitask
         loss_fn = self._resolve_loss_for("multitask", cfg) if multitask else None
 
-        # decision settings (config-driven)
-        cls_decision = str(cfg.get("cls_decision", "threshold")).lower()   # "argmax" | "threshold"
-        cls_threshold = float(cfg.get("cls_threshold", 0.5))
-        positive_index = int(cfg.get("positive_index", 1))
-
-        # bind seg_threshold to ConfusionMatrix output_transform
-        # Prefer a config-wired partial of seg_confmat_output_transform so the chosen
-        # threshold (e.g., 0.35) actually controls discretization for binary seg.
-        import functools
-        import inspect
-        seg_thr = float(cfg.get("seg_threshold", 0.5))
-        # Try to reuse a model-provided factory if it supports "threshold", otherwise fall back.
-        if callable(seg_cm_ot_factory):
-            try:
-                params = inspect.signature(seg_cm_ot_factory).parameters
-                if "threshold" in params:
-                    seg_cm_ot = functools.partial(seg_cm_ot_factory, threshold=seg_thr)
-                else:
-                    seg_cm_ot = functools.partial(seg_confmat_output_transform, threshold=seg_thr)
-            except (TypeError, ValueError):
-                seg_cm_ot = functools.partial(seg_confmat_output_transform, threshold=seg_thr)
-        else:
-            seg_cm_ot = functools.partial(seg_confmat_output_transform, threshold=seg_thr)
-
-        # assemble metrics
+        # Assemble with explicit OTs
         metrics = make_metrics(
             tasks=tasks,
             num_classes=cls_classes,
             seg_num_classes=seg_classes,
             loss_fn=loss_fn,
-            cls_ot=cls_ot_factory,  # None | factory | callable(output)->(y_pred, y)
-            auc_ot=auc_ot_factory,
-            seg_cm_ot=seg_cm_ot,
+            # classification
+            cls_ot=cls_ots.thresholded,  # Acc/Prec/Rec
+            auc_ot=auc_ot,  # ROC_AUC (probability-based)
+            # segmentation
+            seg_cm_ot=seg_thr,
+            # decisions (for internal CM construction, etc.)
             multitask=multitask,
-            cls_decision=cls_decision,  # explicit decision for Acc/Prec/Recall/CM
+            cls_decision=cls_decision,
             cls_threshold=cls_threshold,
             positive_index=positive_index,
         )

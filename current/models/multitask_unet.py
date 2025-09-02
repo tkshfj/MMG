@@ -59,7 +59,7 @@ class MultitaskUNetModel(nn.Module):
         self._cfg = dict(cfg)
         self._cfg.update({k: v for k, v in kwargs.items() if k not in self._cfg})
 
-    # ---- encoder bottleneck capture -------------------------------------------------
+    # encoder bottleneck capture
     def _register_bottleneck_hook(self, bottleneck_channels: int) -> None:
         Conv = nn.Conv3d if self.spatial_dims == 3 else nn.Conv2d
         last = None
@@ -73,7 +73,7 @@ class MultitaskUNetModel(nn.Module):
     def _save_bottleneck(self, module: nn.Module, inputs, output: torch.Tensor) -> None:
         self._bottleneck = output
 
-    # ---- forward -------------------------------------------------------------------
+    # forward
     def forward(self, batch: Dict[str, torch.Tensor] | torch.Tensor) -> Dict[str, torch.Tensor]:
         x = batch["image"] if isinstance(batch, dict) else batch
         self._bottleneck = None

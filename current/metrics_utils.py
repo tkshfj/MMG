@@ -1,19 +1,21 @@
 # metrics_utils.py
 from __future__ import annotations
 
-from typing import Any, Callable, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union
+from dataclasses import dataclass
+from functools import partial
 import numpy as np
 import torch
-import torch.nn as nn
+# import torch.nn as nn
 import warnings
 from ignite.engine import Events, Engine
-from ignite.metrics import Metric, Accuracy, ROC_AUC, Precision, Recall, ConfusionMatrix, DiceCoefficient, JaccardIndex, MetricsLambda, EpochMetric
+from ignite.metrics import ConfusionMatrix, Precision, Recall, Accuracy, ROC_AUC, MetricsLambda
+from ignite.metrics import Metric, EpochMetric, DiceCoefficient, JaccardIndex
 from monai.data.meta_tensor import MetaTensor
 from utils.safe import to_float_scalar, to_tensor, to_py, labels_to_1d_indices
-from functools import partial
 
 
-# eval helpers
+# Helpers
 def _first_not_none(m: Mapping[str, Any], keys: tuple[str, ...]):
     """Return the first present key whose value is not None."""
     for k in keys:
@@ -292,6 +294,59 @@ def train_loss_output_transform(output: Any) -> dict[str, float]:
         return {"loss": f if f is not None else 0.0}
 
 
+def _resolve_threshold(thr: Union[float, Callable[[], float]]) -> float:
+    return float(thr() if callable(thr) else thr)
+
+
+# Standard classification output transforms
+@dataclass(frozen=True)
+class ClsOTs:
+    """Pack of classification output transforms."""
+    base: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]        # (prob_pos, y)
+    thresholded: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]  # (y_hat, y)
+    cm: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]          # ([B,C] scores, y)
+
+
+def make_default_cls_output_transforms(
+    *,
+    decision: str = "threshold",
+    threshold: Union[float, Callable[[], float]] = 0.5,
+    positive_index: int = 1,
+) -> ClsOTs:
+    """
+    Default, model-agnostic classification transforms with a single source of truth
+    for the decision rule and threshold.
+    """
+    def _prob_pos_from_logits(logits: torch.Tensor) -> torch.Tensor:
+        # [B] or [B,1] -> sigmoid; [B,2] -> softmax[:, pos]
+        if logits.ndim == 1 or (logits.ndim == 2 and logits.size(-1) == 1):
+            return torch.sigmoid(logits.view(-1))
+        if logits.ndim == 2 and logits.size(-1) == 2:
+            return torch.softmax(logits, dim=-1)[:, positive_index]
+        raise ValueError(f"[cls_ot] Unexpected logits shape {list(logits.shape)}")
+
+    def base(output):
+        logits, y_true = cls_output_transform(output)
+        prob = _prob_pos_from_logits(logits)
+        return prob, y_true.long().view(-1)
+
+    def thresholded(output):
+        prob, y_true = base(output)
+        thr = _resolve_threshold(threshold)
+        y_hat = (prob >= thr).long()
+        return y_hat, y_true
+
+    # CM: use the threshold-aware transform we already standardized
+    cm = partial(
+        cls_confmat_output_transform_thresholded,
+        decision=decision,
+        threshold=threshold,
+        positive_index=positive_index,
+    )
+
+    return ClsOTs(base=base, thresholded=thresholded, cm=cm)
+
+
 def cls_output_transform(output: Any) -> tuple[torch.Tensor, torch.Tensor]:
     """Return (logits, labels)."""
     logits, y = _extract_logits_and_labels(output)
@@ -338,10 +393,6 @@ def auc_output_transform(*, positive_index: int = 1, num_classes: int = 2):
     return partial(cls_proba_output_transform, positive_index=positive_index, num_classes=num_classes)
 
 
-def _as_callable(x: float | Callable[[], float]) -> Callable[[], float]:
-    return x if callable(x) else (lambda: float(x))
-
-
 def cls_confmat_output_transform_thresholded(
     output,
     *,
@@ -368,7 +419,6 @@ def cls_confmat_output_transform_thresholded(
         return logits.float(), y_true
 
     # binary/threshold path: build 2-channel one-hot so CM’s argmax == thresholded decision
-    # thr = float(threshold() if callable(threshold) else threshold)
     thr = _resolve_threshold(threshold)
     # get P(pos)
     p_pos = positive_score_from_logits(logits, positive_index=positive_index).view(-1)
@@ -377,59 +427,72 @@ def cls_confmat_output_transform_thresholded(
     return y_pred, y_true
 
 
-def _resolve_threshold(t):
-    return t() if callable(t) else float(t)
-
-
 def make_cls_val_metrics(
     num_classes: int,
     decision: str = "threshold",
     threshold: Union[float, Callable[[], float]] = 0.5,
     positive_index: int = 1,
-):
+) -> Dict[str, Any]:
     import torch
-    from ignite.metrics import ConfusionMatrix, Precision, Recall, Accuracy, ROC_AUC
+    # NOTE: assume cls_output_transform and cls_confmat_output_transform_thresholded
+    # are imported from metrics_utils in this module scope.
 
     def _prob_pos(logits: torch.Tensor) -> torch.Tensor:
+        # [B] or [B,1] -> sigmoid; [B,2] -> softmax[:, positive_index]
         if logits.ndim == 1 or (logits.ndim == 2 and logits.size(-1) == 1):
             return torch.sigmoid(logits.view(-1))
-        if logits.size(-1) == 2:
+        if logits.ndim == 2 and logits.size(-1) == 2:
             return torch.softmax(logits, dim=-1)[:, positive_index]
         raise ValueError(f"Unexpected logits shape {list(logits.shape)}")
 
-    # Base OT -> (prob_pos, y)
     def _base_ot(output):
-        logits, y_true = cls_output_transform(output)   # <— robust parser
+        logits, y_true = cls_output_transform(output)
         prob = _prob_pos(logits)
         return prob, y_true.long().view(-1)
-
-    # Discrete preds (for Acc/Prec/Rec)
-    # def _thr_value():
-    #     return float(threshold()) if callable(threshold) else float(threshold)
 
     def _ot_thresholded(output):
         prob, y_true = _base_ot(output)
         y_hat = (prob >= _resolve_threshold(threshold)).long()
         return y_hat, y_true
 
-    # metrics
+    # Scalar classification metrics (share same decision rule)
     acc = Accuracy(output_transform=_ot_thresholded)
     prec = Precision(output_transform=_ot_thresholded, average=True)
     rec = Recall(output_transform=_ot_thresholded, average=True)
-
-    # AUC uses probabilities
     auc = ROC_AUC(output_transform=_base_ot)
 
-    # ConfusionMatrix needs [B, C, ...]. Use the dedicated transform that builds one-hot
+    # Confusion matrix uses the threshold-aware transform
     cm_ot = partial(
         cls_confmat_output_transform_thresholded,
         decision=decision,
-        threshold=threshold,         # supports callable
+        threshold=threshold,  # callable supported
         positive_index=positive_index,
     )
     cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot)
 
-    return {"acc": acc, "prec": prec, "recall": rec, "auc": auc, "cls_confmat": cm}
+    # CM-derived rates (exposed as metrics for the caller to attach)
+    def _pred_pos_rate(m):
+        tn, fp, fn, tp = m[0, 0], m[0, 1], m[1, 0], m[1, 1]
+        total = tn + fp + fn + tp
+        return (fp + tp) / (total + (total == 0))
+
+    def _gt_pos_rate(m):
+        tn, fp, fn, tp = m[0, 0], m[0, 1], m[1, 0], m[1, 1]
+        total = tn + fp + fn + tp
+        return (fn + tp) / (total + (total == 0))
+
+    pos_rate = MetricsLambda(_pred_pos_rate, cm)
+    gt_posrate = MetricsLambda(_gt_pos_rate, cm)
+
+    return {
+        "acc": acc,
+        "prec": prec,
+        "recall": rec,
+        "auc": auc,
+        "cls_confmat": cm,
+        "pos_rate": pos_rate,
+        "gt_pos_rate": gt_posrate,
+    }
 
 
 def make_std_cls_metrics_with_cal_thr(
@@ -465,48 +528,75 @@ def make_std_cls_metrics_with_cal_thr(
     return metrics
 
 
-# Classification confusion-matrix transform (logits -> Ignite will argmax)
 def cls_confmat_output_transform(output: Any):
     """
-    Return (y_pred_scores[B,C], y_true[B]) for ConfusionMatrix.
-    Expands single-logit binary to two logits; upgrades index vectors to one-hot logits.
+    DEPRECATED: use cls_confmat_output_transform_thresholded so CM aligns with the
+    thresholded decision used by Accuracy/Precision/Recall/AUC.
     """
-    logits, y_true = cls_output_transform(output)  # ideally logits, but may be indices in some pipes
+    import warnings
+    warnings.warn(
+        "cls_confmat_output_transform is deprecated; "
+        "use cls_confmat_output_transform_thresholded.",
+        DeprecationWarning, stacklevel=2,
+    )
+    return cls_confmat_output_transform_thresholded(
+        output, decision="threshold", threshold=0.5, positive_index=1
+    )
 
-    # labels -> [B] int64
-    if hasattr(y_true, "as_tensor"):
-        y_true = y_true.as_tensor()
-    y_true = torch.as_tensor(y_true, dtype=torch.long).view(-1)
 
-    # logits/scores -> [B, C]
-    if hasattr(logits, "as_tensor"):
-        logits = logits.as_tensor()
-    logits = torch.as_tensor(logits)
+def seg_confmat_output_transform_default(output: Any, *, threshold: float = 0.5):
+    """
+    Output transform for segmentation ConfusionMatrix.
+    Returns (y_pred_indices[B,H,W], y_true_indices[B,H,W]).
+    - Multiclass: argmax over channel C
+    - Binary (C==1 or no channel dim): sigmoid + threshold
+    Accepts common prediction dicts: {"seg_logits": ...} or {"seg": ...} or {"pred": ...}
+    Accepts y_true as indices [B,H,W] or one-hot [B,C,H,W].
+    """
+    # Expect Ignite-style (y_pred, y_true) from evaluator output_transform
+    pred, y_true = output
 
-    if logits.ndim == 1:
-        # Could be single-logit or class indices; detect by dtype/range
-        if logits.dtype in (torch.long, torch.int64, torch.int32):
-            # class indices -> one-hot scores
-            num_classes = int(max(int(logits.max().item()) + 1, 2))
-            y_pred = torch.zeros(logits.size(0), num_classes, dtype=torch.float32, device=logits.device)
-            y_pred.scatter_(1, logits.view(-1, 1), 1.0)
-            return y_pred, y_true
-        # single-logit -> two logits
-        logits = logits.to(torch.float32)
-        y_pred = torch.stack([-logits, logits], dim=1)
-        return y_pred, y_true
+    # pull logits/probs tensor
+    seg = None
+    if isinstance(pred, dict):
+        for k in ("seg_logits", "seg", "pred"):
+            if k in pred and torch.is_tensor(pred[k]):
+                seg = pred[k]
+                break
+    elif torch.is_tensor(pred):
+        seg = pred
 
-    if logits.ndim == 2 and logits.shape[1] == 1:
-        logits = logits.to(torch.float32)
-        y_pred = torch.cat([-logits, logits], dim=1)
-        return y_pred, y_true
+    if seg is None:
+        raise KeyError("[seg_cm_ot] could not find segmentation logits (seg_logits/seg/pred).")
 
-    if logits.ndim != 2:
-        # flatten any stray dims; CM only needs class axis
-        b = logits.shape[0]
-        logits = logits.view(b, -1)
+    if seg.ndim < 3:
+        raise ValueError(f"[seg_cm_ot] unexpected seg shape {tuple(seg.shape)}; need [B,H,W] or [B,C,H,W].")
 
-    return logits.to(torch.float32), y_true
+    # Normalize y_true to indices
+    y = y_true
+    if torch.is_tensor(y):
+        if y.ndim == 4 and y.size(1) > 1:
+            y = y.argmax(dim=1)
+        elif y.ndim == 4 and y.size(1) == 1:
+            y = y.squeeze(1)
+        elif y.ndim == 3:
+            y = y
+        else:
+            raise ValueError(f"[seg_cm_ot] unexpected y_true shape {tuple(y.shape)}.")
+    else:
+        raise TypeError("[seg_cm_ot] y_true must be a tensor.")
+
+    # Discretize prediction
+    if seg.ndim == 4 and seg.size(1) > 1:
+        # multiclass
+        y_hat = seg.argmax(dim=1).long()
+    else:
+        # binary (C==1 or missing C)
+        if seg.ndim == 4 and seg.size(1) == 1:
+            seg = seg.squeeze(1)
+        y_hat = (torch.sigmoid(seg) >= float(threshold)).long()
+
+    return y_hat, y.long()
 
 
 def seg_output_transform(
@@ -872,81 +962,70 @@ class CalThreshold(Metric):
         return float(np.clip(picked, qlo, qhi))
 
 
-# def make_calibration_probe(*, pos_index: int = 1, method: str = "youden") -> dict:
-#     """Return a metric dict that computes a scalar threshold each epoch."""
-#     return {"cal_thr": CalThreshold(pos_index=pos_index, method=method)}
-
-
 def make_metrics(
     *,
     tasks,
     num_classes: int,
     cls_decision: str = "threshold",
-    cls_threshold: float | Callable[[], float] = 0.5,
+    cls_threshold=0.5,  # float or callable
     positive_index: int = 1,
-    seg_num_classes: Optional[int] = None,
-    loss_fn: Optional[nn.Module] = None,
+    seg_num_classes: int | None = None,
+    seg_threshold: float = 0.5,
+    loss_fn=None,
+    cls_ot=None,   # thresholded (y_hat, y)
+    auc_ot=None,   # base (prob, y)
+    seg_cm_ot=None,
     multitask: bool = False,
-) -> dict[str, Metric]:
-    """
-    Attach-only factory: returns a dict[name -> Metric] with BARE names.
-    The caller adds 'val/' when logging.
-    """
-    tasks = set(tasks or [])
-    has_cls = "classification" in tasks or multitask
-    has_seg = "segmentation" in tasks or multitask
+) -> dict[str, Any]:
+    metrics: dict[str, Any] = {}
 
-    metrics: dict[str, Metric] = {}
+    # classification
+    if "classification" in tasks or multitask:
+        acc = Accuracy(output_transform=cls_ot)
+        prec = Precision(output_transform=cls_ot, average=True)
+        rec = Recall(output_transform=cls_ot, average=True)
+        auc = ROC_AUC(output_transform=auc_ot)
+        # CM: build from same decision/threshold inside a helper we already have
+        cm_ot = cls_confmat_output_transform_thresholded(
+            decision=cls_decision,
+            threshold=cls_threshold,
+            positive_index=positive_index,
+        )
+        cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot)
 
-    # Classification block
-    if has_cls:
-        thr_getter = cls_threshold if callable(cls_threshold) else (lambda: float(cls_threshold))
-        dec_ot = partial(
-            cls_decision_output_transform,
-            decision=str(cls_decision).lower(),
-            threshold=thr_getter,
-            positive_index=int(positive_index),
-        )
-        proba_ot = partial(
-            cls_proba_output_transform,
-            positive_index=int(positive_index),
-            num_classes=int(num_classes),
-        )
-        cm_ot = partial(  # make CM consistent with the decision rule
-            cls_confmat_output_transform_thresholded,
-            decision=str(cls_decision).lower(),
-            threshold=thr_getter,
-            positive_index=int(positive_index),
-        )
+        # CM-derived rates
+        def _pred_pos_rate(m):
+            tn, fp, fn, tp = m[0, 0], m[0, 1], m[1, 0], m[1, 1]
+            tot = tn + fp + fn + tp
+            return (fp + tp) / (tot + (tot == 0))
 
-        if int(num_classes) <= 2:
-            auc_metric = ROC_AUC(output_transform=proba_ot)
-        else:
-            def _sk_auc(y_pred, y_true):
-                from sklearn.metrics import roc_auc_score
-                return roc_auc_score(y_true, y_pred, average="macro", multi_class="ovr")
-            auc_metric = EpochMetric(_sk_auc, output_transform=proba_ot)
+        def _gt_pos_rate(m):
+            tn, fp, fn, tp = m[0, 0], m[0, 1], m[1, 0], m[1, 1]
+            tot = tn + fp + fn + tp
+            return (fn + tp) / (tot + (tot == 0))
+
+        pos_rate = MetricsLambda(_pred_pos_rate, cm)
+        gt_posrate = MetricsLambda(_gt_pos_rate, cm)
 
         metrics.update({
-            "acc": Accuracy(output_transform=dec_ot),
-            "prec": Precision(output_transform=dec_ot, average=(int(num_classes) <= 2)),
-            "recall": Recall(output_transform=dec_ot, average=(int(num_classes) <= 2)),
-            "auc": auc_metric,
-            "cls_confmat": ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot),
+            "acc": acc, "prec": prec, "recall": rec, "auc": auc,
+            "cls_confmat": cm, "pos_rate": pos_rate, "gt_pos_rate": gt_posrate
         })
 
-    # Segmentation block
-    if has_seg:
-        nc = max(2, int(seg_num_classes) if seg_num_classes is not None else 2)
-        _cm = ConfusionMatrix(num_classes=nc, output_transform=seg_confmat_output_transform)
-        metrics.update({
-            "dice": DiceCoefficient(cm=_cm),
-            "iou": JaccardIndex(cm=_cm),
-            "seg_confmat": _cm,
-        })
+    # segmentation
+    if "segmentation" in tasks or multitask:
+        # ConfusionMatrix over seg classes
+        _seg_cm_ot = seg_cm_ot or partial(seg_confmat_output_transform_default, threshold=float(seg_threshold))
+        seg_cm = ConfusionMatrix(num_classes=int(seg_num_classes or num_classes), output_transform=_seg_cm_ot)
+        dice = DiceCoefficient(cm=seg_cm)
+        iou = JaccardIndex(cm=seg_cm)
 
-    # Optional combined score (if both present)
-    if has_cls and has_seg and "auc" in metrics and "dice" in metrics:
+        metrics.update({"dice": dice, "iou": iou, "seg_confmat": seg_cm})
+
+    # loss metrics wiring
+
+    # Combined score (if both present)
+    if ("classification" in tasks and "segmentation" in tasks or multitask) and "auc" in metrics and "dice" in metrics:
         eps = 1e-8
         w = 0.65  # keep default; or pull from cfg where we call this
         metrics["multi"] = MetricsLambda(
