@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-09-02
+- Unify metrics: centralize thresholded output transforms, drop hook, deprecate legacy confusion matrix
+
 # 2025-09-01
 - Refactor MONAI pipeline: dynamic thresholded metrics, split param-groups, two-pass calibrate-then-evaluate, and robust W&B confusion-matrix logging.
 - Refactor MONAI pipeline: eliminate uplicate validation
