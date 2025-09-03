@@ -1,7 +1,6 @@
 # vit.py
 import logging
 from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Tuple
-
 import torch
 import torch.nn as nn
 from monai.networks.nets import ViT
@@ -28,37 +27,6 @@ def _normalize_img_size(
     raise ValueError(
         f"input_shape {shape} incompatible with spatial_dims={spatial_dims} and in_channels={in_channels}"
     )
-
-
-# inside your ViT nn.Module class
-def backbone_parameters(self) -> Iterator[torch.nn.Parameter]:
-    """
-    All trainable params EXCEPT the classification head.
-    Adjust the prefixes if your head is named differently.
-    """
-    head_prefixes: Tuple[str, ...] = ("head", "cls_head", "classifier")
-    for name, p in self.named_parameters():
-        if not p.requires_grad:
-            continue
-        if any(name.startswith(prefix) for prefix in head_prefixes):
-            continue
-        yield p
-
-
-def head_parameters(self) -> Iterator[torch.nn.Parameter]:
-    """
-    Only the classification head params.
-    """
-    # Try common head names in order
-    for attr in ("head", "cls_head", "classifier"):
-        if hasattr(self, attr):
-            mod = getattr(self, attr)
-            for p in mod.parameters():
-                if p.requires_grad:
-                    yield p
-            return
-    # Fallback: nothing matches → empty iterator
-    return iter(())
 
 
 class ViTModel(nn.Module):
@@ -134,6 +102,57 @@ class ViTModel(nn.Module):
             dropout_rate=dropout,
         )
 
+        # Optional head-level dropout (before the final Linear)
+        # Use cfg["head_dropout"] if provided; else reuse model dropout
+        head_p = float(cfg.get("head_dropout", dropout))
+        if head_p > 0.0:
+            head_attr = next((c for c in ("classification_head", "head", "cls_head", "classifier") if hasattr(self.net, c)), None)
+            head_mod = getattr(self.net, head_attr) if head_attr is not None else None
+            if isinstance(head_mod, nn.Linear):
+                in_features = head_mod.in_features
+                out_features = head_mod.out_features
+                new_head = nn.Sequential(
+                    nn.LayerNorm(in_features),
+                    nn.Dropout(p=head_p),
+                    nn.Linear(in_features, out_features, bias=True),
+                )
+                # copy existing weights to preserve initialization
+                with torch.no_grad():
+                    new_head[-1].weight.copy_(head_mod.weight)
+                    if head_mod.bias is not None:
+                        new_head[-1].bias.copy_(head_mod.bias)
+                setattr(self.net, head_attr, new_head)
+            elif isinstance(head_mod, nn.Sequential) and isinstance(list(head_mod.children())[-1], nn.Linear):
+                # wrap existing stack by inserting LN/Dropout before final Linear
+                last: nn.Linear = list(head_mod.children())[-1]  # type: ignore
+                in_features, out_features = last.in_features, last.out_features
+                pre = nn.Sequential(*list(head_mod.children())[:-1])
+                new_head = nn.Sequential(
+                    pre,
+                    nn.LayerNorm(in_features),
+                    nn.Dropout(p=head_p),
+                    nn.Linear(in_features, out_features, bias=True),
+                )
+                with torch.no_grad():
+                    new_head[-1].weight.copy_(last.weight)
+                    if last.bias is not None:
+                        new_head[-1].bias.copy_(last.bias)
+                setattr(self.net, head_attr, new_head)
+            else:
+                logger.info("Head dropout requested (p=%.3f) but no linear head found; skipping.", head_p)
+
+        # Bias init for single-logit binary head (stabilizes early training)
+        # Expect TRAIN class counts: class_counts = (neg, pos)
+        cc = cfg.get("class_counts", None)
+        if cc is not None and out_dim == 1:
+            try:
+                neg, pos = float(cc[0]), float(cc[1])
+                denom = max(1.0, neg + pos)
+                pos_prior = max(1e-6, min(1.0 - 1e-6, pos / denom))
+                self._init_binary_bias_from_prior(pos_prior)
+            except Exception as e:
+                logger.warning("Bias init skipped (class_counts=%s): %s", cc, e)
+
         # Keep a snapshot for downstream utilities
         self._cfg = dict(cfg)
         self._cfg.update({k: v for k, v in kwargs.items() if k not in self._cfg})
@@ -158,7 +177,8 @@ class ViTModel(nn.Module):
     def _init_binary_bias_from_prior(self, pos_prior: float):
         eps = 1e-4
         p = min(max(float(pos_prior), eps), 1 - eps)
-        b = torch.tensor([torch.log(torch.tensor(p / (1 - p)))], dtype=torch.float32)
+        import math
+        b = torch.tensor([math.log(torch.tensor(p / (1 - p)))], dtype=torch.float32)
         # Try to find the final linear layer
         for m in reversed(list(self.net.modules())):
             if isinstance(m, nn.Linear) and m.out_features == 1 and m.bias is not None:
@@ -166,6 +186,40 @@ class ViTModel(nn.Module):
                     m.bias.copy_(b)
                 logger.info("Initialized binary head bias to %.4f (pos_prior=%.4f).", b.item(), p)
                 break
+
+    def _head_module(self) -> Optional[nn.Module]:
+        for attr in ("classification_head", "head", "cls_head", "classifier"):
+            if hasattr(self.net, attr):
+                return getattr(self.net, attr)
+        return None
+
+    def backbone_parameters(self) -> Iterator[torch.nn.Parameter]:
+        """
+        All trainable params EXCEPT the classification head.
+        Adjust the prefixes if head is named differently.
+        """
+        head_prefixes: Tuple[str, ...] = ("head", "cls_head", "classifier")
+        for name, p in self.named_parameters():
+            if not p.requires_grad:
+                continue
+            if any(name.startswith(prefix) for prefix in head_prefixes):
+                continue
+            yield p
+
+    def head_parameters(self) -> Iterator[torch.nn.Parameter]:
+        """
+        Only the classification head params.
+        """
+        # Try common head names in order
+        for attr in ("head", "cls_head", "classifier"):
+            if hasattr(self, attr):
+                mod = getattr(self, attr)
+                for p in mod.parameters():
+                    if p.requires_grad:
+                        yield p
+                return
+        # Fallback: nothing matches → empty iterator
+        return iter(())
 
     def forward(self, batch: Dict[str, torch.Tensor] | torch.Tensor) -> Dict[str, torch.Tensor]:
         x = batch["image"] if isinstance(batch, dict) else batch

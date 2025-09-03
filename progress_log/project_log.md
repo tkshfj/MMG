@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-09-03
+- Refactor ViT: guard head lookup, support Sequential heads, compute bias with math.log, and move robust head/backbone param helpers into the class.
+
 # 2025-09-02
 - Unify metrics: centralize thresholded output transforms, drop hook, deprecate legacy confusion matrix
 
