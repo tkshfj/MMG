@@ -411,7 +411,7 @@ def run(
         evaluator=None,  # two-pass writes into trainer.state.metrics
         optimizer=optimizer,
         scheduler=scheduler,
-        plateau_metric=cfg.get("plateau_metric", "val/loss"),
+        plateau_metric=str(cfg.get("plateau_metric", "val/loss")),
         plateau_source="trainer",
     )
 

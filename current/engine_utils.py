@@ -633,10 +633,10 @@ def attach_scheduler(
         return cos
 
     if strategy in ("plateau", "reduce_on_plateau", "reduce_lr_on_plateau"):
-        mode = str(cfg.get("plateau_mode", "max")).lower()
+        mode = str(cfg.get("plateau_mode", "min")).lower()
         patience = int(cfg.get("patience", 5))
         factor = float(cfg.get("factor", 0.5))
-        threshold = float(cfg.get("threshold", 1e-4))
+        threshold = float(cfg.get("plateau_threshold", 1e-4))
 
         sched = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer,
@@ -645,7 +645,11 @@ def attach_scheduler(
             factor=factor,
             threshold=threshold,
         )
-        logger.info("Use attach_lr_scheduling(...) to step ReduceLROnPlateau from trainer after eval.")
+        setattr(sched, "_plateau_metric", str(cfg.get("plateau_metric", "val/loss")))
+        logger.info(
+            "ReduceLROnPlateau created: mode=%s, patience=%d, factor=%.3g, threshold=%.3g, metric=%s",
+            mode, patience, factor, threshold, getattr(sched, "_plateau_metric")
+        )
         return sched
 
     raise ValueError(f"Unknown lr_strategy='{strategy}'")
@@ -686,6 +690,7 @@ def attach_lr_scheduling(
     scheduler,
     *,
     plateau_metric: str | None = None,
+    plateau_mode: str | None = None,
     plateau_source: Literal["auto", "evaluator", "trainer"] = "auto",
 ) -> None:
     if scheduler is None:
