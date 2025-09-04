@@ -180,8 +180,8 @@ def run(
             parameters_for_opt = model.parameters()
         else:
             parameters_for_opt = [
-                {"params": bb, "lr": base_lr, "weight_decay": wd},             # backbone
-                {"params": hd, "lr": base_lr * head_mult, "weight_decay": wd},             # head
+                {"params": bb, "lr": base_lr, "weight_decay": wd},  # backbone
+                {"params": hd, "lr": base_lr * head_mult, "weight_decay": wd},  # head
             ]
     else:
         parameters_for_opt = model.parameters()
@@ -411,8 +411,8 @@ def run(
         evaluator=None,  # two-pass writes into trainer.state.metrics
         optimizer=optimizer,
         scheduler=scheduler,
-        plateau_metric=cfg.get("plateau_metric", "val_loss"),
-        plateau_mode=cfg.get("plateau_mode", "min"),
+        plateau_metric=cfg.get("plateau_metric", "val/loss"),
+        plateau_source="trainer",
     )
 
     # Best checkpoint (model only, extend 'objects' as needed)

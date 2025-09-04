@@ -7,12 +7,12 @@ metric:
   goal: maximize
 
 parameters:
-  # ---------------- Fixed experiment knobs ----------------
+  # Fixed experiment knobs
   architecture: {value: unet}
   task: {value: segmentation}
   run_cap: {value: 20}
 
-  # ---------------- Execution ----------------
+  # Execution
   epochs: {value: 40}
   num_workers: {value: 12}
   debug: {value: true}
@@ -21,13 +21,13 @@ parameters:
   console_epoch_log: {value: true}
   seed: {value: 42}
 
-  # ---------------- Data / labels ----------------
+  # Data / labels
   in_channels: {value: 1}
   input_shape: {value: [256, 256]}
   out_channels: {value: 2}
   batch_size: {values: [8, 16, 32]}
 
-  # ---------------- Model (UNet) ----------------
+  # Model (UNet)
   features:
     values:
       - [16, 32, 64, 128, 256]
@@ -39,28 +39,31 @@ parameters:
       - [2, 2, 2]
   num_res_units: {values: [1, 2, 3]}
 
-  # ---------------- Loss weighting ----------------
+  # Loss weighting
   alpha: {values: [0.5, 1.0, 2.0]}
   beta:  {values: [0.25, 0.5, 1.0]}
 
-  # ---------------- Segmentation post-process ----------------
+  # Segmentation post-process
   seg_threshold: {value: 0.5}
 
-  # ---------------- Optimizer / weight decay ----------------
+  # Optimizer / weight decay
   optimizer: {value: adamw}
   weight_decay:
     distribution: log_uniform_values
     min: 0.00001
     max: 0.001
 
-  # ---------------- LR setup ----------------
+  # LR setup
   param_groups: {value: single}
   lr:
     distribution: log_uniform_values
     min: 0.0001
     max: 0.003
+  head_lr_scale: 0.5       # lower LR on head
+  head_wd_scale: 1.5       # slightly higher WD on head
+  head_keys: ["head","classifier","mlp_head","fc","cls"]  # optional
 
-  # ---------------- LR scheduler ----------------
+  # LR scheduler
   lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
 
   # Cosine params
@@ -77,7 +80,3 @@ parameters:
   patience: {values: [3, 6]}
   factor:   {values: [0.5, 0.3]}
   threshold: {value: 0.0001}
-
-early_terminate:
-  type: hyperband
-  min_iter: 4

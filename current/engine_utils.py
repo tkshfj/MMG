@@ -389,14 +389,6 @@ def build_evaluator(
                 metric.attach(evaluator, name)
             setattr(evaluator.state, "_val_metrics_attached", True)
 
-    # Attach W&B eval logging once the evaluator is fully wired
-    # if trainer_for_logging is not None:
-    #     try:
-    #         attach_wandb_eval_logging(trainer_for_logging, evaluator)
-    #     except Exception:
-    #         # keep training resilient if W&B isn't available
-    #         pass
-
     # optional: expose for downstream hooks
     evaluator.state.data_loader = data_loader
     return evaluator
@@ -659,13 +651,54 @@ def attach_scheduler(
     raise ValueError(f"Unknown lr_strategy='{strategy}'")
 
 
-# helper to wire schedulers
-def attach_lr_scheduling(trainer: Engine, evaluator: Engine | None, optimizer, scheduler, *,
-                         plateau_metric: str | None = None, plateau_mode: str = "max") -> None:
+def _resolve_metric(metrics: dict | None, key: str) -> float | None:
+    """Resolve a metric like 'val/loss' with common aliases, in a deterministic order."""
+    if not isinstance(metrics, dict) or not metrics:
+        return None
+    base = key.replace("val/", "").replace("val_", "")
+    candidates = [
+        key,                       # e.g., "val/loss"
+        key.replace("/", "_"),     # "val_loss"
+        key.replace("_", "/"),     # "val/loss" (no-op if already)
+        f"val/{base}",             # "val/loss" from "loss"
+        f"val_{base}",             # "val_loss"
+        base,                      # "loss"
+    ]
+    seen = set()
+    for k in candidates:
+        if k in seen:
+            continue
+        seen.add(k)
+        if k in metrics:
+            try:
+                v = float(metrics[k])
+                if v == v:  # not NaN
+                    return v
+            except Exception:
+                pass
+    return None
+
+
+def attach_lr_scheduling(
+    trainer: Engine,
+    evaluator: Engine | None,
+    optimizer,
+    scheduler,
+    *,
+    plateau_metric: str | None = None,
+    plateau_source: Literal["auto", "evaluator", "trainer"] = "auto",
+) -> None:
     if scheduler is None:
         return
 
     from torch.optim.lr_scheduler import OneCycleLR, ReduceLROnPlateau
+
+    # Avoid re-attaching handlers (idempotency).
+    # Key by scheduler object id so different schedulers can be attached in the same process if needed.
+    _guard_key = f"_lr_sched_attached_{id(scheduler)}"
+    if getattr(trainer.state, _guard_key, False):
+        return
+    setattr(trainer.state, _guard_key, True)
 
     # Make scheduler discoverable for loggers (used by read_current_lr)
     try:
@@ -673,42 +706,48 @@ def attach_lr_scheduling(trainer: Engine, evaluator: Engine | None, optimizer, s
     except Exception:
         pass
 
+    # Attach a single LR logger (once per trainer), regardless of scheduler type.
+    if not getattr(trainer.state, "_lr_logger_attached", False):
+        @trainer.on(Events.ITERATION_COMPLETED)
+        def _log_lr(engine):
+            try:
+                engine.state.metrics["opt/lr"] = optimizer.param_groups[0]["lr"]
+            except Exception:
+                pass
+        setattr(trainer.state, "_lr_logger_attached", True)
+
+    # Iteration cadence (OneCycle)
     if isinstance(scheduler, OneCycleLR):
         @trainer.on(Events.ITERATION_COMPLETED)
         def _step_onecycle(_):
             scheduler.step()
         return
 
+    # Plateau cadence — prefer evaluator.COMPLETED; else fall back to trainer.EPOCH_COMPLETED
     if isinstance(scheduler, ReduceLROnPlateau):
-        if not plateau_metric:
-            raise ValueError("ReduceLROnPlateau needs plateau_metric (e.g., 'val/auc' or 'val/loss').")
+        key = plateau_metric or "val/loss"
 
-        @trainer.on(Events.EPOCH_COMPLETED)
-        def _step_plateau_after_eval(engine: Engine):
-            # Prefer evaluator metrics (post-validation); fall back to trainer if needed.
-            source = evaluator if evaluator is not None else trainer
-            metrics = getattr(source.state, "metrics", {}) or {}
-            key = plateau_metric
-            # Accept common key variants
-            cand = {
-                key,
-                key.replace("/", "_"),
-                key.replace("_", "/"),
-            }
-            base = key.replace("val/", "").replace("val_", "")
-            base = base.split("/")[-1].split("_")[-1]
-            cand.update({base, f"val_{base}", f"val/{base}"})
-            raw = next((metrics.get(k) for k in cand if k in metrics), None)
-            score = to_float_scalar(raw, strict=False)
-            if is_finite_float(score):
+        def _step_with(metrics: dict | None):
+            score = _resolve_metric(metrics, key)
+            if score is not None:
                 try:
-                    scheduler.step(score)  # only step with a finite float
+                    scheduler.step(score)
                 except Exception:
                     pass
-            # If score is missing/NaN, skip stepping this epoch—never call scheduler.step(None).
+
+        use_eval = (plateau_source == "evaluator") or (plateau_source == "auto" and evaluator is not None)
+        if use_eval and evaluator is not None:
+            @evaluator.on(Events.COMPLETED)
+            def _step_plateau_eval(_):
+                _step_with(getattr(evaluator.state, "metrics", None))
+        else:
+            @trainer.on(Events.EPOCH_COMPLETED)
+            def _step_plateau_trainer(engine: Engine):
+                # Assumes validation has populated trainer.state.metrics by this point.
+                _step_with(getattr(engine.state, "metrics", None))
         return
 
-    # Generic epoch-based schedulers (Cosine, StepLR, MultiStep, Exponential, etc.)
+    # Generic epoch-based schedulers (Cosine, SequentialLR warmcos, StepLR, MultiStep, Exponential, etc.)
     @trainer.on(Events.EPOCH_COMPLETED)
     def _step_epoch(_):
         scheduler.step()

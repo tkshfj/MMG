@@ -6,12 +6,8 @@ metric:
   name: val/auc
   goal: maximize
 
-# early_terminate:
-  # type: none  # hyperband
-  # min_iter: 6
-
 parameters:
-  # ---------- Fixed ----------
+  # Fixed
   architecture: {value: simple_cnn}
   task:         {value: classification}
   run_cap:      {value: 20}
@@ -26,7 +22,7 @@ parameters:
   binary_single_logit:       {value: true}
   binary_bce_from_two_logits: {value: false}
 
-  # ---------- Execution ----------
+  # Execution
   epochs:            {value: 40}
   num_workers:       {value: 8}
   seed:              {value: 42}
@@ -35,7 +31,7 @@ parameters:
   console_iter_log:  {value: false}
   console_epoch_log: {value: true}
 
-  # ---------- Two-pass validation & calibration ----------
+  # Two-pass validation & calibration
   two_pass_val:   {value: true}
   log_calibrated: {value: true}
 
@@ -51,19 +47,19 @@ parameters:
   cal_rate_tolerance:  {values: [0.10, 0.12, 0.15, 0.20]}
   cal_auc_floor:       {values: [0.50, 0.55]}
 
-  # ---------- Decision health watchdog ----------
+  # Decision health watchdog
   enable_decision_health: {value: false}
   decision_health_tol:  {value: 1.0}  # {values: [0.20, 0.25, 0.30, 0.35]}
   decision_health_need_k:  {value: 9999}  # {values: [3, 5]}
   # warmup will piggyback cal_warmup_epochs in code
 
-  # ---------- Loss / decision ----------
+  # Loss / decision
   cls_loss:        {value: auto}
   cls_decision:    {value: threshold}
   cls_threshold:   {value: 0.5}
   positive_index:  {value: 1}
 
-  # ---------- Core tunables ----------
+  # Core tunables
   batch_size:  {values: [32, 64]}
   lr:
     distribution: log_uniform_values
@@ -78,7 +74,7 @@ parameters:
     min: 0.18
     max: 0.24
 
-  # ---------- LR scheduler ----------
+  # LR scheduler
   lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
 
   # Cosine
@@ -96,3 +92,14 @@ parameters:
   factor:   {values: [0.5, 0.3]}
   plateau_threshold:
     values: [0.0001, 0.0005]  # only meaningful when lr_scheduler=plateau
+
+  # Param-group strategy (exercise split path)
+  param_groups: {value: split}  # or values: [single, split]
+  base_lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0003
+  head_multiplier: {values: [5, 10, 15]}
+  head_lr_scale: 0.5       # lower LR on head
+  head_wd_scale: 1.5       # slightly higher WD on head
+  head_keys: ["head","classifier","mlp_head","fc","cls"]  # optional

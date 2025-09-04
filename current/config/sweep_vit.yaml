@@ -76,7 +76,9 @@ parameters:
     distribution: log_uniform_values
     min: 0.00003
     max: 0.0003
-  head_multiplier: {values: [5, 10, 15]}
+  head_lr_scale: 0.5       # lower LR on head
+  head_wd_scale: 1.5       # slightly higher WD on head
+  head_keys: ["head","classifier","mlp_head","fc","cls"]  # optional
 
   # Single-group LR (ignored when split groups are provided, kept for completeness)
   lr:

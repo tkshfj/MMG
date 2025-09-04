@@ -7,12 +7,12 @@ metric:
   goal: maximize
 
 parameters:
-  # ---------------- Fixed experiment knobs ----------------
+  # Fixed experiment knobs
   architecture: {value: densenet121}
   task: {value: classification}
   run_cap: {value: 20}
 
-  # ---------------- Execution ----------------
+  # Execution
   epochs: {value: 40}
   num_workers: {value: 12}
   debug: {value: true}
@@ -21,7 +21,7 @@ parameters:
   console_epoch_log: {value: true}
   seed: {value: 42}
 
-  # ---------------- Two-pass validation / calibration ----------------
+  # Two-pass validation / calibration
   two_pass_val: {value: true}
   log_calibrated: {value: true}
 
@@ -39,7 +39,7 @@ parameters:
   cal_auc_floor: {values: [0.50, 0.52, 0.55]}
   cal_fallback: {values: ["rate_match", "keep_last"]}
 
-  # ---------------- Data / labels ----------------
+  # Data / labels
   in_channels: {value: 1}
   input_shape: {value: [256, 256]}
   num_classes: {value: 2}
@@ -47,23 +47,31 @@ parameters:
   class_balance: {value: inverse}
   batch_size: {values: [32, 64]}
 
-  # ---------------- Model (DenseNet121) ----------------
+  # Model (DenseNet121)
   pretrained: {values: [false, true]}
 
-  # ---------------- Loss weighting ----------------
+  # Loss weighting
   alpha: {values: [1.0, 2.0]}
   beta:  {values: [0.5, 1.0]}
   multi_weight: {value: 0.65}
 
-  # ---------------- Optimizer / weight decay ----------------
+  # Optimizer / weight decay
   optimizer: {value: adamw}
   weight_decay:
     distribution: log_uniform_values
     min: 0.00001
     max: 0.001
 
-  # ---------------- Param-group strategy ----------------
-  param_groups: {values: ["single", "split"]}
+  # Param-group strategy
+  param_groups: {value: split}  # or values: [single, split]
+  base_lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0003
+  head_multiplier: {values: [5, 10, 15]}
+  head_lr_scale: 0.5       # lower LR on head
+  head_wd_scale: 1.5       # slightly higher WD on head
+  head_keys: ["head","classifier","mlp_head","fc","cls"]  # optional
 
   # Single-group LR
   lr:
@@ -72,13 +80,13 @@ parameters:
     max: 0.003
 
   # Split LRs
-  base_lr:
-    distribution: log_uniform_values
-    min: 0.00002
-    max: 0.0001
-  head_multiplier: {values: [5.0, 10.0, 15.0]}
+  # base_lr:
+  #   distribution: log_uniform_values
+  #   min: 0.00002
+  #   max: 0.0001
+  # head_multiplier: {values: [5.0, 10.0, 15.0]}
 
-  # ---------------- LR scheduler ----------------
+  # LR scheduler
   lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
 
   # Cosine params
@@ -96,24 +104,10 @@ parameters:
   factor:   {values: [0.5, 0.3]}
   threshold: {value: 0.0001}
 
-  # ---------------- Classification decision defaults ----------------
+  # Classification decision defaults
   binary_single_logit: {value: true}
   binary_bce_from_two_logits: {value: false}
   cls_loss: {value: auto}
   cls_decision:  {value: threshold}
   cls_threshold: {value: 0.5}
   positive_index: {value: 1}
-
-early_terminate:
-  type: hyperband
-  min_iter: 4
-
-# NOTE:
-# val_multi gets registered whenever both val_auc and val_dice exist
-# get_loss_fn reads alpha, beta
-# Optimizer uses cfg.lr and cfg.weight_decay
-# Model reads cfg.dropout_rate
-# Remove/ignore patch_size for UNet, or gate by architecture
-
-# IMPORTANT: make sure we log a scalar macro mean as "val/multi"
-# (or change name below to "val/multi_mean" if that’s what we emit)

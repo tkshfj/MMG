@@ -65,11 +65,20 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
     if name not in opts:
         raise ValueError(f"Unknown optimizer: {name}")
 
-    # handle split param groups here if a model was passed in
-    # and we can identify head vs backbone
+    # handle split param groups here if a model was passed in and we can identify head vs backbone
+    # if str(cfg.get("param_groups", "single")).lower() == "split" and hasattr(parameters, "parameters"):
+    #     base_lr = float(cfg.get("lr", 1e-3))
+    #     head_multiplier = float(cfg.get("head_multiplier", 5.0))
     if str(cfg.get("param_groups", "single")).lower() == "split" and hasattr(parameters, "parameters"):
         base_lr = float(cfg.get("lr", 1e-3))
-        head_multiplier = float(cfg.get("head_multiplier", 5.0))
+        # New: scale head LR down, and optionally raise WD on head
+        head_lr_scale = float(cfg.get("head_lr_scale", 0.5))      # < 1.0 → lower LR on head
+        head_wd_scale = float(cfg.get("head_wd_scale", 1.5))      # > 1.0 → slightly higher WD on head
+        # Guardrails: we lower LR on head (≤1.0) and can raise WD (≥1.0)
+        if not (0.0 < head_lr_scale <= 1.0):
+            raise ValueError(f"head_lr_scale must be in (0,1], got {head_lr_scale}")
+        if head_wd_scale < 1.0:
+            raise ValueError(f"head_wd_scale must be ≥ 1.0, got {head_wd_scale}")
 
         # Prefer explicit helpers on the model (as we suggested for ViT)
         head_params = None
@@ -84,25 +93,40 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
             head_ids = {id(p) for p in head_params}
             backbone_params = [p for p in parameters.parameters() if getattr(p, "requires_grad", False) and id(p) not in head_ids]
 
-        # Last fallback: if neither provided, just don’t split
+        # Name-based fallback if helpers missing
+        if head_params is None or backbone_params is None:
+            head_keys = tuple(k.lower() for k in cfg.get("head_keys", ("head", "classifier", "mlp_head", "fc", "cls")))
+            heads, backs = [], []
+            for n, p in parameters.named_parameters():
+                if not getattr(p, "requires_grad", False):
+                    continue
+                (heads if any(k in n.lower() for k in head_keys) else backs).append(p)
+            if heads and backs:
+                head_params, backbone_params = heads, backs
+
+        # If we can split, build per-group settings (LR + optional WD scale on head)
         if head_params and backbone_params:
-            # We can omit per-group weight_decay (the global kwarg will apply).
             param_groups = [
-                {"params": backbone_params},                                   # uses global lr=base_lr
-                {"params": head_params, "lr": base_lr * head_multiplier},      # head gets boosted LR
+                {"params": backbone_params, "lr": base_lr, "weight_decay": float(cfg.get("weight_decay", 1e-4))},
+                {"params": head_params, "lr": base_lr * head_lr_scale,
+                 "weight_decay": float(cfg.get("weight_decay", 1e-4)) * head_wd_scale},
             ]
             opt_kwargs: Dict[str, Any] = {"weight_decay": weight_decay}
             if name in ("sgd", "rmsprop"):
                 opt_kwargs["momentum"] = momentum
 
-            optimizer = opts[name](param_groups, lr=base_lr, **opt_kwargs)
+            # Per-group LR/WD already set above; pass no global lr/wd overrides.
+            optimizer = opts[name](param_groups, **({k: v for k, v in opt_kwargs.items() if k != "weight_decay"}))
             if verbose:
                 total = sum(p.numel() for p in parameters.parameters() if getattr(p, "requires_grad", False))
                 print("[optim] num trainable params:", total)
                 for i, g in enumerate(optimizer.param_groups):
                     n = sum(getattr(p, "numel", lambda: 0)() for p in g["params"])
-                    print(f"[optim] group {i}: {len(g['params'])} tensors, {n} params, lr={g.get('lr')}")
+                    print(f"[optim] group {i}: {len(g['params'])} tensors, {n} params, "
+                          f"lr={g.get('lr')}, wd={g.get('weight_decay')}")
             return optimizer
+        elif str(cfg.get("param_groups", "single")).lower() == "split" and verbose:
+            print("[optim] split requested but could not identify both head and backbone; falling back to single group.")
 
     param_groups = _extract_param_groups(parameters)
     opt_kwargs: Dict[str, Any] = {"weight_decay": weight_decay}

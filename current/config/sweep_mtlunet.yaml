@@ -6,17 +6,13 @@ metric:
   name: val/multi
   goal: maximize
 
-# Disable early termination cleanly (schema-safe)
-# early_terminate:
-  # value: none  # use HyperBand here only if you actually want it
-
 parameters:
-  # ---------------- Fixed experiment knobs ----------------
+  # Fixed experiment knobs
   architecture: {value: multitask_unet}
   task: {value: multitask}
   run_cap: {value: 20}
 
-  # ---------------- Execution ----------------
+  # Execution
   epochs: {value: 40}
   num_workers: {value: 8}
   debug: {value: true}
@@ -25,7 +21,7 @@ parameters:
   console_epoch_log: {value: true}
   seed: {value: 42}
 
-  # ---------------- Two-pass validation / calibration ----------------
+  # Two-pass validation / calibration
   two_pass_val: {value: true}
   log_calibrated: {value: true}
 
@@ -43,7 +39,7 @@ parameters:
   cal_auc_floor: {values: [0.50, 0.52, 0.55]}
   cal_fallback: {values: ["rate_match", "keep_last"]}
 
-  # ---------------- Data / model topology ----------------
+  # Data / model topology
   in_channels: {value: 1}
   input_shape: {value: [256, 256]}
   num_classes: {value: 2}
@@ -54,19 +50,19 @@ parameters:
   binary_single_logit: {value: true}
   binary_bce_from_two_logits: {value: false}
 
-  # ---------------- Loss options ----------------
+  # Loss options
   cls_loss: {value: auto}
   # pos_weight: {value: 1.7}  # optional override (usually omit)
 
-  # ---------------- Segmentation post-process ----------------
+  # Segmentation post-process
   seg_threshold: {value: 0.5}
 
-  # ---------------- Multi-task / objective ----------------
+  # Multi-task / objective
   multi_weight: {value: 0.65}
   alpha: {values: [1.0, 2.0]}
   beta:  {values: [0.5, 1.0]}
 
-  # ---------------- Core tunables ----------------
+  # Core tunables
   lr:
     distribution: log_uniform_values
     min: 0.00003
@@ -80,7 +76,7 @@ parameters:
     min: 0.18
     max: 0.24
 
-  # ---------------- LR scheduler ----------------
+  # LR scheduler
   lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
 
   # Cosine params
@@ -98,10 +94,22 @@ parameters:
   factor:   {values: [0.5, 0.3]}
   plateau_threshold: {values: [0.0001, 0.0005]}
 
-  # ---------------- Classification decision defaults (std pass) ----------------
+  # Classification decision defaults (std pass)
   cls_decision:  {value: threshold}
   cls_threshold: {value: 0.5}
   positive_index: {value: 1}
+
+  # Param-group strategy (exercise split path)
+  param_groups: {value: split}  # or values: [single, split]
+  base_lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0003
+  head_multiplier: {values: [5, 10, 15]}
+  head_lr_scale: 0.5       # lower LR on head
+  head_wd_scale: 1.5       # slightly higher WD on head
+  head_keys: ["head","classifier","mlp_head","fc","cls"]  # optional
+
 
 # program: main.py
 # method: bayes
@@ -115,12 +123,12 @@ parameters:
 #   # min_iter: 4
 
 # parameters:
-#   # ---------------- Fixed experiment knobs ----------------
+#   # Fixed experiment knobs
 #   architecture: {value: multitask_unet}
 #   task: {value: multitask}
 #   run_cap: {value: 20}
 
-#   # ---------------- Execution ----------------
+#   # Execution
 #   epochs: {value: 40}
 #   num_workers: {value: 8}
 #   debug: {value: true}
@@ -129,7 +137,7 @@ parameters:
 #   console_epoch_log: {value: true}
 #   seed: {value: 42}
 
-#   # ---------------- Two-pass validation / calibration ----------------
+#   # Two-pass validation / calibration
 #   two_pass_val: {value: true}          # enables calibration pass
 #   log_calibrated: {value: true}        # log calibrated cls metrics
 
@@ -163,7 +171,7 @@ parameters:
 #   cal_fallback:
 #     values: ["rate_match", "keep_last"]
 
-#   # ---------------- Data / model topology ----------------
+#   # Data / model topology
 #   in_channels: {value: 1}
 #   input_shape: {value: [256, 256]}
 #   num_classes: {value: 2}
@@ -174,19 +182,19 @@ parameters:
 #   binary_single_logit: {value: true}    # emit 1 logit for binary classification
 #   binary_bce_from_two_logits: {value: false}  # bridge legacy 2-logit → BCE (pos-neg)
 
-#   # ---------------- Loss options ----------------
+#   # Loss options
 #   cls_loss: {value: auto}               # auto | bce | ce | focal
 #   # pos_weight: {value: 1.7}            # optional manual override (usually omit)
 
-#   # ---------------- Segmentation post-process ----------------
+#   # Segmentation post-process
 #   seg_threshold: {value: 0.5}           # for sigmoid binary seg
 
-#   # ---------------- Multi-task / objective ----------------
+#   # Multi-task / objective
 #   multi_weight: {value: 0.65}           # weight for Dice in val/multi
 #   alpha: {values: [1.0, 2.0]}           # cls loss weight
 #   beta:  {values: [0.5, 1.0]}           # seg loss weight
 
-#   # ---------------- Core tunables ----------------
+#   # Core tunables
 #   batch_size: {values: [32, 64]}
 #   lr:
 #     distribution: log_uniform_values
@@ -201,7 +209,7 @@ parameters:
 #     min: 0.18
 #     max: 0.24
 
-#   # ---------------- LR scheduler ----------------
+#   # LR scheduler
 #   lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
 #   # lr_scheduler: {value: "plateau"}
 
@@ -221,9 +229,8 @@ parameters:
 #   plateau_threshold:
 #       values: [0.0001, 0.0005]  # only meaningful when lr_scheduler=plateau
 
-#   # ---------------- Classification decision defaults (std pass) ----------------
+#   # Classification decision defaults (std pass)
 #   # Two-pass will overwrite threshold each epoch via cal_thr when available.
 #   cls_decision:  {value: threshold}     # "argmax" | "threshold"
 #   cls_threshold: {value: 0.5}
 #   positive_index: {value: 1}            # ignored for single-logit, used for 2-logit
-

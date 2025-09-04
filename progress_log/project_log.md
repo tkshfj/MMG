@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-09-04
+- Refactor LR scheduling: tolerant Plateau stepping via trainer/evaluator; split optimizer with lower head LR and higher WD
+
 # 2025-09-03
 - Refactor ViT: guard head lookup, support Sequential heads, compute bias with math.log, and move robust head/backbone param helpers into the class.
 
