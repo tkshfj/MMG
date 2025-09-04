@@ -23,6 +23,7 @@ from data_utils import build_dataloaders
 from model_registry import build_model, make_default_loss
 from engine_utils import (build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
                           get_label_indices_from_batch, build_evaluator, attach_best_checkpoint,)  # attach_early_stopping
+from engine_utils import attach_pos_score_debug_once
 from evaluator_two_pass import attach_two_pass_validation, make_two_pass_evaluator
 from calibration import build_calibrator
 from metrics_utils import make_cls_val_metrics
@@ -230,6 +231,16 @@ def run(
         include_seg=has_seg,
         trainer_for_logging=trainer,
     )
+
+    # After building std_evaluator
+    if str(cfg.get("architecture", "")).lower() == "vit" and bool(cfg.get("debug_score_hist", True)):
+        attach_pos_score_debug_once(
+            evaluator=std_evaluator,
+            positive_index=int(cfg.get("positive_index", 1)),
+            bins=int(cfg.get("debug_score_bins", 20)),
+            print_fn=print,  # or logger.info
+        )
+
     # Optionally compute per-epoch threshold & confusion stats for classification
     if has_cls:
         # attach_val_threshold_search(evaluator=std_evaluator, mode="acc")

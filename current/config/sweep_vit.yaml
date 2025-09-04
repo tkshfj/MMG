@@ -20,6 +20,8 @@ parameters:
   console_iter_log: { value: false }
   console_epoch_log: { value: true }
   seed: { value: 42 }
+  debug_score_hist: { value: true }
+  debug_score_bins: { value: 20 }
 
   # Two-pass validation / calibration
   two_pass_val: { value: true }

@@ -1,5 +1,9 @@
 # Project Log
 
+# 2025-09-05
+- Refactor ViT YAML: switch to two-logit head for A/B check on CM conflation
+- Add one-shot ViT pos-score histogram: collect p(pos) in eval, print stats, and log val/debug_pos_*.
+
 # 2025-09-04
 - Refactor LR scheduling: tolerant Plateau stepping via trainer/evaluator; split optimizer with lower head LR and higher WD
 
@@ -33,7 +37,6 @@
 - Refactor model API & binaries: Unify base/wrappers to respect `positive_index`, enforce raw-logit outputs, and stabilize binary losses/metrics.
 - Refactor metrics utilities: Use raw-logits output transform for AUC and a decision transform for thresholded metrics; add vector-metric promotion to scalar keys.
 - Refactor two-pass evaluator: Wire live-thresholded classification metrics, apply segmentation transforms, and verify with a passing smoke test.
-
 
 # 2025-08-27
 - Refactor MONAI: stabilize cls head, warm up multitask loss, and unify W&B epoch logging to fix step warnings

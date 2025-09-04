@@ -18,7 +18,8 @@ from metrics_utils import (
     coerce_loss_dict,
     make_metrics,
     make_cls_val_metrics,
-    make_seg_val_metrics
+    make_seg_val_metrics,
+    positive_score_from_logits
 )
 
 
@@ -758,6 +759,100 @@ def attach_lr_scheduling(
         scheduler.step()
 
 
+def attach_pos_score_debug_once(
+    evaluator: Engine,
+    *,
+    positive_index: int = 1,
+    bins: int = 20,
+    print_fn: Callable[[str], None] = print,
+    tag: str = "debug_pos",
+) -> None:
+    """
+    Collects positive-class scores for ONE validation run and:
+      - prints: min, q10, median, q90, max, pos@0.5
+      - writes to evaluator.state.metrics:
+          {tag}_min, {tag}_q10, {tag}_median, {tag}_q90, {tag}_max,
+          {tag}_rate@0.5, {tag}_hist (list)
+    Then detaches itself so it never runs again.
+
+    Works with evaluator outputs of shape:
+      - dict with 'y_pred'/'logits'/'cls_out'
+      - tuple/list like (logits, y)
+    """
+    # Idempotency guard (avoid double-attach)
+    guard_key = f"_{tag}_once_attached"
+    if getattr(evaluator.state, guard_key, False):
+        return
+    setattr(evaluator.state, guard_key, True)
+
+    buf: Dict[str, list] = {"scores": []}
+
+    @evaluator.on(Events.EPOCH_STARTED)
+    def _reset(_):
+        buf["scores"].clear()
+
+    @evaluator.on(Events.ITERATION_COMPLETED)
+    def _collect(engine: Engine):
+        out = engine.state.output
+        # Accept (logits, y) or dict with logits under common keys
+        if isinstance(out, (tuple, list)) and len(out) >= 1:
+            logits = out[0]
+        elif isinstance(out, dict):
+            logits = out.get("y_pred") or out.get("logits") or out.get("cls_out")
+        else:
+            return
+        try:
+            s = positive_score_from_logits(logits, positive_index=int(positive_index))
+            s = s.detach().reshape(-1).cpu()
+            buf["scores"].append(s)
+        except Exception:
+            # Silent failure to avoid interrupting eval
+            pass
+
+    @evaluator.on(Events.COMPLETED)
+    def _summarize(engine: Engine):
+        if not buf["scores"]:
+            return
+        import torch
+
+        scores = torch.cat(buf["scores"], dim=0).clamp(0.0, 1.0)
+        n = int(scores.numel())
+        mn = float(scores.min().item())
+        mx = float(scores.max().item())
+        med = float(scores.median().item())
+        q10 = float(scores.quantile(0.10).item())
+        q90 = float(scores.quantile(0.90).item())
+        pos50 = float((scores >= 0.5).float().mean().item())
+        hist = torch.histc(scores, bins=int(max(1, bins)), min=0.0, max=1.0).tolist()
+
+        # Print once (easy to see in logs)
+        try:
+            print_fn(
+                f"[pos-score] n={n} min={mn:.4f} q10={q10:.4f} med={med:.4f} "
+                f"q90={q90:.4f} max={mx:.4f} pos@0.5={pos50:.4f}"
+            )
+        except Exception:
+            pass
+
+        # Expose in metrics (logger will prefix with 'val/' in validation context)
+        m = engine.state.metrics
+        m[f"{tag}_min"] = mn
+        m[f"{tag}_q10"] = q10
+        m[f"{tag}_median"] = med
+        m[f"{tag}_q90"] = q90
+        m[f"{tag}_max"] = mx
+        m[f"{tag}_rate@0.5"] = pos50
+        m[f"{tag}_hist"] = hist
+
+        # Detach handlers so this runs only once
+        try:
+            evaluator.remove_event_handler(_reset, Events.EPOCH_STARTED)
+            evaluator.remove_event_handler(_collect, Events.ITERATION_COMPLETED)
+            evaluator.remove_event_handler(_summarize, Events.COMPLETED)
+        except Exception:
+            pass
+
+
 def _make_score_fn(metric_key: str, mode: str = "max"):
     sign = 1.0 if str(mode).lower() == "max" else -1.0
 
@@ -983,6 +1078,7 @@ __all__ = [
     "attach_engine_metrics",
     "attach_scheduler",
     "attach_lr_scheduling",
+    "attach_pos_score_debug_once",
     "attach_early_stopping",
     "attach_best_checkpoint",
     "make_warmup_safe_score_fn",
