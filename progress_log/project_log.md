@@ -1,5 +1,8 @@
 # Project Log
 
+ 2025-09-06
+ Refactor logging: treat only true confusion matrices as matrices in W&B flattener; avoid scalar confmat_* crash
+
 # 2025-09-05
 - Refactor ViT YAML: switch to two-logit head for A/B check on CM conflation
 - Add one-shot ViT pos-score histogram: collect p(pos) in eval, print stats, and log val/debug_pos_*.

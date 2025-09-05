@@ -133,18 +133,36 @@ def _to_wandb_value(v):
     return v
 
 
+def _is_square_matrix_like(v) -> bool:
+    if torch.is_tensor(v):
+        return v.ndim == 2 and v.shape[0] == v.shape[1]
+    if isinstance(v, np.ndarray):
+        return v.ndim == 2 and v.shape[0] == v.shape[1]
+    if isinstance(v, (list, tuple)):
+        try:
+            r = len(v)
+            return r > 0 and isinstance(v[0], (list, tuple)) and len(v[0]) == r
+        except Exception:
+            return False
+    return False
+
+
 def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
     out = {}
     for k, v in (metrics_dict or {}).items():
+        if v is None:
+            continue
         key = f"{prefix}{k}"
-        if "confmat" in k:  # handles cls_confmat and seg_confmat
-            # store the whole matrix as list AND per-cell scalars for easy charting
+
+        # Only treat true confusion matrices as matrices
+        if (k in {"cls_confmat", "seg_confmat"} or k.endswith("/confmat") or k.endswith("_confmat")) and _is_square_matrix_like(v):
             if torch.is_tensor(v):
                 cm = v.detach().cpu().to(torch.int64).numpy()
             elif isinstance(v, np.ndarray):
                 cm = v.astype(np.int64)
             else:
                 cm = np.asarray(v, dtype=np.int64)
+
             out[key] = cm.tolist()
             C = int(cm.shape[0])
             for i in range(C):
@@ -153,6 +171,28 @@ def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict
         else:
             out[key] = _to_wandb_value(v)
     return out
+
+
+# def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
+#     out = {}
+#     for k, v in (metrics_dict or {}).items():
+#         key = f"{prefix}{k}"
+#         if "confmat" in k:  # handles cls_confmat and seg_confmat
+#             # store the whole matrix as list AND per-cell scalars for easy charting
+#             if torch.is_tensor(v):
+#                 cm = v.detach().cpu().to(torch.int64).numpy()
+#             elif isinstance(v, np.ndarray):
+#                 cm = v.astype(np.int64)
+#             else:
+#                 cm = np.asarray(v, dtype=np.int64)
+#             out[key] = cm.tolist()
+#             C = int(cm.shape[0])
+#             for i in range(C):
+#                 for j in range(C):
+#                     out[f"{key}_{i}{j}"] = int(cm[i, j])
+#         else:
+#             out[key] = _to_wandb_value(v)
+#     return out
 
 
 def run(
