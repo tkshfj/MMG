@@ -21,9 +21,11 @@ from ignite.engine import Events
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
 from model_registry import build_model, make_default_loss
-from engine_utils import (build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
-                          get_label_indices_from_batch, build_evaluator, attach_best_checkpoint,)  # attach_early_stopping
-from engine_utils import attach_pos_score_debug_once
+from engine_utils import (
+    build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
+    get_label_indices_from_batch, build_evaluator, attach_best_checkpoint,
+    attach_val_threshold_search, attach_pos_score_debug_once,
+)
 from evaluator_two_pass import attach_two_pass_validation, make_two_pass_evaluator
 from calibration import build_calibrator
 from metrics_utils import make_cls_val_metrics
@@ -231,16 +233,28 @@ def run(
         include_seg=has_seg,
         trainer_for_logging=trainer,
     )
-
-    # After building std_evaluator
-    if str(cfg.get("architecture", "")).lower() == "vit" and bool(cfg.get("debug_score_hist", True)):
+    # Always collect a 1D positive score and per-epoch threshold from validation
+    attach_val_threshold_search(
+        evaluator=std_evaluator,
+        mode=str(cfg.get("calibration_method", "bal_acc")),   # or "f1"
+        positive_index=int(cfg.get("positive_index", 1)),
+    )
+    # Optional: one-shot score histogram / sanity-print on the first validation run
+    if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
         attach_pos_score_debug_once(
             evaluator=std_evaluator,
             positive_index=int(cfg.get("positive_index", 1)),
-            bins=int(cfg.get("debug_score_bins", 20)),
-            print_fn=print,  # or logger.info
+            bins=int(cfg.get("pos_hist_bins", 20)),
+            tag=str(cfg.get("pos_debug_tag", "debug_pos")),
         )
-
+    # # After building std_evaluator
+    # if str(cfg.get("architecture", "")).lower() == "vit" and bool(cfg.get("debug_score_hist", True)):
+    #     attach_pos_score_debug_once(
+    #         evaluator=std_evaluator,
+    #         positive_index=int(cfg.get("positive_index", 1)),
+    #         bins=int(cfg.get("debug_score_bins", 20)),
+    #         print_fn=print,  # or logger.info
+    #     )
     # Optionally compute per-epoch threshold & confusion stats for classification
     if has_cls:
         # attach_val_threshold_search(evaluator=std_evaluator, mode="acc")
@@ -277,11 +291,16 @@ def run(
     if not two_pass_enabled:
         @trainer.on(Events.EPOCH_COMPLETED)
         def _run_std_val(engine):
-            # std_evaluator.run(val_loader)
+            std_evaluator.run(val_loader)
             ep = int(engine.state.epoch)
+
             payload = {"trainer/epoch": ep}
             payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
-            # threshold and (optional) val loss
+            # Preserve hook-derived threshold separately
+            thr_search = std_evaluator.state.metrics.get("threshold", None)
+            if thr_search is not None:
+                payload["val/search_threshold"] = float(thr_search)
+            # Log the decision threshold actually used by metrics
             payload["val/threshold"] = float(get_thr())
             try:
                 payload["val/loss"] = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
@@ -326,11 +345,13 @@ def run(
                 ep = int(engine.state.epoch)
                 if ep < int(cfg.get("cal_warmup_epochs", 1)):
                     # no calibration yet; still run evaluator with the initial threshold
-                    # std_evaluator.run(val_loader)
-
+                    std_evaluator.run(val_loader)
                     # inline logging (or call helper if you have one)
                     payload = {"trainer/epoch": ep}
                     payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
+                    thr_search = std_evaluator.state.metrics.get("threshold", None)
+                    if thr_search is not None:
+                        payload["val/search_threshold"] = float(thr_search)
                     payload["val/threshold"] = float(get_thr())
                     try:
                         payload["val/loss"] = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
@@ -343,10 +364,13 @@ def run(
                 if t is not None:
                     _thr["v"] = float(t)   # update live threshold
                 # Evaluate with the updated threshold
-                # std_evaluator.run(val_loader)
+                std_evaluator.run(val_loader)
                 # Log evaluator metrics (now consistent with cal_thr)
                 payload = {"trainer/epoch": ep, "val/cal_thr": _thr["v"]}
                 payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
+                thr_search = std_evaluator.state.metrics.get("threshold", None)
+                if thr_search is not None:
+                    payload["val/search_threshold"] = float(thr_search)
                 payload["val/threshold"] = float(get_thr())
                 try:
                     payload["val/loss"] = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))

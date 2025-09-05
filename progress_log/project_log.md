@@ -3,6 +3,7 @@
 # 2025-09-05
 - Refactor ViT YAML: switch to two-logit head for A/B check on CM conflation
 - Add one-shot ViT pos-score histogram: collect p(pos) in eval, print stats, and log val/debug_pos_*.
+- Refactor val-thresholding to use 1D positive scores, add one-shot score histogram, fix scheduler wiring, remove legacy threshold, and wire evaluator runs each epoch.
 
 # 2025-09-04
 - Refactor LR scheduling: tolerant Plateau stepping via trainer/evaluator; split optimizer with lower head LR and higher WD

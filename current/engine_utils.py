@@ -798,11 +798,27 @@ def attach_pos_score_debug_once(
         if isinstance(out, (tuple, list)) and len(out) >= 1:
             logits = out[0]
         elif isinstance(out, dict):
-            logits = out.get("y_pred") or out.get("logits") or out.get("cls_out")
+            # logits = out.get("y_pred") or out.get("logits") or out.get("cls_out")
+            logits = None
+            if isinstance(out, dict):
+                logits = out.get("y_pred", None)
+                if logits is None:
+                    logits = out.get("logits", None)
+                if logits is None:
+                    logits = out.get("cls_out", None)
+            elif isinstance(out, (tuple, list)) and len(out) >= 1:
+                logits = out[0]
+            else:
+                return
+            if logits is None:
+                return
         else:
             return
         try:
             s = positive_score_from_logits(logits, positive_index=int(positive_index))
+            # safety: if the helper returned raw logits, map to [0,1]
+            if (s.detach().min() < 0) or (s.detach().max() > 1):
+                s = torch.sigmoid(s)
             s = s.detach().reshape(-1).cpu()
             buf["scores"].append(s)
         except Exception:
@@ -946,16 +962,24 @@ def attach_best_checkpoint(
     evaluator.add_event_handler(Events.COMPLETED, checkpoint)
 
 
-def _best_threshold(
-    logits: torch.Tensor, y_true: torch.Tensor, mode: str = "bal_acc"
-) -> tuple[float, dict]:
+# def _best_threshold(
+#     logits: torch.Tensor, y_true: torch.Tensor, mode: str = "bal_acc"
+# ) -> tuple[float, dict]:
+#     """
+#     logits: (N,) raw logits for positive class
+#     y_true: (N,) {0,1}
+#     Returns (threshold, stats_dict)
+#     """
+#     with torch.no_grad():
+#         p = torch.sigmoid(logits.float()).cpu()
+def _best_threshold_from_probs(p: torch.Tensor, y_true: torch.Tensor, mode: str = "bal_acc") -> tuple[float, dict]:
     """
-    logits: (N,) raw logits for positive class
+    p: (N,) positive-class probabilities in [0,1]
     y_true: (N,) {0,1}
     Returns (threshold, stats_dict)
     """
     with torch.no_grad():
-        p = torch.sigmoid(logits.float()).cpu()
+        p = p.float().cpu().clamp(0.0, 1.0)
         y = y_true.long().cpu()
         # candidate thresholds: unique preds + endpoints
         cand = torch.quantile(p, torch.linspace(0, 1, 101)).unique()
@@ -990,44 +1014,77 @@ def _best_threshold(
         return best_thr, best_stats
 
 
+# def attach_val_threshold_search(
+#     *,
+#     evaluator: Engine,
+#     mode: str = "bal_acc",   # "bal_acc" or "f1"
+#     logger=None,
+# ):
 def attach_val_threshold_search(
     *,
     evaluator: Engine,
     mode: str = "bal_acc",   # "bal_acc" or "f1"
     logger=None,
+    positive_index: int = 1,
 ):
     """
     Collects logits/targets across the validation epoch, selects a per-epoch threshold,
     and writes: val_threshold, val_prec, val_recall, val_cls_confmat, etc. into metrics.
     """
-    buf = {"logits": [], "targets": []}
+    # buf = {"logits": [], "targets": []}
+    buf = {"scores": [], "targets": []}
 
     @evaluator.on(Events.EPOCH_STARTED)
     def _reset_buffers(_):
-        buf["logits"].clear()
+        buf["scores"].clear()
         buf["targets"].clear()
 
     @evaluator.on(Events.ITERATION_COMPLETED)
     def _collect(engine):
         # engine.state.output must be (logits, y_true) or {"y_pred": logits, "y": y_true}
         out = engine.state.output
-        if isinstance(out, (tuple, list)) and len(out) >= 2:
-            logits, y_true = out[0], out[1]
-        elif isinstance(out, dict) and "y_pred" in out and "y" in out:
-            logits, y_true = out["y_pred"], out["y"]
+        # if isinstance(out, (tuple, list)) and len(out) >= 2:
+        #     logits, y_true = out[0], out[1]
+        # elif isinstance(out, dict) and "y_pred" in out and "y" in out:
+        #     logits, y_true = out["y_pred"], out["y"]
+        # else:
+        #     return
+        logits = y_true = None
+        if isinstance(out, (tuple, list)):
+            if len(out) >= 2:
+                logits, y_true = out[0], out[1]
+            else:
+                return
+        elif isinstance(out, dict):
+            y_true = out.get("y", None)
+            logits = out.get("y_pred", None)
+            if logits is None:
+                logits = out.get("logits", None)
+            if logits is None:
+                logits = out.get("cls_out", None)
+            if logits is None or y_true is None:
+                return
         else:
             return
-        buf["logits"].append(logits.detach().flatten())
+
+        # buf["logits"].append(logits.detach().flatten())
+        s = positive_score_from_logits(logits, positive_index=int(positive_index))
+        if (s.detach().min() < 0) or (s.detach().max() > 1):
+            s = torch.sigmoid(s)
+        # buf["logits"].append(s.detach().reshape(-1))
+        buf["scores"].append(s.detach().reshape(-1))
         buf["targets"].append(y_true.detach().flatten())
 
     @evaluator.on(Events.EPOCH_COMPLETED)
     def _choose_threshold(engine):
-        if not buf["logits"]:
+        if not buf["scores"]:
             return
-        logits = torch.cat(buf["logits"], dim=0)
+        # logits = torch.cat(buf["logits"], dim=0)
+        probs = torch.cat(buf["scores"], dim=0)
         y_true = torch.cat(buf["targets"], dim=0)
 
-        thr, stats = _best_threshold(logits, y_true, mode=mode)
+        # thr, stats = _best_threshold(logits, y_true, mode=mode)
+        thr, stats = _best_threshold_from_probs(probs, y_true, mode=mode)
         m = engine.state.metrics
         m["threshold"] = thr
 
@@ -1079,6 +1136,7 @@ __all__ = [
     "attach_scheduler",
     "attach_lr_scheduling",
     "attach_pos_score_debug_once",
+    "attach_val_threshold_search",
     "attach_early_stopping",
     "attach_best_checkpoint",
     "make_warmup_safe_score_fn",
