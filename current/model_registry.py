@@ -1,6 +1,7 @@
 # model_registry.py
 from __future__ import annotations
 from typing import Callable, Dict, Any, Optional
+import types
 import math
 import inspect
 import torch
@@ -410,6 +411,22 @@ def build_model(cfg: dict) -> nn.Module:
         raise KeyError(f"Unknown architecture '{name}'. Available: {list(MODEL_REGISTRY.keys())}")
 
     model = MODEL_REGISTRY[name](cfg)
+
+    head_keys = set(cfg.get("head_keys", ["head", "classifier", "mlp_head", "fc", "cls"]))
+
+    if not hasattr(model, "backbone_parameters") or not callable(getattr(model, "backbone_parameters")):
+        def _backbone_parameters(self):
+            for n, p in self.named_parameters():
+                if not any(hk in n for hk in head_keys):
+                    yield p
+        model.backbone_parameters = types.MethodType(_backbone_parameters, model)
+
+    if not hasattr(model, "head_parameters") or not callable(getattr(model, "head_parameters")):
+        def _head_parameters(self):
+            for n, p in self.named_parameters():
+                if any(hk in n for hk in head_keys):
+                    yield p
+        model.head_parameters = types.MethodType(_head_parameters, model)
 
     if bool(cfg.get("skip_model_contract_check", False)):
         return model

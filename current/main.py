@@ -148,29 +148,57 @@ def _is_square_matrix_like(v) -> bool:
 
 
 def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
+    import numpy as _np
     out = {}
     for k, v in (metrics_dict or {}).items():
-        if v is None:
-            continue
         key = f"{prefix}{k}"
-
-        # Only treat true confusion matrices as matrices
-        if (k in {"cls_confmat", "seg_confmat"} or k.endswith("/confmat") or k.endswith("_confmat")) and _is_square_matrix_like(v):
-            if torch.is_tensor(v):
-                cm = v.detach().cpu().to(torch.int64).numpy()
-            elif isinstance(v, np.ndarray):
-                cm = v.astype(np.int64)
-            else:
-                cm = np.asarray(v, dtype=np.int64)
-
-            out[key] = cm.tolist()
-            C = int(cm.shape[0])
-            for i in range(C):
-                for j in range(C):
-                    out[f"{key}_{i}{j}"] = int(cm[i, j])
+        if "confmat" in k:
+            try:
+                if torch.is_tensor(v):
+                    arr = v.detach().cpu().to(torch.int64).numpy()
+                elif isinstance(v, _np.ndarray):
+                    arr = v.astype(_np.int64)
+                else:
+                    arr = _np.asarray(v, dtype=_np.int64)
+                if arr.ndim == 2 and arr.shape[0] >= 1 and arr.shape[1] >= 1:
+                    out[key] = arr.tolist()
+                    for i in range(arr.shape[0]):
+                        for j in range(arr.shape[1]):
+                            out[f"{key}_{i}{j}"] = int(arr[i, j])
+                else:
+                    # Fallback: store as-is without per-cell scalars
+                    out[key] = arr.tolist() if arr.ndim > 0 else int(arr)
+            except Exception:
+                out[key] = _to_wandb_value(v)
         else:
             out[key] = _to_wandb_value(v)
     return out
+
+
+# def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
+#     out = {}
+#     for k, v in (metrics_dict or {}).items():
+#         if v is None:
+#             continue
+#         key = f"{prefix}{k}"
+
+#         # Only treat true confusion matrices as matrices
+#         if (k in {"cls_confmat", "seg_confmat"} or k.endswith("/confmat") or k.endswith("_confmat")) and _is_square_matrix_like(v):
+#             if torch.is_tensor(v):
+#                 cm = v.detach().cpu().to(torch.int64).numpy()
+#             elif isinstance(v, np.ndarray):
+#                 cm = v.astype(np.int64)
+#             else:
+#                 cm = np.asarray(v, dtype=np.int64)
+
+#             out[key] = cm.tolist()
+#             C = int(cm.shape[0])
+#             for i in range(C):
+#                 for j in range(C):
+#                     out[f"{key}_{i}{j}"] = int(cm[i, j])
+#         else:
+#             out[key] = _to_wandb_value(v)
+#     return out
 
 
 # def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
@@ -279,6 +307,15 @@ def run(
         mode=str(cfg.get("calibration_method", "bal_acc")),   # or "f1"
         positive_index=int(cfg.get("positive_index", 1)),
     )
+
+    @std_evaluator.on(Events.COMPLETED)
+    def _sync_live_threshold(e):
+        t = e.state.metrics.get("threshold", None)
+        pos_rate = e.state.metrics.get("pos_rate", None)
+        if isinstance(t, (int, float)) and isinstance(pos_rate, (int, float)):
+            if 0.0 < float(pos_rate) < 1.0 and 0.0 <= float(t) <= 1.0:
+                _thr["v"] = float(t)  # keep live threshold consistent and non-degenerate
+
     # Optional: one-shot score histogram / sanity-print on the first validation run
     if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
         attach_pos_score_debug_once(

@@ -821,8 +821,12 @@ class CalibratedBinaryReport(Metric):
         self._labels.append(y.detach().cpu())
 
     def compute(self):
-        s = torch.cat(self._scores) if self._scores else torch.empty(0)
-        y = torch.cat(self._labels) if self._labels else torch.empty(0, dtype=torch.long)
+        # s = torch.cat(self._scores) if self._scores else torch.empty(0)
+        # y = torch.cat(self._labels) if self._labels else torch.empty(0, dtype=torch.long)
+        # ensure well-typed, flat probs on CPU; keep empty-case dtype explicit
+        s = (torch.cat(self._scores, dim=0).to(dtype=torch.float32) if self._scores else torch.empty(0, dtype=torch.float32))
+        s = s.view(-1).clamp_(0.0, 1.0)
+        y = (torch.cat(self._labels, dim=0).long() if self._labels else torch.empty(0, dtype=torch.long))
         if s.numel() == 0:
             return {"thr": 0.5, "acc": 0.0, "prec": 0.0, "recall": 0.0, "f1": 0.0, "pos_rate": 0.0,
                     "confmat": torch.zeros(2, 2, dtype=torch.long)}
@@ -979,14 +983,39 @@ def make_metrics(
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
 
+    # # classification
+    # if "classification" in tasks or multitask:
+    #     acc = Accuracy(output_transform=cls_ot)
+    #     prec = Precision(output_transform=cls_ot, average=True)
+    #     rec = Recall(output_transform=cls_ot, average=True)
+    #     auc = ROC_AUC(output_transform=auc_ot)
+    #     # CM: build from same decision/threshold inside a helper we already have
+    #     cm_ot = cls_confmat_output_transform_thresholded(
+    #         decision=cls_decision,
+    #         threshold=cls_threshold,
+    #         positive_index=positive_index,
+    #     )
+    # If caller didn't provide output transforms, build the standard pack
+    if cls_ot is None or auc_ot is None:
+        ots = make_default_cls_output_transforms(
+            decision=cls_decision,
+            threshold=cls_threshold,
+            positive_index=positive_index,
+        )
+        # thresholded -> (y_hat, y) for Acc/Prec/Rec
+        cls_ot = ots.thresholded
+        # base -> (p_pos, y) for AUC
+        auc_ot = ots.base
+
     # classification
     if "classification" in tasks or multitask:
         acc = Accuracy(output_transform=cls_ot)
         prec = Precision(output_transform=cls_ot, average=True)
         rec = Recall(output_transform=cls_ot, average=True)
         auc = ROC_AUC(output_transform=auc_ot)
-        # CM: build from same decision/threshold inside a helper we already have
-        cm_ot = cls_confmat_output_transform_thresholded(
+        # ConfusionMatrix must receive a callable output_transform, not a call
+        cm_ot = partial(
+            cls_confmat_output_transform_thresholded,
             decision=cls_decision,
             threshold=cls_threshold,
             positive_index=positive_index,

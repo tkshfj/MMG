@@ -46,7 +46,7 @@ class ThresholdCalibrator(CalibratorProtocol):
         self.cfg = cfg
         self._t = float(np.clip(cfg.init_threshold, 0.0, 1.0))
 
-    # --- protocol-visible state ---
+    # protocol-visible state
     @property
     def t_prev(self) -> float:
         return float(self._t)
@@ -60,18 +60,19 @@ class ThresholdCalibrator(CalibratorProtocol):
     def threshold(self) -> float:
         return float(self._t)
 
-    # --- public API expected by TwoPassEvaluator ---
+    # public API expected by TwoPassEvaluator
     def pick(
         self,
         epoch: int,
-        scores: np.ndarray,
+        scores: np.ndarray,   # positive-class probabilities in [0,1]
         labels: np.ndarray,
         base_rate: Optional[float] = None,
         auc: Optional[float] = None,   # optional; if not provided, no AUC gate is applied
     ) -> float:
         """
-        Compute and update the decision threshold for the given epoch, then
-        apply per-epoch delta clamp and EMA smoothing. Returns the smoothed threshold.
+        Compute and update the decision threshold from positive-class probabilities,
+        then apply per-epoch delta clamp and EMA smoothing. Returns the smoothed threshold.
+        `scores` must be probabilities; logits must be converted by the caller.
         """
         # Warmup and AUC gating
         if epoch < int(self.cfg.warmup_epochs):
@@ -79,29 +80,39 @@ class ThresholdCalibrator(CalibratorProtocol):
         if auc is not None and float(auc) < float(self.cfg.auc_floor):
             return self._t
 
-        s = np.asarray(scores, dtype=np.float64)
-        y = np.asarray(labels, dtype=np.int64)
-        if s.size == 0:
+        # s = np.asarray(scores, dtype=np.float64)
+        # y = np.asarray(labels, dtype=np.int64)
+        # if s.size == 0:
+        # sanitize inputs and enforce probability range
+        probs = np.asarray(scores, dtype=np.float64).reshape(-1)
+        probs = np.nan_to_num(probs, nan=0.5, posinf=1.0, neginf=0.0)
+        probs = np.clip(probs, 0.0, 1.0)
+        y = np.asarray(labels, dtype=np.int64).reshape(-1)
+        if probs.size == 0:
             return self._t
 
-        # sanitize degenerate / non-finite scores
-        if not np.isfinite(s).all():
-            s = np.nan_to_num(s, nan=0.5, posinf=1.0, neginf=0.0)
+        # # sanitize degenerate / non-finite scores
+        # if not np.isfinite(s).all():
+        #     s = np.nan_to_num(s, nan=0.5, posinf=1.0, neginf=0.0)
 
         if base_rate is None:
             base_rate = float((y == 1).mean()) if y.size else 0.5
         base_rate = float(np.clip(base_rate, 0.0, 1.0))
 
         # compute raw threshold (optionally via bootstraps)
-        if int(self.cfg.bootstraps) > 0 and s.size > 1:
+        # if int(self.cfg.bootstraps) > 0 and s.size > 1:
+        if int(self.cfg.bootstraps) > 0 and probs.size > 1:
             ts = []
-            n = s.shape[0]
+            # n = s.shape[0]
+            n = probs.shape[0]
             for _ in range(int(self.cfg.bootstraps)):
                 idx = np.random.randint(0, n, size=n)
-                ts.append(self._pick_threshold(s[idx], y[idx], base_rate))
+                # ts.append(self._pick_threshold(s[idx], y[idx], base_rate))
+                ts.append(self._pick_threshold(probs[idx], y[idx], base_rate))
             raw_t = float(np.median(ts))
         else:
-            raw_t = float(self._pick_threshold(s, y, base_rate))
+            # raw_t = float(self._pick_threshold(s, y, base_rate))
+            raw_t = float(self._pick_threshold(probs, y, base_rate))
 
         # clamp jump and EMA smooth
         prev = float(self._t)
@@ -110,7 +121,7 @@ class ThresholdCalibrator(CalibratorProtocol):
         self._t = float(np.clip(new_t, 0.0, 1.0))
         return self._t
 
-    # --- internals ---
+    # internals
     def _pick_threshold(self, probs: np.ndarray, labels: np.ndarray, base_rate: float) -> float:
         """
         Choose a raw (pre-smoothed) threshold according to the configured method,
@@ -243,7 +254,7 @@ def build_calibrator(cfg: dict) -> ThresholdCalibrator:
 #     def threshold(self) -> float:
 #         return float(self._t)
 
-#     # ---- public API ----
+#     #- public API-
 #     def fit(self, probs: np.ndarray, labels: np.ndarray, *, epoch: int, auc: Optional[float] = None) -> float:
 #         """
 #         Compute and update the threshold given probability scores & labels for the epoch.
@@ -273,7 +284,7 @@ def build_calibrator(cfg: dict) -> ThresholdCalibrator:
 #         self._t = float(np.clip(new_t, 0.0, 1.0))
 #         return self._t
 
-#     # ---- internals ----
+#     #- internals-
 #     def _pick_threshold(self, probs: np.ndarray, labels: np.ndarray) -> float:
 #         probs = probs.astype(np.float64, copy=False)
 #         labels = labels.astype(np.int32, copy=False)

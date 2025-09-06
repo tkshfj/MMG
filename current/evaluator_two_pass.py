@@ -2,11 +2,11 @@
 from __future__ import annotations
 from typing import Callable, Dict, Optional, Tuple, Any
 import logging
+import math
 import numpy as np
 import torch
 from ignite.engine import Events, Engine
 from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
-# from ignite.metrics import Metric
 from protocols import CalibratorProtocol
 from utils.safe import to_py, labels_to_1d_indices
 from metrics_utils import (
@@ -16,7 +16,7 @@ from metrics_utils import (
     promote_vec,
     get_mask_from_batch,
     seg_confmat_output_transform,
-    positive_score_from_logits,
+    positive_score_from_logits as _to_pos_prob,
     # cls_output_transform,
     make_std_cls_metrics_with_cal_thr
 )
@@ -82,6 +82,10 @@ def as_bool(x, default: bool = True) -> bool:
     return default
 
 
+# def _to_pos_prob(logits: torch.Tensor, positive_index: int = 1) -> torch.Tensor:
+#     return positive_score_from_logits(logits, positive_index=positive_index).float()
+
+
 class ThresholdBox:
     def __init__(self, value=0.5):
         self.value = float(value)
@@ -138,6 +142,24 @@ class TwoPassEvaluator:
         self.health_warmup = int(health_warmup) if health_warmup is not None else int(getattr(getattr(calibrator, "cfg", None), "warmup_epochs", 1))
         self._thr_box = ThresholdBox(value=float(cls_threshold))
         self._watchdog_active: bool = False   # suppress internal health logs when external watchdog is attached
+
+    # central threshold sanitizer
+    def _clamp_thr01(self, value, *, default: float = 0.5, ctx: str = "thr") -> float:
+        """
+        Cast to float, fall back to `default` if cast fails or non-finite, and clamp to [0, 1].
+        Logs once if clamped or bad.
+        """
+        try:
+            f = float(value)
+        except Exception:
+            logger.warning("bad %s: %r (non-castable); using default=%.3f", ctx, value, default)
+            return float(default)
+        if not math.isfinite(f):
+            logger.warning("bad %s: %r (non-finite); using default=%.3f", ctx, f, default)
+            return float(default)
+        if f < 0.0 or f > 1.0:
+            logger.info("%s out of [0,1]: %.6f -> clamped", ctx, f)
+        return float(min(1.0, max(0.0, f)))
 
     # Public guards
     @property
@@ -331,6 +353,8 @@ class TwoPassEvaluator:
         cls_metrics: Dict[str, Any] = {}
         seg_metrics: Dict[str, Any] = {}
         t: float = getattr(self.calibrator, "t_prev", 0.5) if self.calibrator is not None else float(self._thr_box.value)
+        # sanitize the seed threshold too
+        t = self._clamp_thr01(t, default=0.5, ctx="init_thr")
 
         # Classification
         if self.has_cls:
@@ -341,21 +365,29 @@ class TwoPassEvaluator:
             if base_rate is None and labels.size > 0:
                 base_rate = float((labels == 1).mean())
 
-            # ---- Calibrate threshold if available
+            # Calibrate threshold if available
             if self.calibrator is not None:
                 try:
                     picked = self.calibrator.pick(epoch, scores, labels, base_rate)
                     # accept float or (t, aux) tuple/list
+                    # t_new = picked[0] if isinstance(picked, (tuple, list)) else picked
+                    # t = float(t_new)
                     t_new = picked[0] if isinstance(picked, (tuple, list)) else picked
-                    t = float(t_new)
+                    # validate calibrator output; fall back to previous or current `t`
+                    prev = self.last_threshold if self.last_threshold is not None else t
+                    t = self._clamp_thr01(t_new, default=prev, ctx="calibrator_thr")
                 except Exception:
                     logger.warning("calibrator.pick failed; using previous threshold", exc_info=True)
             else:
                 # no calibrator -> keep previous if any
                 if self.last_threshold is not None:
-                    t = float(self.last_threshold)
+                    # t = float(self.last_threshold)
+                    t = self._clamp_thr01(self.last_threshold, default=t, ctx="last_threshold")
 
-            self.last_threshold = t
+            # self.last_threshold = t
+            # self.last_threshold = float(t)
+            # final guard before wiring into metric transforms
+            self._thr_box.value = self._clamp_thr01(t, default=0.5, ctx="thr_box")
 
             # Inject threshold into the evaluator used for metrics
             self._ensure_std_engine()
@@ -374,8 +406,11 @@ class TwoPassEvaluator:
             _ingest_cls_metric_map(cls_metrics, raw)
 
             # record the threshold we used this epoch
-            cls_metrics["threshold"] = float(t)
-            cls_metrics["cal_thr"] = float(t)
+            # cls_metrics["threshold"] = float(t)
+            # cls_metrics["cal_thr"] = float(t)
+            # record the threshold we used this epoch (post-clamp)
+            cls_metrics["threshold"] = float(self._thr_box.value)
+            cls_metrics["cal_thr"] = float(self._thr_box.value)
 
             # Decision-health logging (same behavior as before)
             if base_rate is not None:
@@ -477,7 +512,7 @@ class TwoPassEvaluator:
             if not torch.is_tensor(logits):
                 logits = torch.as_tensor(logits)
             # unified: BCE(1-logit) or CE(2+ logits)
-            s = positive_score_from_logits(logits, positive_index=self.pos_idx).view(-1)
+            s = _to_pos_prob(logits, positive_index=self.pos_idx).view(-1)
 
             all_scores.append(s.detach().cpu().numpy())
             all_labels.append(y)
@@ -527,6 +562,8 @@ class TwoPassEvaluator:
                 out_map["cls_out"] = cls_logits
                 out_map["logits"] = cls_logits
                 out_map["y_pred"] = cls_logits  # Ignite CM wants y_pred/y
+                # optional debug:
+                out_map["prob_pos"] = _to_pos_prob(cls_logits, positive_index=self.pos_idx)
             except Exception:
                 pass
 

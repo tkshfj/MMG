@@ -19,7 +19,7 @@ from metrics_utils import (
     make_metrics,
     make_cls_val_metrics,
     make_seg_val_metrics,
-    positive_score_from_logits
+    positive_score_from_logits as _to_pos_prob
 )
 
 
@@ -229,6 +229,30 @@ def is_ignite_engine(obj) -> bool:
         return hasattr(obj, "add_event_handler") and hasattr(obj, "on")
 
 
+def _pick_logits_from_output(out: Any) -> Optional[torch.Tensor]:
+    # Returns raw logits only; never probabilities. Decisions must use decision_from_logits(...).
+    if isinstance(out, (tuple, list)) and len(out) >= 1:
+        return out[0]
+    if isinstance(out, dict):
+        for k in ("y_pred", "logits", "cls_out"):
+            v = out.get(k, None)
+            if v is not None:
+                return v
+    return None
+
+
+# add this helper (right after _pick_logits_from_output, for example)
+def decision_from_logits(
+    logits: torch.Tensor,
+    threshold: float,
+    *,
+    positive_index: int = 1,
+) -> torch.Tensor:
+    """Return int64 predictions computed as (p_pos >= threshold), never on raw logits."""
+    probs = _to_pos_prob(logits, positive_index=int(positive_index)).view(-1)
+    return (probs >= float(threshold)).long()
+
+
 def build_trainer(
     device,
     max_epochs,
@@ -350,7 +374,7 @@ def build_evaluator(
                 logits = logits.float()
             else:
                 logits = torch.as_tensor(logits, dtype=torch.float32, device=dev)
-            out_map["y_pred"] = logits
+            out_map["y_pred"] = logits  # Keep logits here. Ignite metrics' output transforms will convert to probs/decisions.
             out_map["logits"] = logits
             out_map["cls_out"] = logits
             if y is not None:
@@ -794,36 +818,50 @@ def attach_pos_score_debug_once(
     @evaluator.on(Events.ITERATION_COMPLETED)
     def _collect(engine: Engine):
         out = engine.state.output
-        # Accept (logits, y) or dict with logits under common keys
-        if isinstance(out, (tuple, list)) and len(out) >= 1:
-            logits = out[0]
-        elif isinstance(out, dict):
-            # logits = out.get("y_pred") or out.get("logits") or out.get("cls_out")
-            logits = None
-            if isinstance(out, dict):
-                logits = out.get("y_pred", None)
-                if logits is None:
-                    logits = out.get("logits", None)
-                if logits is None:
-                    logits = out.get("cls_out", None)
-            elif isinstance(out, (tuple, list)) and len(out) >= 1:
-                logits = out[0]
-            else:
-                return
-            if logits is None:
-                return
-        else:
+        logits = _pick_logits_from_output(out)
+        if logits is None:
             return
         try:
-            s = positive_score_from_logits(logits, positive_index=int(positive_index))
-            # safety: if the helper returned raw logits, map to [0,1]
-            if (s.detach().min() < 0) or (s.detach().max() > 1):
-                s = torch.sigmoid(s)
+            s = _to_pos_prob(logits, positive_index=int(positive_index))
             s = s.detach().reshape(-1).cpu()
             buf["scores"].append(s)
         except Exception:
-            # Silent failure to avoid interrupting eval
             pass
+
+    # @evaluator.on(Events.ITERATION_COMPLETED)
+    # def _collect(engine: Engine):
+    #     out = engine.state.output
+    #     # Accept (logits, y) or dict with logits under common keys
+    #     if isinstance(out, (tuple, list)) and len(out) >= 1:
+    #         # logits = out[0]
+    #         logits = _pick_logits_from_output(out)
+    #     elif isinstance(out, dict):
+    #         # logits = out.get("y_pred") or out.get("logits") or out.get("cls_out")
+    #         logits = None
+    #         if isinstance(out, dict):
+    #             logits = out.get("y_pred", None)
+    #             if logits is None:
+    #                 logits = out.get("logits", None)
+    #             if logits is None:
+    #                 logits = out.get("cls_out", None)
+    #         elif isinstance(out, (tuple, list)) and len(out) >= 1:
+    #             logits = out[0]
+    #         else:
+    #             return
+    #         if logits is None:
+    #             return
+    #     else:
+    #         return
+    #     try:
+    #         s = positive_score_from_logits(logits, positive_index=int(positive_index))
+    #         # safety: if the helper returned raw logits, map to [0,1]
+    #         if (s.detach().min() < 0) or (s.detach().max() > 1):
+    #             s = torch.sigmoid(s)
+    #         s = s.detach().reshape(-1).cpu()
+    #         buf["scores"].append(s)
+    #     except Exception:
+    #         # Silent failure to avoid interrupting eval
+    #         pass
 
     @evaluator.on(Events.COMPLETED)
     def _summarize(engine: Engine):
@@ -979,12 +1017,16 @@ def _best_threshold_from_probs(p: torch.Tensor, y_true: torch.Tensor, mode: str 
     Returns (threshold, stats_dict)
     """
     with torch.no_grad():
-        p = p.float().cpu().clamp(0.0, 1.0)
-        y = y_true.long().cpu()
-        # candidate thresholds: unique preds + endpoints
-        cand = torch.quantile(p, torch.linspace(0, 1, 101)).unique()
-        best_thr, best_score, best_stats = 0.5, -1.0, {}
+        # p = p.float().cpu().clamp(0.0, 1.0)
+        # y = y_true.long().cpu()
+        p = p.detach().float().clamp_(0.0, 1.0).view(-1)     # keep device, in-place clamp
+        y = y_true.detach().long().view(-1).to(p.device)
+        # # candidate thresholds: unique preds + endpoints
+        # cand = torch.quantile(p, torch.linspace(0, 1, 101)).unique()
+        # stay on the same device; quantile works on CUDA too
+        cand = torch.quantile(p, torch.linspace(0, 1, 101, device=p.device)).unique()
 
+        best_thr, best_score, best_stats = 0.5, -1.0, {}
         for thr in cand:
             y_hat = (p >= thr).long()
             tp = int(((y_hat == 1) & (y == 1)).sum())
@@ -1014,12 +1056,6 @@ def _best_threshold_from_probs(p: torch.Tensor, y_true: torch.Tensor, mode: str 
         return best_thr, best_stats
 
 
-# def attach_val_threshold_search(
-#     *,
-#     evaluator: Engine,
-#     mode: str = "bal_acc",   # "bal_acc" or "f1"
-#     logger=None,
-# ):
 def attach_val_threshold_search(
     *,
     evaluator: Engine,
@@ -1028,11 +1064,12 @@ def attach_val_threshold_search(
     positive_index: int = 1,
 ):
     """
-    Collects logits/targets across the validation epoch, selects a per-epoch threshold,
-    and writes: val_threshold, val_prec, val_recall, val_cls_confmat, etc. into metrics.
+    Collect positive-class probabilities each val epoch, pick a threshold on the same scale,
+    and write confusion/summary stats into evaluator.state.metrics.
+    Adds guards to avoid locking into degenerate thresholds when pos_rate is 0 or 1.
     """
-    # buf = {"logits": [], "targets": []}
     buf = {"scores": [], "targets": []}
+    state = {"last_good_thr": 0.5}  # retains last non-degenerate threshold in (0,1)
 
     @evaluator.on(Events.EPOCH_STARTED)
     def _reset_buffers(_):
@@ -1041,73 +1078,167 @@ def attach_val_threshold_search(
 
     @evaluator.on(Events.ITERATION_COMPLETED)
     def _collect(engine):
-        # engine.state.output must be (logits, y_true) or {"y_pred": logits, "y": y_true}
         out = engine.state.output
-        # if isinstance(out, (tuple, list)) and len(out) >= 2:
-        #     logits, y_true = out[0], out[1]
-        # elif isinstance(out, dict) and "y_pred" in out and "y" in out:
-        #     logits, y_true = out["y_pred"], out["y"]
-        # else:
-        #     return
-        logits = y_true = None
-        if isinstance(out, (tuple, list)):
-            if len(out) >= 2:
-                logits, y_true = out[0], out[1]
-            else:
-                return
-        elif isinstance(out, dict):
-            y_true = out.get("y", None)
-            logits = out.get("y_pred", None)
-            if logits is None:
-                logits = out.get("logits", None)
-            if logits is None:
-                logits = out.get("cls_out", None)
-            if logits is None or y_true is None:
-                return
+        logits = _pick_logits_from_output(out)
+        if logits is None:
+            return
+        s = _to_pos_prob(logits, positive_index=int(positive_index))
+        buf["scores"].append(s.detach().reshape(-1))
+        # pull targets from common shapes/keys established in build_evaluator
+        if isinstance(out, (tuple, list)) and len(out) >= 2:
+            y_true = out[1]
+        elif isinstance(out, dict) and "y" in out:
+            y_true = out["y"]
         else:
             return
-
-        # buf["logits"].append(logits.detach().flatten())
-        s = positive_score_from_logits(logits, positive_index=int(positive_index))
-        if (s.detach().min() < 0) or (s.detach().max() > 1):
-            s = torch.sigmoid(s)
-        # buf["logits"].append(s.detach().reshape(-1))
-        buf["scores"].append(s.detach().reshape(-1))
-        buf["targets"].append(y_true.detach().flatten())
+        buf["targets"].append(torch.as_tensor(y_true).detach().reshape(-1).long())
 
     @evaluator.on(Events.EPOCH_COMPLETED)
-    def _choose_threshold(engine):
+    def _choose_threshold(engine: Engine):
         if not buf["scores"]:
             return
-        # logits = torch.cat(buf["logits"], dim=0)
-        probs = torch.cat(buf["scores"], dim=0)
-        y_true = torch.cat(buf["targets"], dim=0)
+        probs = torch.cat(buf["scores"], dim=0).clamp(0.0, 1.0)
+        y_true = torch.cat(buf["targets"], dim=0).long()
 
-        # thr, stats = _best_threshold(logits, y_true, mode=mode)
         thr, stats = _best_threshold_from_probs(probs, y_true, mode=mode)
+        pos_rate = float(stats["pos_rate"])
         m = engine.state.metrics
-        m["threshold"] = thr
 
-        # write confusion-matrix-like fields compatible with logs
-        tp, tn, fp, fn = stats["tp"], stats["tn"], stats["fp"], stats["fn"]
+        # Summary stats for quick sanity checks
+        m["score_mean"] = float(probs.mean().item())
+        m["score_std"] = float(probs.std(unbiased=False).item())
+        m["gt_pos_rate"] = float((y_true == 1).float().mean().item())
+
+        # Degenerate guard: if all-positive or all-negative decisions, keep last good threshold
+        degenerate = (pos_rate == 0.0) or (pos_rate == 1.0)
+        if degenerate:
+            thr = float(state["last_good_thr"])  # keep previous usable threshold
+        else:
+            state["last_good_thr"] = float(thr)
+
+        m["threshold"] = float(thr)
+
+        # recompute confusion matrix at chosen thr for consistency
+        y_hat = (probs >= thr).long()
+        tp = int(((y_hat == 1) & (y_true == 1)).sum())
+        tn = int(((y_hat == 0) & (y_true == 0)).sum())
+        fp = int(((y_hat == 1) & (y_true == 0)).sum())
+        fn = int(((y_hat == 0) & (y_true == 1)).sum())
+
+        prec = tp / max(tp + fp, 1)
+        rec1 = tp / max(tp + fn, 1)
+        rec0 = tn / max(tn + fp, 1)
+        bal_acc = 0.5 * (rec0 + rec1)
+        f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
+
         m["cls_confmat"] = [[tn, fp], [fn, tp]]
         m["cls_confmat_00"] = float(tn)
         m["cls_confmat_01"] = float(fp)
         m["cls_confmat_10"] = float(fn)
         m["cls_confmat_11"] = float(tp)
-        m["prec"] = stats["prec"]
-        m["recall"] = stats["rec"]
-        m["recall_0"] = stats["rec_0"]
-        m["recall_1"] = stats["rec_1"]
-        m["bal_acc"] = stats["bal_acc"]
-        m["f1"] = stats["f1"]
-        m["pos_rate"] = stats["pos_rate"]
+        m["prec"] = float(prec)
+        m["recall"] = float(rec1)
+        m["recall_0"] = float(rec0)
+        m["recall_1"] = float(rec1)
+        m["bal_acc"] = float(bal_acc)
+        m["f1"] = float(f1)
+        m["pos_rate"] = float(pos_rate)
 
         if logger is not None:
             try:
                 logger("val/threshold", float(thr))
             except Exception:
                 pass
+
+
+# def attach_val_threshold_search(
+#     *,
+#     evaluator: Engine,
+#     mode: str = "bal_acc",   # "bal_acc" or "f1"
+#     logger=None,
+#     positive_index: int = 1,
+# ):
+#     """
+#     Collects logits/targets across the validation epoch, selects a per-epoch threshold,
+#     and writes: val_threshold, val_prec, val_recall, val_cls_confmat, etc. into metrics.
+#     """
+#     # buf = {"logits": [], "targets": []}
+#     buf = {"scores": [], "targets": []}
+
+#     @evaluator.on(Events.EPOCH_STARTED)
+#     def _reset_buffers(_):
+#         buf["scores"].clear()
+#         buf["targets"].clear()
+
+#     @evaluator.on(Events.ITERATION_COMPLETED)
+#     def _collect(engine):
+#         # engine.state.output must be (logits, y_true) or {"y_pred": logits, "y": y_true}
+#         out = engine.state.output
+#         # if isinstance(out, (tuple, list)) and len(out) >= 2:
+#         #     logits, y_true = out[0], out[1]
+#         # elif isinstance(out, dict) and "y_pred" in out and "y" in out:
+#         #     logits, y_true = out["y_pred"], out["y"]
+#         # else:
+#         #     return
+#         logits = y_true = None
+#         if isinstance(out, (tuple, list)):
+#             if len(out) >= 2:
+#                 logits, y_true = out[0], out[1]
+#             else:
+#                 return
+#         elif isinstance(out, dict):
+#             y_true = out.get("y", None)
+#             logits = out.get("y_pred", None)
+#             if logits is None:
+#                 logits = out.get("logits", None)
+#             if logits is None:
+#                 logits = out.get("cls_out", None)
+#             if logits is None or y_true is None:
+#                 return
+#         else:
+#             return
+
+#         # buf["logits"].append(logits.detach().flatten())
+#         s = positive_score_from_logits(logits, positive_index=int(positive_index))
+#         if (s.detach().min() < 0) or (s.detach().max() > 1):
+#             s = torch.sigmoid(s)
+#         # buf["logits"].append(s.detach().reshape(-1))
+#         buf["scores"].append(s.detach().reshape(-1))
+#         buf["targets"].append(y_true.detach().flatten())
+
+#     @evaluator.on(Events.EPOCH_COMPLETED)
+#     def _choose_threshold(engine):
+#         if not buf["scores"]:
+#             return
+#         # logits = torch.cat(buf["logits"], dim=0)
+#         probs = torch.cat(buf["scores"], dim=0)
+#         y_true = torch.cat(buf["targets"], dim=0)
+
+#         # thr, stats = _best_threshold(logits, y_true, mode=mode)
+#         thr, stats = _best_threshold_from_probs(probs, y_true, mode=mode)
+#         m = engine.state.metrics
+#         m["threshold"] = thr
+
+#         # write confusion-matrix-like fields compatible with logs
+#         tp, tn, fp, fn = stats["tp"], stats["tn"], stats["fp"], stats["fn"]
+#         m["cls_confmat"] = [[tn, fp], [fn, tp]]
+#         m["cls_confmat_00"] = float(tn)
+#         m["cls_confmat_01"] = float(fp)
+#         m["cls_confmat_10"] = float(fn)
+#         m["cls_confmat_11"] = float(tp)
+#         m["prec"] = stats["prec"]
+#         m["recall"] = stats["rec"]
+#         m["recall_0"] = stats["rec_0"]
+#         m["recall_1"] = stats["rec_1"]
+#         m["bal_acc"] = stats["bal_acc"]
+#         m["f1"] = stats["f1"]
+#         m["pos_rate"] = stats["pos_rate"]
+
+#         if logger is not None:
+#             try:
+#                 logger("val/threshold", float(thr))
+#             except Exception:
+#                 pass
 
 
 def maybe_update_best(engine: Engine, *, watch_metric: str, mode: str, state: dict) -> bool:
@@ -1129,9 +1260,6 @@ def maybe_update_best(engine: Engine, *, watch_metric: str, mode: str, state: di
 __all__ = [
     "Task",
     "PrepareBatch",
-    "make_prepare_batch",
-    "build_trainer",
-    "build_evaluator",
     "attach_engine_metrics",
     "attach_scheduler",
     "attach_lr_scheduling",
@@ -1139,7 +1267,11 @@ __all__ = [
     "attach_val_threshold_search",
     "attach_early_stopping",
     "attach_best_checkpoint",
-    "make_warmup_safe_score_fn",
+    "build_trainer",
+    "build_evaluator",
+    "decision_from_logits",
     "get_label_indices_from_batch",
+    "make_prepare_batch",
+    "make_warmup_safe_score_fn",
     "maybe_update_best",
 ]
