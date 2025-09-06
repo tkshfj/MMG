@@ -175,54 +175,6 @@ def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict
     return out
 
 
-# def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
-#     out = {}
-#     for k, v in (metrics_dict or {}).items():
-#         if v is None:
-#             continue
-#         key = f"{prefix}{k}"
-
-#         # Only treat true confusion matrices as matrices
-#         if (k in {"cls_confmat", "seg_confmat"} or k.endswith("/confmat") or k.endswith("_confmat")) and _is_square_matrix_like(v):
-#             if torch.is_tensor(v):
-#                 cm = v.detach().cpu().to(torch.int64).numpy()
-#             elif isinstance(v, np.ndarray):
-#                 cm = v.astype(np.int64)
-#             else:
-#                 cm = np.asarray(v, dtype=np.int64)
-
-#             out[key] = cm.tolist()
-#             C = int(cm.shape[0])
-#             for i in range(C):
-#                 for j in range(C):
-#                     out[f"{key}_{i}{j}"] = int(cm[i, j])
-#         else:
-#             out[key] = _to_wandb_value(v)
-#     return out
-
-
-# def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
-#     out = {}
-#     for k, v in (metrics_dict or {}).items():
-#         key = f"{prefix}{k}"
-#         if "confmat" in k:  # handles cls_confmat and seg_confmat
-#             # store the whole matrix as list AND per-cell scalars for easy charting
-#             if torch.is_tensor(v):
-#                 cm = v.detach().cpu().to(torch.int64).numpy()
-#             elif isinstance(v, np.ndarray):
-#                 cm = v.astype(np.int64)
-#             else:
-#                 cm = np.asarray(v, dtype=np.int64)
-#             out[key] = cm.tolist()
-#             C = int(cm.shape[0])
-#             for i in range(C):
-#                 for j in range(C):
-#                     out[f"{key}_{i}{j}"] = int(cm[i, j])
-#         else:
-#             out[key] = _to_wandb_value(v)
-#     return out
-
-
 def run(
     cfg: dict,
     train_loader,
@@ -301,12 +253,30 @@ def run(
         include_seg=has_seg,
         trainer_for_logging=trainer,
     )
-    # Always collect a 1D positive score and per-epoch threshold from validation
+
+    # main.py (after std_evaluator is built)
+    score_kwargs = {
+        "binary_single_logit": bool(cfg.get("binary_single_logit", False)),
+        "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
+        # optional: you can force a mode explicitly:
+        # "mode": str(cfg.get("score_mode", "auto")),  # one of: auto, bce_single, ce_softmax, bce_two_logit
+    }
+
     attach_val_threshold_search(
         evaluator=std_evaluator,
-        mode=str(cfg.get("calibration_method", "bal_acc")),   # or "f1"
+        mode=str(cfg.get("calibration_method", "bal_acc")),  # or "f1"
         positive_index=int(cfg.get("positive_index", 1)),
+        score_kwargs=score_kwargs,  # NEW
     )
+
+    if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
+        attach_pos_score_debug_once(
+            evaluator=std_evaluator,
+            positive_index=int(cfg.get("positive_index", 1)),
+            bins=int(cfg.get("pos_hist_bins", 20)),
+            tag=str(cfg.get("pos_debug_tag", "debug_pos")),
+            score_kwargs=score_kwargs,  # NEW
+        )
 
     @std_evaluator.on(Events.COMPLETED)
     def _sync_live_threshold(e):
@@ -316,22 +286,6 @@ def run(
             if 0.0 < float(pos_rate) < 1.0 and 0.0 <= float(t) <= 1.0:
                 _thr["v"] = float(t)  # keep live threshold consistent and non-degenerate
 
-    # Optional: one-shot score histogram / sanity-print on the first validation run
-    if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
-        attach_pos_score_debug_once(
-            evaluator=std_evaluator,
-            positive_index=int(cfg.get("positive_index", 1)),
-            bins=int(cfg.get("pos_hist_bins", 20)),
-            tag=str(cfg.get("pos_debug_tag", "debug_pos")),
-        )
-    # # After building std_evaluator
-    # if str(cfg.get("architecture", "")).lower() == "vit" and bool(cfg.get("debug_score_hist", True)):
-    #     attach_pos_score_debug_once(
-    #         evaluator=std_evaluator,
-    #         positive_index=int(cfg.get("positive_index", 1)),
-    #         bins=int(cfg.get("debug_score_bins", 20)),
-    #         print_fn=print,  # or logger.info
-    #     )
     # Optionally compute per-epoch threshold & confusion stats for classification
     if has_cls:
         # attach_val_threshold_search(evaluator=std_evaluator, mode="acc")

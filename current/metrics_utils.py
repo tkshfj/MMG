@@ -1,12 +1,11 @@
 # metrics_utils.py
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Dict, Literal, Mapping, Optional, Tuple, Union
 from dataclasses import dataclass
 from functools import partial
 import numpy as np
 import torch
-# import torch.nn as nn
 import warnings
 from ignite.engine import Events, Engine
 from ignite.metrics import ConfusionMatrix, Precision, Recall, Accuracy, ROC_AUC, MetricsLambda
@@ -26,24 +25,71 @@ def _first_not_none(m: Mapping[str, Any], keys: tuple[str, ...]):
     return None
 
 
-def positive_score_from_logits(logits: Any, positive_index: int = 1) -> torch.Tensor:
+def positive_score_from_logits(
+    logits: Any,
+    *,
+    positive_index: int = 1,
+    # New: accept flags or an explicit mode
+    binary_single_logit: Optional[bool] = None,
+    binary_bce_from_two_logits: Optional[bool] = None,
+    mode: Literal["auto", "bce_single", "ce_softmax", "bce_two_logit"] = "auto",
+) -> torch.Tensor:
     """
-    Return p(pos) for classification, handling:
-      - BCE single-logit:    sigmoid(logit)                     -> [B]
-      - CE 2+ logits:        softmax(logits)[:, positive_index] -> [B]
-    Expects logits shaped [B,C] or [B]; higher dims should be reduced by cls_output_transform first.
+    Return p(pos) for binary classification.
+
+    Modes (selected either by flags or explicitly via `mode`):
+      - "bce_single":     sigmoid(logit)                            -> [B]
+      - "ce_softmax":     softmax(logits, -1)[..., pos_idx]         -> [B]
+      - "bce_two_logit":  sigmoid(logits[..., pos_idx])             -> [B]
+
+    Auto-resolution rules (if mode="auto"):
+      1) If binary_single_logit is True          -> bce_single
+      2) elif binary_bce_from_two_logits is True -> bce_two_logit
+      3) else:
+           - if last dim == 1 or tensor is 1D    -> bce_single
+           - else                                -> ce_softmax
+
+    Accepts logits shaped [..., C] or [...] where C∈{1,2+}; higher dims already
+    reduced by caller for classification (i.e., [B] or [B,C]).
     """
     t = to_tensor(logits).float()
-    if t.ndim == 1:
-        # [B] -> single-logit BCE
+    # normalize shape references to last dim
+    last_dim = t.shape[-1] if t.ndim > 0 else 1
+
+    # Resolve mode if auto
+    if mode == "auto":
+        if binary_single_logit is True:
+            mode = "bce_single"
+        elif binary_bce_from_two_logits is True:
+            mode = "bce_two_logit"
+        else:
+            if t.ndim == 1 or last_dim == 1:
+                mode = "bce_single"
+            else:
+                mode = "ce_softmax"
+
+    # Apply chosen mapping
+    if mode == "bce_single":
+        # supports [B] or [B,1] ... → [B]
+        if t.ndim >= 2 and last_dim == 1:
+            t = t.squeeze(-1)
         return torch.sigmoid(t)
-    if t.ndim == 2:
-        C = t.shape[1]
-        if C == 1:
-            return torch.sigmoid(t.squeeze(1))
-        # CE with C≥2
-        return torch.softmax(t, dim=1)[:, int(positive_index)]
-    raise ValueError(f"positive_score_from_logits: expected [B] or [B,C], got {tuple(t.shape)}")
+
+    if mode == "bce_two_logit":
+        # expect 2 logits (or at least a channel dimension)
+        if t.ndim == 1:
+            # edge case: if already the positive logit flattened
+            return torch.sigmoid(t)
+        return torch.sigmoid(t[..., int(positive_index)])
+
+    if mode == "ce_softmax":
+        # softmax over channel dim; then select positive channel
+        probs = torch.softmax(t, dim=-1)
+        return probs[..., int(positive_index)]
+
+    raise ValueError(
+        f"positive_score_from_logits: unsupported shape {tuple(t.shape)} for mode='{mode}'"
+    )
 
 
 def get_mask_from_batch(batch: Mapping[str, Any]) -> Optional[torch.Tensor]:
@@ -638,12 +684,6 @@ def seg_output_transform(
         pred = pred.unsqueeze(1)               # [B,1,H,W]
     elif pred.ndim != 4:
         raise ValueError("seg_output_transform: pred must be [B,C,H,W]")
-    # if pred.ndim == 3:
-    #     pred = pred.unsqueeze(0)         # [1,H,W]
-    # if pred.ndim == 3:
-    #     pred = pred.unsqueeze(1)         # [1,1,H,W]
-    # if pred.ndim != 4:
-    #     raise ValueError(f"seg_output_transform: pred must be [B,C,H,W], got {tuple(pred.shape)}")
 
     if y.ndim == 2:
         y = y.unsqueeze(0)
@@ -821,8 +861,6 @@ class CalibratedBinaryReport(Metric):
         self._labels.append(y.detach().cpu())
 
     def compute(self):
-        # s = torch.cat(self._scores) if self._scores else torch.empty(0)
-        # y = torch.cat(self._labels) if self._labels else torch.empty(0, dtype=torch.long)
         # ensure well-typed, flat probs on CPU; keep empty-case dtype explicit
         s = (torch.cat(self._scores, dim=0).to(dtype=torch.float32) if self._scores else torch.empty(0, dtype=torch.float32))
         s = s.view(-1).clamp_(0.0, 1.0)
@@ -983,18 +1021,6 @@ def make_metrics(
 ) -> dict[str, Any]:
     metrics: dict[str, Any] = {}
 
-    # # classification
-    # if "classification" in tasks or multitask:
-    #     acc = Accuracy(output_transform=cls_ot)
-    #     prec = Precision(output_transform=cls_ot, average=True)
-    #     rec = Recall(output_transform=cls_ot, average=True)
-    #     auc = ROC_AUC(output_transform=auc_ot)
-    #     # CM: build from same decision/threshold inside a helper we already have
-    #     cm_ot = cls_confmat_output_transform_thresholded(
-    #         decision=cls_decision,
-    #         threshold=cls_threshold,
-    #         positive_index=positive_index,
-    #     )
     # If caller didn't provide output transforms, build the standard pack
     if cls_ot is None or auc_ot is None:
         ots = make_default_cls_output_transforms(

@@ -16,7 +16,7 @@ from metrics_utils import (
     promote_vec,
     get_mask_from_batch,
     seg_confmat_output_transform,
-    positive_score_from_logits as _to_pos_prob,
+    positive_score_from_logits,
     # cls_output_transform,
     make_std_cls_metrics_with_cal_thr
 )
@@ -80,10 +80,6 @@ def as_bool(x, default: bool = True) -> bool:
     if s in {"0", "false", "f", "no", "n", "off", ""}:
         return False
     return default
-
-
-# def _to_pos_prob(logits: torch.Tensor, positive_index: int = 1) -> torch.Tensor:
-#     return positive_score_from_logits(logits, positive_index=positive_index).float()
 
 
 class ThresholdBox:
@@ -384,8 +380,6 @@ class TwoPassEvaluator:
                     # t = float(self.last_threshold)
                     t = self._clamp_thr01(self.last_threshold, default=t, ctx="last_threshold")
 
-            # self.last_threshold = t
-            # self.last_threshold = float(t)
             # final guard before wiring into metric transforms
             self._thr_box.value = self._clamp_thr01(t, default=0.5, ctx="thr_box")
 
@@ -405,9 +399,6 @@ class TwoPassEvaluator:
             # Ingest metrics (scalars, vectors, confmat)
             _ingest_cls_metric_map(cls_metrics, raw)
 
-            # record the threshold we used this epoch
-            # cls_metrics["threshold"] = float(t)
-            # cls_metrics["cal_thr"] = float(t)
             # record the threshold we used this epoch (post-clamp)
             cls_metrics["threshold"] = float(self._thr_box.value)
             cls_metrics["cal_thr"] = float(self._thr_box.value)
@@ -464,7 +455,6 @@ class TwoPassEvaluator:
     # capability detection
     def _autodetect_capabilities(self, model, val_loader, device) -> None:
         # Peek one batch (val_loader must be re-iterable)
-        # batch = next(iter(val_loader))
         it = iter(val_loader)
         try:
             batch = next(it)
@@ -512,7 +502,7 @@ class TwoPassEvaluator:
             if not torch.is_tensor(logits):
                 logits = torch.as_tensor(logits)
             # unified: BCE(1-logit) or CE(2+ logits)
-            s = _to_pos_prob(logits, positive_index=self.pos_idx).view(-1)
+            s = positive_score_from_logits(logits, positive_index=self.pos_idx).view(-1)
 
             all_scores.append(s.detach().cpu().numpy())
             all_labels.append(y)
@@ -563,7 +553,7 @@ class TwoPassEvaluator:
                 out_map["logits"] = cls_logits
                 out_map["y_pred"] = cls_logits  # Ignite CM wants y_pred/y
                 # optional debug:
-                out_map["prob_pos"] = _to_pos_prob(cls_logits, positive_index=self.pos_idx)
+                out_map["prob_pos"] = positive_score_from_logits(cls_logits, positive_index=self.pos_idx)
             except Exception:
                 pass
 
@@ -595,7 +585,6 @@ class TwoPassEvaluator:
         # attach metrics
         # Classification (AUC from raw logits; thresholded metrics via thr_box)
         if self.has_cls:
-            # thr_getter = lambda: float(self._thr_box.value)
 
             def _thr_getter() -> float:
                 # Always read the most recent threshold set in validate()
