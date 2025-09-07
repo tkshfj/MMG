@@ -1,0 +1,102 @@
+# sweep_cnn.yaml
+program: main.py
+method: bayes
+
+metric:
+  name: val/auc
+  goal: maximize
+
+parameters:
+  # Fixed
+  architecture: { value: simple_cnn }
+  task:         { value: classification }
+  run_cap:      { value: 20 }
+  in_channels:  { value: 1 }
+  input_shape:  { value: [256, 256] }
+  num_classes:  { value: 2 }
+
+  # Class balance; TRAIN re-computed in code
+  class_balance: { value: inverse }
+
+  # Binary head shape
+  binary_single_logit:        { value: true }
+  binary_bce_from_two_logits: { value: false }
+
+  # Execution
+  epochs:            { value: 40 }
+  num_workers:       { value: 8 }
+  seed:              { value: 42 }
+  debug:             { value: true }
+  debug_transforms:  { value: false }
+  console_iter_log:  { value: false }
+  console_epoch_log: { value: true }
+
+  # Two-pass validation & calibration
+  two_pass_val:   { value: true }
+  log_calibrated: { value: true }
+
+  calibration_method:
+    values: [youden, f1, rate_match]
+  cal_q_bounds:        { value: [0.10, 0.90] }
+  cal_min_tp:          { values: [5, 10, 20] }
+  cal_bootstraps:      { values: [0, 25] }
+  cal_warmup_epochs:   { values: [1, 2, 3] }
+  cal_init_threshold:  { values: [0.40, 0.50, 0.60] }
+  cal_ema_beta:        { values: [0.10, 0.20, 0.30] }
+  cal_max_delta:       { values: [0.05, 0.10, 0.20] }
+  cal_rate_tolerance:  { values: [0.10, 0.12, 0.15, 0.20] }
+  cal_auc_floor:       { values: [0.50, 0.55] }
+
+  # Decision health watchdog
+  enable_decision_health: { value: false }
+  decision_health_tol:    { value: 1.0 }     # or make it a sweep later
+  decision_health_need_k: { value: 9999 }    # disables unless we sweep it
+
+  # Loss / decision
+  cls_loss:       { value: auto }
+  cls_decision:   { value: threshold }
+  cls_threshold:  { value: 0.5 }
+  positive_index: { value: 1 }
+
+  # Core tunables
+  batch_size:
+    values: [32, 64]
+  lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0003
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.000005
+    max: 0.00005
+  dropout_rate:
+    distribution: uniform
+    min: 0.18
+    max: 0.24
+
+  # LR strategy (engine reads lr_strategy)
+  lr_strategy:
+    values: [none, cosine, warmcos, plateau]
+
+  # Cosine
+  T_max:   { value: 40 }
+  eta_min: { value: 0.0 }
+
+  # Warmup (for warmcos)
+  warmup_epochs:
+    values: [0, 2, 3]
+  warmup_start_factor:
+    values: [0.1, 0.2]
+
+  # Plateau (used when lr_strategy=plateau)
+  plateau_metric: { value: "val/loss" }
+  plateau_mode:   { value: min }
+  patience:       { value: 0 }
+  factor: {values: [0.5, 0.3]}
+  plateau_threshold: {values: [0.0001, 0.0005]}
+
+  # Param-group strategy (split optimizer settings)
+  param_groups: { values: [single, split] }  # { value: split }
+  head_lr_scale: { value: 0.5 }          # lower LR on head
+  head_wd_scale: { value: 1.5 }          # slightly higher WD on head
+  head_keys:     { value: ["head","classifier","mlp_head","fc","cls"] }

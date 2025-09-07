@@ -1,0 +1,116 @@
+# sweep_mtlunet.yaml
+program: main.py
+method: bayes
+
+metric:
+  name: val/multi
+  goal: maximize
+
+parameters:
+  # Fixed experiment knobs
+  architecture: {value: multitask_unet}
+  task: {value: multitask}
+  run_cap: {value: 20}
+
+  # Execution
+  epochs: {value: 40}
+  num_workers: {value: 8}
+  debug: {value: true}
+  debug_transforms: {value: false}
+  console_iter_log: {value: false}
+  console_epoch_log: {value: true}
+  seed: {value: 42}
+
+  # Two-pass validation / calibration
+  two_pass_val: {value: true}
+  log_calibrated: {value: true}
+
+  calibration_method:
+    values: [youden, f1, rate_match]
+  cal_q_bounds:
+    value: [0.10, 0.90]
+  cal_min_tp:
+    values: [5, 10, 20]
+  cal_bootstraps:
+    values: [0, 25]
+
+  cal_warmup_epochs:
+    values: [1, 2, 3]
+  cal_init_threshold:
+    values: [0.40, 0.50, 0.60]
+  cal_ema_beta:
+    values: [0.10, 0.20, 0.30]
+  cal_max_delta:
+    values: [0.05, 0.10, 0.20]
+  cal_rate_tolerance:
+    values: [0.08, 0.10, 0.12, 0.15]
+  cal_auc_floor:
+    values: [0.50, 0.52, 0.55]
+  cal_fallback:
+    values: [rate_match, keep_last]
+
+  # Data / model topology
+  in_channels: {value: 1}
+  input_shape: {value: [256, 256]}
+  num_classes: {value: 2}
+  class_balance: {value: inverse}
+  batch_size:
+    values: [32, 64]
+
+  # Binary classifier head behavior
+  binary_single_logit: {value: true}
+  binary_bce_from_two_logits: {value: false}
+
+  # Loss options
+  cls_loss: {value: auto}
+  seg_threshold: {value: 0.5}
+
+  # Multi-task / objective
+  multi_weight: {value: 0.65}
+  alpha:
+    values: [1.0, 2.0]
+  beta:
+    values: [0.5, 1.0]
+
+  # Core tunables
+  lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0008
+  weight_decay:
+    distribution: log_uniform_values
+    min: 0.00001
+    max: 0.00005
+  dropout_rate:
+    distribution: uniform
+    min: 0.18
+    max: 0.24
+
+  # LR strategy (used by tolerant attach_lr_scheduling)
+  lr_strategy:
+    values: [none, cosine, warmcos, plateau]
+
+  # Cosine params
+  T_max: {value: 40}
+  eta_min: {value: 0.0}
+
+  # Warmup params (used by warmcos)
+  warmup_epochs: {values: [0, 2, 3]}
+  warmup_start_factor: {values: [0.1, 0.2]}
+
+  # Plateau params (only when lr_strategy=plateau)
+  plateau_metric: {value: val/multi}  # {value: val/loss}
+  plateau_mode: {value: max}  # {value: min}
+  patience: {value: 0}
+  factor: {values: [0.5, 0.3]}
+  plateau_threshold: {values: [0.0001, 0.0005]}
+
+  # Classification decision defaults
+  cls_decision:  {value: threshold}
+  cls_threshold: {value: 0.5}
+  positive_index: {value: 1}
+
+  # Param-group strategy (split optimizer settings)
+  param_groups: {values: [single, split]}
+  head_lr_scale: {value: 0.5}  # lower LR on head
+  head_wd_scale: {value: 1.5}  # slightly higher WD on head

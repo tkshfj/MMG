@@ -4,6 +4,7 @@
 - Refactor logging: treat only true confusion matrices as matrices in W&B flattener; avoid scalar confmat_* crash
 - Refactor ViT: collect positive probs, wire threshold search + pos-score debug; fix tensor-or bug and W&B CM logging
 - Make logits->prob cfg-aware across hooks/metrics; fix tensor truthiness; harden W&B confmat logging; sync live threshold; wire validation-threshold search in main.
+- Refactor validation/logging: print CM counts, unify two-pass epoch handler, sanitize threshold keys.
 
 # 2025-09-05
 - Refactor ViT YAML: switch to two-logit head for A/B check on CM conflation
