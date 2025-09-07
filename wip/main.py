@@ -406,6 +406,7 @@ def run(
             decision=str(cfg.get("cls_decision", "threshold")),
             threshold=get_live_thr,
             positive_index=int(cfg.get("positive_index", 1)),
+            score_provider=ppcfg,
         )
         for k, m in val_metrics.items():
             m.attach(std_evaluator, k)
@@ -453,7 +454,7 @@ def run(
             num_classes=int(cfg.get("num_classes", 2)),
             multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
             enable_decision_health=health_on,
-            # if supported in implementation: score_fn=score_fn,
+            score_provider=ppcfg,
         )
 
     @trainer.on(Events.EPOCH_COMPLETED)
