@@ -273,26 +273,26 @@ def run(
         binary_single_logit=bool(cfg.get("binary_single_logit", True)),
         positive_index=int(cfg.get("positive_index", 1)),
     )
-    score_fn = ppcfg              # output -> P(positive)[B]
+    # score_fn = ppcfg              # output -> P(positive)[B]
     # make available to any consumer that only sees the evaluator
-    std_evaluator.state.score_fn = score_fn
+    std_evaluator.state.score_fn = ppcfg
 
     # Helper: current live decision threshold (single SoT)
     def get_live_thr() -> float:
         return float(getattr(std_evaluator.state, "threshold", 0.5))
 
-    # score_kwargs = {
-    #     "binary_single_logit": bool(cfg.get("binary_single_logit", False)),
-    #     "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
-    # }
+    score_kwargs = {
+        "binary_single_logit": bool(cfg.get("binary_single_logit", False)),
+        "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
+    }
 
     attach_val_threshold_search(
         evaluator=std_evaluator,
         mode=str(cfg.get("calibration_method", "bal_acc")),  # or "f1"
-        # positive_index=int(cfg.get("positive_index", 1)),
-        # score_kwargs=score_kwargs,
-        positive_index=int(cfg.get("positive_index", 1)),    # keep for BC if helper still uses it
-        score_fn=score_fn,
+        positive_index=int(cfg.get("positive_index", 1)),
+        score_kwargs=score_kwargs,
+        # positive_index=int(cfg.get("positive_index", 1)),    # keep for BC if helper still uses it
+        # score_fn=score_fn,
     )
 
     if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
@@ -301,9 +301,9 @@ def run(
             # positive_index=int(cfg.get("positive_index", 1)),
             bins=int(cfg.get("pos_hist_bins", 20)),
             tag=str(cfg.get("pos_debug_tag", "debug_pos")),
-            # score_kwargs=score_kwargs,
             positive_index=int(cfg.get("positive_index", 1)),  # keep for BC
-            score_fn=score_fn,
+            score_kwargs=score_kwargs,
+            # score_fn=score_fn,
         )
 
     # keep state.threshold in sync with whatever your search logged
@@ -322,7 +322,7 @@ def run(
             decision=str(cfg.get("cls_decision", "threshold")),
             threshold=get_live_thr,
             # if metrics utils supports it, thread scores from the same callable:
-            # score_fn=score_fn,
+            # if supported in metrics: score_fn=ppcfg,
         )
         for k, m in val_metrics.items():
             m.attach(std_evaluator, k)
