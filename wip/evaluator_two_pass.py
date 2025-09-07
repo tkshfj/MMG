@@ -844,6 +844,7 @@ def make_two_pass_evaluator(
     seg_num_classes: Optional[int] = None,
     loss_fn=None,
     enable_decision_health: bool = True,
+    score_provider=None,
     **_
 ) -> TwoPassEvaluator:
     """
@@ -901,6 +902,7 @@ def make_two_pass_evaluator(
         health_tol=float(getattr(getattr(calibrator, "cfg", None), "decision_health_tol", 0.35)),
         health_need_k=int(getattr(getattr(calibrator, "cfg", None), "decision_health_need_k", 3)),
         enable_decision_health=bool(enable_decision_health),
+        score_provider=score_provider,
     )
 
 

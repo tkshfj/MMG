@@ -1,14 +1,14 @@
 # metrics_utils.py
 from __future__ import annotations
 
-from typing import Any, Callable, Dict, Literal, Mapping, Optional, Tuple, Union
+from typing import Any, Callable, Literal, Mapping, Optional, Tuple, Union
 from dataclasses import dataclass
 from functools import partial
 import torch
 import numpy as np
 from monai.data.meta_tensor import MetaTensor
-from ignite.metrics import Accuracy, Precision, Recall, ROC_AUC, Metric, MetricsLambda
-from ignite.metrics import DiceCoefficient, JaccardIndex, EpochMetric
+from ignite.metrics import Accuracy, Precision, Recall, ROC_AUC
+from ignite.metrics import DiceCoefficient, JaccardIndex, Metric, MetricsLambda, EpochMetric
 from ignite.metrics.confusion_matrix import ConfusionMatrix
 from utils.safe import to_tensor, labels_to_1d_indices, to_float_scalar, to_py
 
@@ -540,14 +540,13 @@ def _resolve_threshold(thr: Union[float, Callable[[], float]]) -> float:
 
 class SelectIndex(Metric):
     def __init__(self, base, index: int):
-        # Allow passing a metric factory (callable) or an instance
         if callable(base):
-            base = base()  # instantiate
+            base = base()  # instantiate the factory if needed
         if not isinstance(base, Metric):
             raise TypeError(f"SelectIndex base must be an ignite Metric, got {type(base)}")
         self.base = base
         self.index = int(index)
-        super().__init__()  # will call self.reset()
+        super().__init__()
 
     def reset(self):
         self.base.reset()
@@ -556,15 +555,98 @@ class SelectIndex(Metric):
         self.base.update(output)
 
     def compute(self):
-        vec = self.base.compute()
-        # vec expected shape: [C] (per-class). Support tensor/list/ndarray.
-        # import torch, numpy as np
-        if torch.is_tensor(vec):
-            vec = vec.detach().cpu()
-            return float(vec[self.index].item())
-        if isinstance(vec, np.ndarray):
-            return float(vec[self.index].item())
-        return float(vec[self.index])
+        v = self.base.compute()
+        if torch.is_tensor(v):
+            return float(v.detach().cpu()[self.index].item())
+        if isinstance(v, np.ndarray):
+            return float(v[self.index].item())
+        return float(v[self.index])
+
+
+def _make_prob_transform(threshold_or_fn, score_provider):
+    # For AUC etc (probabilities).
+    def _xf(output):
+        y_pred_raw, y_true_raw = output
+        logits = score_provider.pick_logits(y_pred_raw)
+        probs = score_provider.logits_to_pos_prob(logits)
+        labels = score_provider.pick_labels(y_true_raw)
+        return probs.detach(), labels.detach()
+    return _xf
+
+
+def _make_bin_transform(threshold_or_fn, score_provider):
+    # For Acc/Prec/Recall/ConfMat (0/1 predictions).
+    def _thr():
+        return float(threshold_or_fn()) if callable(threshold_or_fn) else float(threshold_or_fn)
+
+    def _xf(output):
+        y_pred_raw, y_true_raw = output
+        logits = score_provider.pick_logits(y_pred_raw)
+        probs = score_provider.logits_to_pos_prob(logits)
+        pred01 = (probs >= _thr()).to(torch.long)
+        labels = score_provider.pick_labels(y_true_raw).to(torch.long)
+        return pred01.detach(), labels.detach()
+    return _xf
+
+
+def make_cls_val_metrics(
+    num_classes: int,
+    decision: str,
+    threshold,  # float or callable -> float
+    positive_index: int,
+    score_provider=None,  # <-- PosProbCfg, required for transforms
+):
+    if score_provider is None:
+        raise ValueError("make_cls_val_metrics now requires score_provider=PosProbCfg for consistent transforms.")
+
+    prob_tf = _make_prob_transform(threshold, score_provider)
+    bin_tf = _make_bin_transform(threshold, score_provider)
+
+    # Binary metrics consume 0/1 predictions:
+    acc = Accuracy(output_transform=bin_tf)
+    prec_vec = Precision(average=False, output_transform=bin_tf)
+    recall_vec = Recall(average=False, output_transform=bin_tf)
+    confmat = ConfusionMatrix(num_classes=2, output_transform=bin_tf)
+
+    # AUC consumes probabilities:
+    auc = ROC_AUC(output_transform=prob_tf)
+
+    return {
+        "acc": acc,
+        "prec": SelectIndex(prec_vec, positive_index),
+        "recall": SelectIndex(recall_vec, positive_index),
+        "auc": auc,
+        "cls_confmat": confmat,
+    }
+
+
+# class SelectIndex(Metric):
+#     def __init__(self, base, index: int):
+#         # Allow passing a metric factory (callable) or an instance
+#         if callable(base):
+#             base = base()  # instantiate
+#         if not isinstance(base, Metric):
+#             raise TypeError(f"SelectIndex base must be an ignite Metric, got {type(base)}")
+#         self.base = base
+#         self.index = int(index)
+#         super().__init__()  # will call self.reset()
+
+#     def reset(self):
+#         self.base.reset()
+
+#     def update(self, output):
+#         self.base.update(output)
+
+#     def compute(self):
+#         vec = self.base.compute()
+#         # vec expected shape: [C] (per-class). Support tensor/list/ndarray.
+#         # import torch, numpy as np
+#         if torch.is_tensor(vec):
+#             vec = vec.detach().cpu()
+#             return float(vec[self.index].item())
+#         if isinstance(vec, np.ndarray):
+#             return float(vec[self.index].item())
+#         return float(vec[self.index])
 
 
 # Standard classification output transforms
@@ -677,60 +759,60 @@ def cls_confmat_output_transform_thresholded(
     return y_pred, y_true
 
 
-def make_cls_val_metrics(
-    num_classes: int,
-    decision: str = "threshold",
-    threshold: Union[float, Callable[[], float]] = 0.5,
-    positive_index: int = 1,
-    score_provider=None,   # <<< NEW
-) -> Dict[str, Any]:
-    # Build transforms once
-    prob_tf, bin_tf = _make_prob_and_bin_transforms(
-        threshold=threshold,
-        positive_index=int(positive_index),
-        num_classes=int(num_classes),
-        score_provider=score_provider,
-    )
-    cm_tf = _make_cm_transform(
-        decision=decision,
-        threshold=threshold,
-        positive_index=int(positive_index),
-    )
+# def make_cls_val_metrics(
+#     num_classes: int,
+#     decision: str = "threshold",
+#     threshold: Union[float, Callable[[], float]] = 0.5,
+#     positive_index: int = 1,
+#     score_provider=None,   # <<< NEW
+# ) -> Dict[str, Any]:
+#     # Build transforms once
+#     prob_tf, bin_tf = _make_prob_and_bin_transforms(
+#         threshold=threshold,
+#         positive_index=int(positive_index),
+#         num_classes=int(num_classes),
+#         score_provider=score_provider,
+#     )
+#     cm_tf = _make_cm_transform(
+#         decision=decision,
+#         threshold=threshold,
+#         positive_index=int(positive_index),
+#     )
 
-    # Thresholded/binary metrics
-    acc = Accuracy(output_transform=bin_tf)
-    prec_macro = Precision(output_transform=bin_tf, average=True)
-    prec_vec = Precision(output_transform=bin_tf, average=False)
-    prec_pos = SelectIndex(prec_vec, positive_index)
+#     # Thresholded/binary metrics
+#     acc = Accuracy(output_transform=bin_tf)
+#     prec_macro = Precision(output_transform=bin_tf, average=True)
+#     prec_vec = Precision(output_transform=bin_tf, average=False)
+#     prec_pos = SelectIndex(prec_vec, positive_index)
 
-    rec_macro = Recall(output_transform=bin_tf, average=True)
-    rec_vec = Recall(output_transform=bin_tf, average=False)
-    rec_pos = SelectIndex(rec_vec, positive_index)
+#     rec_macro = Recall(output_transform=bin_tf, average=True)
+#     rec_vec = Recall(output_transform=bin_tf, average=False)
+#     rec_pos = SelectIndex(rec_vec, positive_index)
 
-    # Probability-based AUC
-    if int(num_classes) <= 2:
-        auc = ROC_AUC(output_transform=prob_tf)  # [B] probs
-    else:
-        def _sk_auc(y_pred, y_true):
-            from sklearn.metrics import roc_auc_score
-            return roc_auc_score(y_true, y_pred, average="macro", multi_class="ovr")
-        auc = EpochMetric(_sk_auc, output_transform=prob_tf)  # [B,C] probs
+#     # Probability-based AUC
+#     if int(num_classes) <= 2:
+#         auc = ROC_AUC(output_transform=prob_tf)  # [B] probs
+#     else:
+#         def _sk_auc(y_pred, y_true):
+#             from sklearn.metrics import roc_auc_score
+#             return roc_auc_score(y_true, y_pred, average="macro", multi_class="ovr")
+#         auc = EpochMetric(_sk_auc, output_transform=prob_tf)  # [B,C] probs
 
-    # ConfusionMatrix
-    cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_tf)
+#     # ConfusionMatrix
+#     cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_tf)
 
-    result = {
-        "acc": acc,
-        "precision_macro": prec_macro,
-        "precision_pos": prec_pos,
-        "recall_macro": rec_macro,
-        "recall_pos": rec_pos,
-        "auc": auc,
-        "cls_confmat": cm,
-    }
-    if int(num_classes) == 2:
-        result.update(make_cm_rates(cm))
-    return result
+#     result = {
+#         "acc": acc,
+#         "precision_macro": prec_macro,
+#         "precision_pos": prec_pos,
+#         "recall_macro": rec_macro,
+#         "recall_pos": rec_pos,
+#         "auc": auc,
+#         "cls_confmat": cm,
+#     }
+#     if int(num_classes) == 2:
+#         result.update(make_cm_rates(cm))
+#     return result
 
 
 # def make_cls_val_metrics(
