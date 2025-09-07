@@ -22,6 +22,8 @@ parameters:
   seed: { value: 42 }
   debug_score_hist: { value: true }
   debug_score_bins: { value: 20 }
+  init_head_bias_from_prior: { value: true }
+  init_threshold_from_prior: { value: false }
 
   # Two-pass validation / calibration
   two_pass_val: { value: true }

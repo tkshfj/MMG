@@ -20,6 +20,8 @@ parameters:
   console_iter_log: {value: false}
   console_epoch_log: {value: true}
   seed: {value: 42}
+  init_head_bias_from_prior: { value: true }
+  init_threshold_from_prior: { value: false }
 
   # Data / labels
   in_channels: {value: 1}

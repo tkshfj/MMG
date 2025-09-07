@@ -30,13 +30,15 @@ parameters:
   debug_transforms:  { value: false }
   console_iter_log:  { value: false }
   console_epoch_log: { value: true }
+  init_head_bias_from_prior: { value: true }
+  init_threshold_from_prior: { value: false }
 
   # Two-pass validation & calibration
   two_pass_val:   { value: true }
   log_calibrated: { value: true }
 
-  calibration_method:
-    values: [youden, f1, rate_match]
+  calibration_method: { values: [youden, f1, rate_match] }
+  cal_fallback: {values: ["rate_match", "keep_last"]}
   cal_q_bounds:        { value: [0.10, 0.90] }
   cal_min_tp:          { values: [5, 10, 20] }
   cal_bootstraps:      { values: [0, 25] }

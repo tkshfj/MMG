@@ -99,6 +99,9 @@ def attach_classification_metrics(evaluator, cfg: Mapping[str, Any]) -> None:
         threshold=thr_getter,
         positive_index=pos_idx,
     )
+    # for name, metric in pack.items():
+    #     tag = "confmat" if name == "cls_confmat" else name
+    #     metric.attach(evaluator, f"val/{tag}")
     metrics["auc"].attach(evaluator, "val/auc")
     metrics["cls_confmat"].attach(evaluator, "val/confmat")
     if n_cls == 2:  # only when valid
@@ -431,6 +434,30 @@ def _resolve_threshold(thr: Union[float, Callable[[], float]]) -> float:
     return float(thr() if callable(thr) else thr)
 
 
+class SelectIndex(Metric):
+    """
+    Wrap a per-class Metric (average=False) and return the value at `index`.
+    """
+    def __init__(self, base: Metric, index: int):
+        super().__init__()
+        self.base = base
+        self.index = int(index)
+
+    def reset(self):
+        self.base.reset()
+
+    def update(self, output):
+        self.base.update(output)
+
+    def compute(self):
+        v = self.base.compute()           # tensor/list/ndarray
+        t = torch.as_tensor(v)
+        if t.numel() == 0:
+            return 0.0
+        idx = max(0, min(self.index, t.numel() - 1))
+        return float(t.reshape(-1)[idx].item())
+
+
 # Standard classification output transforms
 @dataclass(frozen=True)
 class ClsOTs:
@@ -552,12 +579,27 @@ def make_cls_val_metrics(
         decision=decision, threshold=threshold, positive_index=positive_index
     )
     acc = Accuracy(output_transform=ots.thresholded)
-    prec = Precision(output_transform=ots.thresholded, average=True)
-    rec = Recall(output_transform=ots.thresholded, average=True)
+    # prec = Precision(output_transform=ots.thresholded, average=True)
+    # rec = Recall(output_transform=ots.thresholded, average=True)
+    # precision/recall: macro and per-class → positive-class selection
+    prec_macro = Precision(output_transform=ots.thresholded, average=True)
+    prec_vec = Precision(output_transform=ots.thresholded, average=False)
+    prec_pos = SelectIndex(prec_vec, positive_index)
+
+    rec_macro = Recall(output_transform=ots.thresholded, average=True)
+    rec_vec = Recall(output_transform=ots.thresholded, average=False)
+    rec_pos = SelectIndex(rec_vec, positive_index)
     auc = ROC_AUC(output_transform=ots.base)
     cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=ots.cm)
     result = {
-        "acc": acc, "prec": prec, "recall": rec, "auc": auc, "cls_confmat": cm,
+        "acc": acc,
+        "precision_macro": prec_macro,
+        "precision_pos": prec_pos,
+        "recall_macro": rec_macro,
+        "recall_pos": rec_pos,
+        "auc": auc,
+        "cls_confmat": cm,
+        # "acc": acc, "prec": prec, "recall": rec, "auc": auc, "cls_confmat": cm,
         # "pos_rate": rates["pos_rate"],
         # "gt_pos_rate": rates["gt_pos_rate"],
     }
@@ -581,12 +623,32 @@ def make_std_cls_metrics_with_cal_thr(
     proba_ot = partial(cls_proba_output_transform, positive_index=positive_index, num_classes=num_classes)
     cm_ot_cal = partial(cls_confmat_output_transform_thresholded, decision=decision, threshold=thr_getter, positive_index=positive_index)
 
+    acc = Accuracy(output_transform=decision_ot)
+    prec_macro = Precision(output_transform=decision_ot, average=True)
+    prec_vec = Precision(output_transform=decision_ot, average=False)
+    prec_pos = SelectIndex(prec_vec, positive_index)
+
+    rec_macro = Recall(output_transform=decision_ot, average=True)
+    rec_vec = Recall(output_transform=decision_ot, average=False)
+    rec_pos = SelectIndex(rec_vec, positive_index)
+
+    cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot_cal)
+
     metrics: dict[str, Metric] = {
-        "acc": Accuracy(output_transform=decision_ot),
-        "prec": Precision(output_transform=decision_ot, average=(int(num_classes) <= 2)),
-        "recall": Recall(output_transform=decision_ot, average=(int(num_classes) <= 2)),
-        "cls_confmat": ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot_cal),
+        "acc": acc,
+        "precision_macro": prec_macro,
+        "precision_pos": prec_pos,
+        "recall_macro": rec_macro,
+        "recall_pos": rec_pos,
+        "cls_confmat": cm,
     }
+
+    # metrics: dict[str, Metric] = {
+    #     "acc": Accuracy(output_transform=decision_ot),
+    #     "prec": Precision(output_transform=decision_ot, average=(int(num_classes) <= 2)),
+    #     "recall": Recall(output_transform=decision_ot, average=(int(num_classes) <= 2)),
+    #     "cls_confmat": ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot_cal),
+    # }
 
     if int(num_classes) <= 2:
         metrics["auc"] = ROC_AUC(output_transform=proba_ot)
@@ -595,6 +657,9 @@ def make_std_cls_metrics_with_cal_thr(
             from sklearn.metrics import roc_auc_score
             return roc_auc_score(y_true, y_pred, average="macro", multi_class="ovr")
         metrics["auc"] = EpochMetric(_sk_auc, output_transform=proba_ot)
+
+    if int(num_classes) == 2:
+        metrics.update(make_cm_rates(cm))
 
     return metrics
 
@@ -784,8 +849,15 @@ def make_metrics(
     # classification
     if "classification" in tasks or multitask:
         acc = Accuracy(output_transform=cls_ot)
-        prec = Precision(output_transform=cls_ot, average=True)
-        rec = Recall(output_transform=cls_ot, average=True)
+        # prec = Precision(output_transform=cls_ot, average=True)
+        # rec = Recall(output_transform=cls_ot, average=True)
+        prec_macro = Precision(output_transform=cls_ot, average=True)
+        prec_vec = Precision(output_transform=cls_ot, average=False)
+        prec_pos = SelectIndex(prec_vec, positive_index)
+
+        rec_macro = Recall(output_transform=cls_ot, average=True)
+        rec_vec = Recall(output_transform=cls_ot, average=False)
+        rec_pos = SelectIndex(rec_vec, positive_index)
         auc = ROC_AUC(output_transform=auc_ot)
         # ConfusionMatrix must receive a callable output_transform, not a call
         cm_ot = partial(
@@ -795,8 +867,16 @@ def make_metrics(
             positive_index=positive_index,
         )
         cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot)
-        cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot)
-        metrics.update({"acc": acc, "prec": prec, "recall": rec, "auc": auc, "cls_confmat": cm})
+        # metrics.update({"acc": acc, "prec": prec, "recall": rec, "auc": auc, "cls_confmat": cm})
+        metrics.update({
+            "acc": acc,
+            "precision_macro": prec_macro,
+            "precision_pos": prec_pos,
+            "recall_macro": rec_macro,
+            "recall_pos": rec_pos,
+            "auc": auc,
+            "cls_confmat": cm,
+        })
         if int(num_classes) == 2:
             metrics.update(make_cm_rates(cm))
 

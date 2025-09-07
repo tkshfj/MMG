@@ -1,7 +1,7 @@
 # Project Log
 
 # 2025-09-08
-- 
+- Refactor validation pipeline: gate decision health in sweeps; merge and alias seg metrics to val/dice|val/iou
 
 # 2025-09-07
 - Refactor validation/logging: print CM counts, unify two-pass epoch handler, sanitize threshold keys.

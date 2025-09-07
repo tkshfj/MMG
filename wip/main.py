@@ -170,7 +170,8 @@ def _console_print_metrics(epoch: int, metrics: dict):
 
     # format a few scalars nicely
     parts = []
-    for k in ("acc", "prec", "recall", "auc", "pos_rate", "gt_pos_rate"):
+    # for k in ("acc", "prec", "recall", "auc", "pos_rate", "gt_pos_rate"):
+    for k in ("acc", "precision_pos", "recall_pos", "auc", "pos_rate", "gt_pos_rate"):
         v = metrics.get(k)
         if v is not None:
             v = _as_scalar(v)
@@ -208,6 +209,21 @@ def decision_health_active_from_cfg(cfg: dict) -> bool:
     return flag
 
 
+def _seed_binary_head_bias_from_prior(model: torch.nn.Module, pos_prior: float) -> bool:
+    """Set bias=logit(pos_prior) for any 1-logit binary head. Returns True if applied."""
+    import math
+    p = float(min(max(pos_prior, 1e-6), 1 - 1e-6))
+    b = math.log(p / (1.0 - p))
+    for name, m in model.named_modules():
+        if isinstance(m, torch.nn.Linear) and getattr(m, "out_features", None) == 1:
+            if m.bias is not None:
+                with torch.no_grad():
+                    m.bias.fill_(b)
+            print(f"[INFO] Initialized binary head bias to {b:.4f} (pos_prior={p:.4f}).")
+            return True
+    return False
+
+
 def run(
     cfg: dict,
     train_loader,
@@ -219,6 +235,13 @@ def run(
     arch = normalize_arch(cfg.get("architecture"))
     # build torch.nn.Module via the registry adapter
     model = build_model(cfg).to(device=device, dtype=torch.float32)
+
+    # seed head bias so scores aren’t collapsed at start
+    pos_idx = int(cfg.get("positive_index", 1))
+    cc = cfg.get("class_counts", [1, 1])
+    pos_prior = float(cc[pos_idx] / max(1, sum(cc)))
+    if bool(cfg.get("binary_single_logit", True)) and bool(cfg.get("init_head_bias_from_prior", True)):
+        _seed_binary_head_bias_from_prior(model, pos_prior)
 
     use_split = str(cfg.get("param_groups", "single")).lower() == "split"
     if use_split and all(hasattr(model, m) for m in ("backbone_parameters", "head_parameters")):
@@ -281,6 +304,11 @@ def run(
     )
     # Seed the evaluator’s live threshold once
     std_evaluator.state.threshold = float(cfg.get("cls_threshold", 0.5))
+
+    # start from base rate instead of 0.5
+    if bool(cfg.get("init_threshold_from_prior", False)):
+        std_evaluator.state.threshold = float(pos_prior)
+
     # Single source of truth for scores
     ppcfg = PosProbCfg(
         binary_single_logit=bool(cfg.get("binary_single_logit", True)),
@@ -299,6 +327,35 @@ def run(
     # thr_min_tp = int(cfg.get("thr_min_tp", cfg.get("cal_min_tp", 5)))
     # thr_min_tn = int(cfg.get("thr_min_tn", 5))
     # thr_warmup = int(cfg.get("thr_warmup_epochs", max(3, int(cfg.get("cal_warmup_epochs", 1)))))
+
+    # guardrail knobs
+    thr_min = float(cfg.get("thr_min", 0.10))
+    thr_max = float(cfg.get("thr_max", 0.90))
+    pos_lo = float(cfg.get("thr_posrate_min", 0.05))
+    pos_hi = float(cfg.get("thr_posrate_max", 0.95))
+    auc_floor = float(cfg.get("cal_auc_floor", 0.55))
+    min_tn0 = int(cfg.get("thr_min_tn", 5))
+    min_tp_tgt = int(cfg.get("cal_min_tp", 20))
+    thr_warmup = int(cfg.get("thr_warmup_epochs", max(3, int(cfg.get("cal_warmup_epochs", 1)))))
+
+    def _min_tp_for_epoch(ep: int) -> int:
+        # ramp: 2 → 5 → target
+        return 2 if ep < 3 else (5 if ep < 5 else min_tp_tgt)
+
+    def _ok_confmat(cm) -> tuple[bool, int, int]:
+        # Accept torch/np/list forms; expect 2x2
+        import numpy as _np
+        if hasattr(cm, "as_tensor"):
+            cm = cm.as_tensor()
+        if torch.is_tensor(cm):
+            cm = cm.detach().cpu().to(torch.int64).numpy()
+        else:
+            cm = _np.asarray(cm)
+        if cm.ndim != 2 or cm.shape != (2, 2):
+            return False, 0, 0
+        tn, fp = int(cm[0, 0]), int(cm[0, 1])  # noqa unused
+        fn, tp = int(cm[1, 0]), int(cm[1, 1])  # noqa unused
+        return True, tn, tp
 
     # Helper: current live decision threshold (single SoT)
     def get_live_thr() -> float:
@@ -405,12 +462,38 @@ def run(
 
         # (1) Optional calibration / two-pass
         seg_metrics_from_tp = {}
+        cls_metrics_from_tp = {}
+        t_proposed = None
         if two_pass is not None:
             t, cls_metrics_from_tp, seg_metrics_from_tp = two_pass.validate(
                 epoch=ep, model=model, val_loader=val_loader, base_rate=None
             )
-            if t is not None and ep >= cal_warmup:
-                std_evaluator.state.threshold = float(t)
+            # if t is not None and ep >= cal_warmup:
+            #     std_evaluator.state.threshold = float(t)
+
+            # uarded adoption of calibrator threshold
+            if t_proposed is not None and ep >= cal_warmup and ep >= thr_warmup:
+                cand = float(min(max(t_proposed, thr_min), thr_max))
+                pr = cls_metrics_from_tp.get("pos_rate", None)
+                auc = cls_metrics_from_tp.get("auc", None)
+                cm = cls_metrics_from_tp.get("cls_confmat", cls_metrics_from_tp.get("confmat", None))
+
+                pos_ok = isinstance(pr, (int, float)) and (pos_lo <= float(pr) <= pos_hi)
+                auc_ok = isinstance(auc, (int, float)) and (float(auc) >= auc_floor)
+
+                tn_tp_ok = True
+                if cm is not None:
+                    ok, tn, tp = _ok_confmat(cm)
+                    if ok:
+                        tn_tp_ok = (tn >= min_tn0) and (tp >= _min_tp_for_epoch(ep))
+
+                if pos_ok and auc_ok and tn_tp_ok:
+                    std_evaluator.state.threshold = cand
+                    # (optional) expose what we actually accepted:
+                    cls_metrics_from_tp["threshold"] = cand
+                else:
+                    # keep previous threshold (do nothing)
+                    pass
 
         # (2) Single standard evaluation (classification metrics + any seg metrics attached to std_evaluator)
         std_evaluator.run(val_loader)
@@ -423,7 +506,8 @@ def run(
         # (3b) Merge segmentation metrics returned by two-pass (if any)
         #      We namespace them under val/seg/* to avoid key collisions.
         if has_seg and seg_metrics_from_tp:
-            payload.update(_flatten_metrics_for_wandb(seg_metrics_from_tp, prefix="val/seg/"))
+            # payload.update(_flatten_metrics_for_wandb(seg_metrics_from_tp, prefix="val/seg/"))
+            payload.update(_flatten_metrics_for_wandb(seg_metrics_from_tp, prefix="val/"))
 
             # Mirror a couple of useful seg values into engine.state.metrics for schedulers/checkpoints
             # Prefer 'dice' if present; otherwise try common alternatives.
@@ -435,7 +519,8 @@ def run(
                         v = float(v.item())
                     seg_score = float(v)
                     # Also expose namespaced copy (optional)
-                    engine.state.metrics[f"val/seg/{k}"] = seg_score
+                    # engine.state.metrics[f"val/seg/{k}"] = seg_score
+                    engine.state.metrics[f"val/{k}"] = seg_score
                     break
 
             # Construct a combined multi-objective score if configured to do so
