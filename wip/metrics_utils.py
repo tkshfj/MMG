@@ -435,13 +435,15 @@ def _resolve_threshold(thr: Union[float, Callable[[], float]]) -> float:
 
 
 class SelectIndex(Metric):
-    """
-    Wrap a per-class Metric (average=False) and return the value at `index`.
-    """
-    def __init__(self, base: Metric, index: int):
-        super().__init__()
+    def __init__(self, base, index: int):
+        # Allow passing a metric factory (callable) or an instance
+        if callable(base):
+            base = base()  # instantiate
+        if not isinstance(base, Metric):
+            raise TypeError(f"SelectIndex base must be an ignite Metric, got {type(base)}")
         self.base = base
         self.index = int(index)
+        super().__init__()  # will call self.reset()
 
     def reset(self):
         self.base.reset()
@@ -450,12 +452,39 @@ class SelectIndex(Metric):
         self.base.update(output)
 
     def compute(self):
-        v = self.base.compute()           # tensor/list/ndarray
-        t = torch.as_tensor(v)
-        if t.numel() == 0:
-            return 0.0
-        idx = max(0, min(self.index, t.numel() - 1))
-        return float(t.reshape(-1)[idx].item())
+        vec = self.base.compute()
+        # vec expected shape: [C] (per-class). Support tensor/list/ndarray.
+        # import torch, numpy as np
+        if torch.is_tensor(vec):
+            vec = vec.detach().cpu()
+            return float(vec[self.index].item())
+        if isinstance(vec, np.ndarray):
+            return float(vec[self.index].item())
+        return float(vec[self.index])
+
+
+# class SelectIndex(Metric):
+#     """
+#     Wrap a per-class Metric (average=False) and return the value at `index`.
+#     """
+#     def __init__(self, base: Metric, index: int):
+#         super().__init__()
+#         self.base = base
+#         self.index = int(index)
+
+#     def reset(self):
+#         self.base.reset()
+
+#     def update(self, output):
+#         self.base.update(output)
+
+#     def compute(self):
+#         v = self.base.compute()           # tensor/list/ndarray
+#         t = torch.as_tensor(v)
+#         if t.numel() == 0:
+#             return 0.0
+#         idx = max(0, min(self.index, t.numel() - 1))
+#         return float(t.reshape(-1)[idx].item())
 
 
 # Standard classification output transforms
