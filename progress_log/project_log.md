@@ -3,6 +3,7 @@
 # 2025-09-07
 - Refactor validation/logging: print CM counts, unify two-pass epoch handler, sanitize threshold keys.
 - Refactor(main): unify two-pass validation; drop attach_two_pass_validation
+- Use PosProbCfg as single score source; deterministic threshold sync; clamp/defer search; gate decision-health by flag
 
 # 2025-09-06
 - Refactor logging: treat only true confusion matrices as matrices in W&B flattener; avoid scalar confmat_* crash

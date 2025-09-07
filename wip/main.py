@@ -33,6 +33,7 @@ from optim_factory import get_optimizer, make_scheduler
 from handlers import register_handlers, configure_wandb_step_semantics
 from constants import CHECKPOINT_DIR
 from resume_utils import restore_training_state
+from posprob import PosProbCfg
 
 # determinism (CPU side + algorithm choices), safe pre-fork
 torch.backends.cudnn.deterministic = True
@@ -267,30 +268,42 @@ def run(
     )
     # Seed the evaluator’s live threshold once
     std_evaluator.state.threshold = float(cfg.get("cls_threshold", 0.5))
+    # Single source of truth for scores
+    ppcfg = PosProbCfg(
+        binary_single_logit=bool(cfg.get("binary_single_logit", True)),
+        positive_index=int(cfg.get("positive_index", 1)),
+    )
+    score_fn = ppcfg              # output -> P(positive)[B]
+    # make available to any consumer that only sees the evaluator
+    std_evaluator.state.score_fn = score_fn
 
     # Helper: current live decision threshold (single SoT)
     def get_live_thr() -> float:
         return float(getattr(std_evaluator.state, "threshold", 0.5))
 
-    score_kwargs = {
-        "binary_single_logit": bool(cfg.get("binary_single_logit", False)),
-        "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
-    }
+    # score_kwargs = {
+    #     "binary_single_logit": bool(cfg.get("binary_single_logit", False)),
+    #     "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
+    # }
 
     attach_val_threshold_search(
         evaluator=std_evaluator,
         mode=str(cfg.get("calibration_method", "bal_acc")),  # or "f1"
-        positive_index=int(cfg.get("positive_index", 1)),
-        score_kwargs=score_kwargs,  # NEW
+        # positive_index=int(cfg.get("positive_index", 1)),
+        # score_kwargs=score_kwargs,
+        positive_index=int(cfg.get("positive_index", 1)),    # keep for BC if helper still uses it
+        score_fn=score_fn,
     )
 
     if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
         attach_pos_score_debug_once(
             evaluator=std_evaluator,
-            positive_index=int(cfg.get("positive_index", 1)),
+            # positive_index=int(cfg.get("positive_index", 1)),
             bins=int(cfg.get("pos_hist_bins", 20)),
             tag=str(cfg.get("pos_debug_tag", "debug_pos")),
-            score_kwargs=score_kwargs,  # NEW
+            # score_kwargs=score_kwargs,
+            positive_index=int(cfg.get("positive_index", 1)),  # keep for BC
+            score_fn=score_fn,
         )
 
     # keep state.threshold in sync with whatever your search logged
@@ -308,7 +321,8 @@ def run(
             num_classes=int(cfg.get("num_classes", 2)),
             decision=str(cfg.get("cls_decision", "threshold")),
             threshold=get_live_thr,
-            positive_index=int(cfg.get("positive_index", 1)),
+            # if metrics utils supports it, thread scores from the same callable:
+            # score_fn=score_fn,
         )
         for k, m in val_metrics.items():
             m.attach(std_evaluator, k)
@@ -338,6 +352,7 @@ def run(
             cls_threshold=float(cfg.get("cls_threshold", 0.5)),
             num_classes=int(cfg.get("num_classes", 2)),
             multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
+            # if supported in your implementation: score_fn=score_fn,
         )
 
     # one unified validation + logging hook
