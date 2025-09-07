@@ -163,8 +163,8 @@ def _numeric_only(d: Dict[str, Any]) -> Dict[str, float]:
 def register_handlers(
     *,
     trainer: Engine,
-    evaluator: Optional[Engine],                  # may be None or non-Engine (two-pass case)
-    evaluator_cal: Optional[Engine] = None,      # kept for signature compat
+    evaluator: Optional[Engine],  # may be None or non-Engine (two-pass case)
+    evaluator_cal: Optional[Engine] = None,  # kept for signature compat
     model: Optional[torch.nn.Module] = None,
     optimizer: Optional[torch.optim.Optimizer] = None,
     out_dir: str = "./outputs",
@@ -187,7 +187,9 @@ def register_handlers(
     seg_threshold: float = 0.5,
     attach_validation: bool = False,
     validation_interval: int = 1,
-    val_loader: Any = None,  # only used if attach_validation=True
+    val_loader: Any = None,
+    enable_decision_health: bool = True,
+    **kwargs
 ) -> None:
     """
     Attach training/eval logging, W&B, image logging, and checkpointing.
@@ -365,6 +367,11 @@ def register_handlers(
             payload = {"trainer/epoch": ep}
             payload.update(scalars)
             _wb_log(wb, payload)
+
+    # Decision health (optional)
+    if enable_decision_health:
+        # attach decision health hooks here
+        pass
 
     # Last-N checkpoints
     if model is not None:

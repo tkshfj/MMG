@@ -176,7 +176,7 @@ def _console_print_metrics(epoch: int, metrics: dict):
             v = _as_scalar(v)
             parts.append(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
 
-    # confusion matrix (handle both names you use)
+    # confusion matrix (handle both names)
     for cm_key in ("cls_confmat", "val/confmat", "seg_confmat"):
         cm = metrics.get(cm_key)
         if cm is not None:
@@ -195,6 +195,19 @@ def _console_print_metrics(epoch: int, metrics: dict):
     print(f"[INFO] Epoch[{epoch}] Metrics -- " + " ".join(parts))
 
 
+def is_wandb_sweep() -> bool:
+    # WANDB_SWEEP_ID is set for agent processes
+    return bool(os.environ.get("WANDB_SWEEP_ID") or os.environ.get("WANDB_AGENT"))
+
+
+def decision_health_active_from_cfg(cfg: dict) -> bool:
+    # disable during sweeps unless explicitly forced
+    flag = bool(cfg.get("enable_decision_health", False))
+    if is_wandb_sweep() and not bool(cfg.get("force_decision_health_in_sweep", False)):
+        return False
+    return flag
+
+
 def run(
     cfg: dict,
     train_loader,
@@ -208,7 +221,6 @@ def run(
     model = build_model(cfg).to(device=device, dtype=torch.float32)
 
     use_split = str(cfg.get("param_groups", "single")).lower() == "split"
-
     if use_split and all(hasattr(model, m) for m in ("backbone_parameters", "head_parameters")):
         base_lr = float(cfg.get("base_lr", cfg.get("lr", 1e-3)))
         head_mult = float(cfg.get("head_multiplier", 10.0))
@@ -234,6 +246,7 @@ def run(
     # flags
     task = str(cfg.get("task", "multitask")).lower()
     has_cls, has_seg = get_task_flags(task)
+    health_on = decision_health_active_from_cfg(cfg)
 
     # two prepare_batch functions
     prepare_batch_std = make_prepare_batch(
@@ -273,23 +286,36 @@ def run(
         binary_single_logit=bool(cfg.get("binary_single_logit", True)),
         positive_index=int(cfg.get("positive_index", 1)),
     )
-    # score_fn = ppcfg              # output -> P(positive)[B]
-    # make available to any consumer that only sees the evaluator
+    # Make the score provider discoverable by helpers
     std_evaluator.state.score_fn = ppcfg
+
+    # threshold-acceptance guardrails
+    # thr_min = float(cfg.get("thr_min", 0.05))
+    # thr_max = float(cfg.get("thr_max", 0.95))
+    # pos_lo = float(cfg.get("thr_posrate_min", 0.02))
+    # pos_hi = float(cfg.get("thr_posrate_max", 0.98))
+    # auc_floor = float(cfg.get("cal_auc_floor", 0.50))
+    # require some evidence in the current epoch before accepting a new thr
+    # thr_min_tp = int(cfg.get("thr_min_tp", cfg.get("cal_min_tp", 5)))
+    # thr_min_tn = int(cfg.get("thr_min_tn", 5))
+    # thr_warmup = int(cfg.get("thr_warmup_epochs", max(3, int(cfg.get("cal_warmup_epochs", 1)))))
 
     # Helper: current live decision threshold (single SoT)
     def get_live_thr() -> float:
         return float(getattr(std_evaluator.state, "threshold", 0.5))
 
     score_kwargs = {
-        "binary_single_logit": bool(cfg.get("binary_single_logit", False)),
+        "binary_single_logit": ppcfg.binary_single_logit,
+        "positive_index": ppcfg.positive_index,
+        # keep the legacy knob if search uses it in logits picking
         "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
     }
 
     attach_val_threshold_search(
         evaluator=std_evaluator,
         mode=str(cfg.get("calibration_method", "bal_acc")),  # or "f1"
-        positive_index=int(cfg.get("positive_index", 1)),
+        # positive_index=int(cfg.get("positive_index", 1)),
+        positive_index=ppcfg.positive_index,
         score_kwargs=score_kwargs,
         # positive_index=int(cfg.get("positive_index", 1)),    # keep for BC if helper still uses it
         # score_fn=score_fn,
@@ -298,22 +324,23 @@ def run(
     if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
         attach_pos_score_debug_once(
             evaluator=std_evaluator,
-            # positive_index=int(cfg.get("positive_index", 1)),
             bins=int(cfg.get("pos_hist_bins", 20)),
             tag=str(cfg.get("pos_debug_tag", "debug_pos")),
-            positive_index=int(cfg.get("positive_index", 1)),  # keep for BC
+            positive_index=ppcfg.positive_index,
+            # positive_index=int(cfg.get("positive_index", 1)),
+            # positive_index=int(cfg.get("positive_index", 1)),  # keep for BC
             score_kwargs=score_kwargs,
             # score_fn=score_fn,
         )
 
-    # keep state.threshold in sync with whatever your search logged
-    @std_evaluator.on(Events.COMPLETED)
-    def _sync_live_threshold(e):
-        t = e.state.metrics.get("threshold", None)
-        pos_rate = e.state.metrics.get("pos_rate", None)
-        if isinstance(t, (int, float)) and isinstance(pos_rate, (int, float)):
-            if 0.0 < float(pos_rate) < 1.0 and 0.0 <= float(t) <= 1.0:
-                e.state.threshold = float(t)
+    # # keep state.threshold in sync with whatever search logged
+    # @std_evaluator.on(Events.COMPLETED)
+    # def _sync_live_threshold(e):
+    #     t = e.state.metrics.get("threshold", None)
+    #     pos_rate = e.state.metrics.get("pos_rate", None)
+    #     if isinstance(t, (int, float)) and isinstance(pos_rate, (int, float)):
+    #         if 0.0 < float(pos_rate) < 1.0 and 0.0 <= float(t) <= 1.0:
+    #             e.state.threshold = float(t)
 
     # Optionally compute per-epoch threshold & confusion stats for classification
     if has_cls:
@@ -321,15 +348,31 @@ def run(
             num_classes=int(cfg.get("num_classes", 2)),
             decision=str(cfg.get("cls_decision", "threshold")),
             threshold=get_live_thr,
-            # if metrics utils supports it, thread scores from the same callable:
-            # if supported in metrics: score_fn=ppcfg,
+            positive_index=int(cfg.get("positive_index", 1)),
         )
         for k, m in val_metrics.items():
             m.attach(std_evaluator, k)
 
+    # When we have segmentation but two-pass is disabled, attach seg metrics here
+    if has_seg and not bool(cfg.get("two_pass_val", False)):
+        try:
+            # Prefer project-local helper if it exists
+            from seg_eval import make_seg_val_metrics  # util, if present
+            seg_metrics = make_seg_val_metrics(
+                num_classes=int(cfg.get("num_classes", 2)),
+                threshold=float(cfg.get("seg_threshold", 0.5)),
+            )
+            # Keep a "seg/" namespace for clarity
+            for k, m in seg_metrics.items():
+                m.attach(std_evaluator, f"seg/{k}")
+        except Exception:
+            # Fallback: do nothing rather than crash; two-pass path will still merge seg metrics
+            pass
+
     # scheduler/watch setup
     two_pass_enabled = bool(cfg.get("two_pass_val", False))
-    default_watch = "auc" if has_cls else "dice"
+    # default_watch = "auc" if has_cls else "dice"
+    default_watch = "multi" if has_seg else "auc"
     watch_metric = cfg.get("watch_metric", default_watch)
 
     # single source for warmup/log toggles
@@ -352,45 +395,103 @@ def run(
             cls_threshold=float(cfg.get("cls_threshold", 0.5)),
             num_classes=int(cfg.get("num_classes", 2)),
             multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
-            # if supported in your implementation: score_fn=score_fn,
+            enable_decision_health=health_on,
+            # if supported in implementation: score_fn=score_fn,
         )
 
-    # one unified validation + logging hook
     @trainer.on(Events.EPOCH_COMPLETED)
     def _validate_and_log(engine):
         ep = int(engine.state.epoch)
 
-        # (1) Optional calibration to update the live threshold
-        if two_pass is not None and ep >= cal_warmup:
-            t, *_ = two_pass.validate(epoch=ep, model=model, val_loader=val_loader, base_rate=None)
-            if t is not None:
+        # (1) Optional calibration / two-pass
+        seg_metrics_from_tp = {}
+        if two_pass is not None:
+            t, cls_metrics_from_tp, seg_metrics_from_tp = two_pass.validate(
+                epoch=ep, model=model, val_loader=val_loader, base_rate=None
+            )
+            if t is not None and ep >= cal_warmup:
                 std_evaluator.state.threshold = float(t)
 
-        # (2) Evaluate once using the current live threshold
+        # (2) Single standard evaluation (classification metrics + any seg metrics attached to std_evaluator)
         std_evaluator.run(val_loader)
 
-        # (3) Build a W&B payload (flatten cm + per-cell, thresholds, val/loss)
+        # (3) Build payload from the standard evaluator first
         metrics = std_evaluator.state.metrics or {}
         payload = {"trainer/epoch": ep}
-        payload.update(_flatten_metrics_for_wandb(metrics))
+        payload.update(_flatten_metrics_for_wandb(metrics))  # -> val/...
 
-        # threshold proposed by the search (if present)
+        # (3b) Merge segmentation metrics returned by two-pass (if any)
+        #      We namespace them under val/seg/* to avoid key collisions.
+        if has_seg and seg_metrics_from_tp:
+            payload.update(_flatten_metrics_for_wandb(seg_metrics_from_tp, prefix="val/seg/"))
+
+            # Mirror a couple of useful seg values into engine.state.metrics for schedulers/checkpoints
+            # Prefer 'dice' if present; otherwise try common alternatives.
+            seg_score = None
+            for k in ("dice", "mean_dice", "iou", "jaccard"):
+                if k in seg_metrics_from_tp:
+                    v = seg_metrics_from_tp[k]
+                    if torch.is_tensor(v) and v.numel() == 1:
+                        v = float(v.item())
+                    seg_score = float(v)
+                    # Also expose namespaced copy (optional)
+                    engine.state.metrics[f"val/seg/{k}"] = seg_score
+                    break
+
+            # Construct a combined multi-objective score if configured to do so
+            if seg_score is not None:
+                # Use AUC if available, else fall back to accuracy (or 0.0)
+                cls_score = metrics.get("auc", metrics.get("acc", 0.0))
+                if torch.is_tensor(cls_score) and cls_score.numel() == 1:
+                    cls_score = float(cls_score.item())
+                cls_score = float(cls_score)
+
+                w = float(cfg.get("multi_weight", 0.5))
+                multi = w * seg_score + (1.0 - w) * cls_score
+                payload["val/multi"] = multi
+                engine.state.metrics["val/multi"] = multi
+                # make multi and seg metrics visible to checkpoint watch that reads evaluator metrics
+                for k, v in seg_metrics_from_tp.items():
+                    std_evaluator.state.metrics[f"seg/{k}"] = v
+                    std_evaluator.state.metrics["multi"] = multi
+
+        # (3c) If two-pass is OFF but seg metrics were attached to std_evaluator (step 1), also provide val/multi
+        elif has_seg:
+            # Try to synthesize multi from metrics that were attached to std_evaluator
+            seg_score = None
+            for k in ("seg/dice", "seg/mean_dice", "seg/iou", "seg/jaccard"):
+                if k in metrics:
+                    v = metrics[k]
+                    if torch.is_tensor(v) and v.numel() == 1:
+                        v = float(v.item())
+                    seg_score = float(v)
+                    break
+            if seg_score is not None:
+                cls_score = metrics.get("auc", metrics.get("acc", 0.0))
+                if torch.is_tensor(cls_score) and cls_score.numel() == 1:
+                    cls_score = float(cls_score.item())
+                cls_score = float(cls_score)
+                w = float(cfg.get("multi_weight", 0.5))
+                multi = w * seg_score + (1.0 - w) * cls_score
+                payload["val/multi"] = multi
+                engine.state.metrics["val/multi"] = multi
+                std_evaluator.state.metrics["multi"] = multi
+
+        # (4) Threshold bookkeeping
         thr_search = metrics.get("threshold", None)
         if thr_search is not None:
             payload["val/search_threshold"] = float(thr_search)
-
-        # threshold actually used by the metrics this epoch
         payload["val/threshold"] = float(getattr(std_evaluator.state, "threshold", 0.5))
         if two_pass is not None and ep >= cal_warmup:
             payload["val/cal_thr"] = payload["val/threshold"]
 
-        # (4) Validation loss (also mirror into trainer.state.metrics for schedulers)
+        # (5) Validation loss + mirror into engine state for plateau
         try:
             vloss = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
             payload["val/loss"] = vloss
             engine.state.metrics = engine.state.metrics or {}
             engine.state.metrics["val/loss"] = vloss
-            # mirror val/auc as well if available (handy for switching plateau metric)
+            # Mirror AUC into engine state if present (optional convenience)
             if "auc" in metrics:
                 val_auc = metrics["auc"]
                 if torch.is_tensor(val_auc) and val_auc.numel() == 1:
@@ -399,135 +500,11 @@ def run(
         except Exception:
             pass
 
-        # (5) concise console line
         if console_log:
             _console_print_metrics(ep, metrics)
 
-        # (6) final log
-        import wandb  # safe import here so main works when this file is imported elsewhere
+        import wandb
         wandb.log(payload)
-
-    # two_pass_enabled = bool(cfg.get("two_pass_val", False))
-    # # log_calibrated = bool(cfg.get("log_calibrated", True))  # noqa unused
-    # default_watch = "auc" if has_cls else "dice"
-    # watch_metric = cfg.get("watch_metric", default_watch)
-    # cal_warmup = int(cfg.get("cal_warmup_epochs", 1))   # for 2-pass gate
-    # # es_warmup = int(cfg.get("cal_warmup_epochs", 1))     # noqa unused for early stop (or a separate cfg key)
-
-    # def _cast_loggable(v):
-    #     try:
-    #         import numpy as _np
-    #         import torch as _torch
-    #         if isinstance(v, (int, float, bool, str)):
-    #             return v
-    #         if _torch.is_tensor(v):
-    #             return float(v.item()) if v.numel() == 1 else v.detach().cpu().tolist()
-    #         if isinstance(v, _np.ndarray):
-    #             return float(v.item()) if v.size == 1 else v.tolist()
-    #         return v
-    #     except Exception:
-    #         return v
-
-    # if not two_pass_enabled:
-    #     @trainer.on(Events.EPOCH_COMPLETED)
-    #     def _run_std_val(engine):
-    #         std_evaluator.run(val_loader)
-    #         ep = int(engine.state.epoch)
-
-    #         payload = {"trainer/epoch": ep}
-    #         payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
-
-    #         # Preserve hook-derived threshold separately
-    #         thr_search = std_evaluator.state.metrics.get("threshold", None)
-    #         if thr_search is not None:
-    #             payload["val/search_threshold"] = float(thr_search)
-    #         # Log the *live* decision threshold used by metrics
-    #         payload["val/threshold"] = float(getattr(std_evaluator.state, "threshold", 0.5))
-    #         try:
-    #             payload["val/loss"] = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
-    #         except Exception:
-    #             pass
-    #         if cfg.get("console_epoch_log", True):
-    #             _console_print_metrics(ep, std_evaluator.state.metrics)
-    #         wandb.log(payload)
-    # else:
-    #     # use a TwoPass evaluator with .validate(...)
-    #     calibrator = None
-    #     if bool(cfg.get("two_pass_val", False)):
-    #         try:
-    #             calibrator = build_calibrator(cfg)
-    #         except Exception:
-    #             calibrator = None
-
-    #     two_pass = make_two_pass_evaluator(
-    #         calibrator=calibrator,
-    #         task=cfg.get("task", "multitask"),
-    #         trainer=trainer,
-    #         positive_index=int(cfg.get("positive_index", 1)),
-    #         cls_decision=str(cfg.get("cls_decision", "threshold")),
-    #         cls_threshold=float(cfg.get("cls_threshold", 0.5)),
-    #         num_classes=int(cfg.get("num_classes", 2)),
-    #         multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
-    #     )
-
-    #     def _runner(epoch: int):
-    #         # returns (t, cls_metrics, seg_metrics)
-    #         return two_pass.validate(epoch=epoch, model=model, val_loader=val_loader, base_rate=None)
-
-    #     attach_two_pass_validation(
-    #         trainer=trainer,
-    #         run_two_pass=_runner,
-    #         cal_warmup_epochs=int(cfg.get("cal_warmup_epochs", 1)),
-    #         disable_std_logging=True,
-    #         wandb_prefix="val/",
-    #         log_fn=wandb.log,
-    #     )
-
-    # cal_warmup = int(cfg.get("cal_warmup_epochs", 1))
-    # console_log = bool(cfg.get("console_epoch_log", True))
-
-    # @trainer.on(Events.EPOCH_COMPLETED)
-    # def _validate_and_log(engine):
-    #     ep = int(engine.state.epoch)
-
-    #     # Optional calibration -> update live threshold
-    #     if two_pass is not None and ep >= cal_warmup:
-    #         t, *_ = two_pass.validate(epoch=ep, model=model, val_loader=val_loader, base_rate=None)
-    #         if t is not None:
-    #             std_evaluator.state.threshold = float(t)
-
-    #     # Always evaluate once using current live threshold
-    #     std_evaluator.run(val_loader)
-
-    #     # Build W&B payload (flatten CM + per-cell, thresholds, loss)
-    #     metrics = std_evaluator.state.metrics or {}
-    #     payload = {"trainer/epoch": ep}
-    #     payload.update(_flatten_metrics_for_wandb(metrics))
-
-    #     # threshold proposed by the search (if present)
-    #     thr_search = metrics.get("threshold", None)
-    #     if thr_search is not None:
-    #         payload["val/search_threshold"] = float(thr_search)
-
-    #     # threshold actually used by the metrics this epoch
-    #     payload["val/threshold"] = float(getattr(std_evaluator.state, "threshold", 0.5))
-    #     if two_pass is not None and ep >= cal_warmup:
-    #         payload["val/cal_thr"] = float(getattr(std_evaluator.state, "threshold", 0.5))
-
-    #     # Validation loss (also mirror into trainer.state.metrics for plateau scheduler)
-    #     try:
-    #         vloss = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
-    #         payload["val/loss"] = vloss
-    #         engine.state.metrics = engine.state.metrics or {}
-    #         engine.state.metrics["val/loss"] = vloss
-    #     except Exception:
-    #         pass
-
-    #     # Concise console line with real CM counts
-    #     if console_log:
-    #         _console_print_metrics(ep, metrics)
-
-    #     wandb.log(payload)
 
     watch_mode = cfg.get("watch_mode", "max")
     # patience = int(cfg.get("early_stop_patience", 5))  # noqa unused
@@ -614,6 +591,7 @@ def run(
         attach_validation=False,
         validation_interval=1,
         val_loader=val_loader,
+        enable_decision_health=health_on,
     )
 
     trainer.run()
@@ -684,3 +662,245 @@ if __name__ == "__main__":
 
         # Run training with explicit loaders & device
         run(cfg, train_loader, val_loader, test_loader, device)
+
+    # @trainer.on(Events.EPOCH_COMPLETED)
+    # def _validate_and_log(engine):
+    #     ep = int(engine.state.epoch)
+
+    #     # (1) Optional two-pass calibration may propose a calibrated threshold
+    #     if two_pass is not None and ep >= cal_warmup:
+    #         t_cal, *_ = two_pass.validate(epoch=ep, model=model, val_loader=val_loader, base_rate=None)
+    #         if t_cal is not None:
+    #             std_evaluator.state.threshold = float(t_cal)
+
+    #     # (2) Evaluate once using the current live threshold
+    #     std_evaluator.run(val_loader)
+
+    #     # (3) Gather metrics and build payload
+    #     metrics = std_evaluator.state.metrics or {}
+    #     payload = {"trainer/epoch": ep}
+    #     payload.update(_flatten_metrics_for_wandb(metrics))
+
+    #     # (4) Consider candidate from the threshold search, but accept it only under guardrails
+    #     thr_search = metrics.get("threshold", None)
+    #     if isinstance(thr_search, (int, float)):
+    #         payload["val/search_threshold"] = float(thr_search)
+
+    #         if ep >= thr_warmup:
+    #             t_raw = float(thr_search)
+    #             t_clamped = max(thr_min, min(thr_max, t_raw))
+
+    #             # sanity signals from this same eval pass
+    #             pos_rate = metrics.get("pos_rate", None)
+    #             auc_val = metrics.get("auc", None)
+    #             pos_ok = (isinstance(pos_rate, (int, float)) and pos_lo <= float(pos_rate) <= pos_hi)
+    #             auc_ok = (isinstance(auc_val, (int, float)) and float(auc_val) >= auc_floor)
+
+    #             # optional: enforce some TN/TP counts if confmat is available
+    #             tn_tp_ok = True
+    #             cm = metrics.get("cls_confmat", None) or metrics.get("confmat", None)
+    #             if cm is not None:
+    #                 if hasattr(cm, "as_tensor"):
+    #                     cm = cm.as_tensor()
+    #                 if torch.is_tensor(cm):
+    #                     cm = cm.detach().cpu().to(torch.int64).numpy()
+    #                 else:
+    #                     cm = np.asarray(cm, dtype=np.int64)
+    #                 if cm.ndim == 2 and cm.shape == (2, 2):
+    #                     tn, fp = int(cm[0, 0]), int(cm[0, 1])  # noqa: F841
+    #                     fn, tp = int(cm[1, 0]), int(cm[1, 1])  # noqa: F841
+    #                     tn_tp_ok = (tp >= thr_min_tp) and (tn >= thr_min_tn)
+
+    #             if pos_ok and auc_ok and tn_tp_ok:
+    #                 std_evaluator.state.threshold = t_clamped
+
+    #     # (5) Log the threshold actually in effect after acceptance logic
+    #     payload["val/threshold"] = float(getattr(std_evaluator.state, "threshold", 0.5))
+    #     if two_pass is not None and ep >= cal_warmup:
+    #         payload["val/cal_thr"] = payload["val/threshold"]
+
+    #     # (6) Validation loss (and mirrors for schedulers)
+    #     try:
+    #         vloss = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
+    #         payload["val/loss"] = vloss
+    #         engine.state.metrics = engine.state.metrics or {}
+    #         engine.state.metrics["val/loss"] = vloss
+    #         if "auc" in metrics:
+    #             val_auc = metrics["auc"]
+    #             if torch.is_tensor(val_auc) and val_auc.numel() == 1:
+    #                 val_auc = float(val_auc.item())
+    #             engine.state.metrics["val/auc"] = val_auc
+    #     except Exception:
+    #         pass
+
+    #     if console_log:
+    #         _console_print_metrics(ep, metrics)
+
+    #     import wandb
+    #     wandb.log(payload)
+
+    # # one unified validation + logging hook
+    # @trainer.on(Events.EPOCH_COMPLETED)
+    # def _validate_and_log(engine):
+    #     ep = int(engine.state.epoch)
+
+    #     # (1) Optional calibration to update the live threshold
+    #     if two_pass is not None and ep >= cal_warmup:
+    #         t, *_ = two_pass.validate(epoch=ep, model=model, val_loader=val_loader, base_rate=None)
+    #         if t is not None:
+    #             std_evaluator.state.threshold = float(t)
+
+    #     # (2) Evaluate once using the current live threshold
+    #     std_evaluator.run(val_loader)
+
+    #     # (3) Build a W&B payload (flatten cm + per-cell, thresholds, val/loss)
+    #     metrics = std_evaluator.state.metrics or {}
+    #     payload = {"trainer/epoch": ep}
+    #     payload.update(_flatten_metrics_for_wandb(metrics))
+
+    #     # threshold proposed by the search (if present)
+    #     thr_search = metrics.get("threshold", None)
+    #     if thr_search is not None:
+    #         payload["val/search_threshold"] = float(thr_search)
+
+    #     # threshold actually used by the metrics this epoch
+    #     payload["val/threshold"] = float(getattr(std_evaluator.state, "threshold", 0.5))
+    #     if two_pass is not None and ep >= cal_warmup:
+    #         payload["val/cal_thr"] = payload["val/threshold"]
+
+    #     # (4) Validation loss (also mirror into trainer.state.metrics for schedulers)
+    #     try:
+    #         vloss = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
+    #         payload["val/loss"] = vloss
+    #         engine.state.metrics = engine.state.metrics or {}
+    #         engine.state.metrics["val/loss"] = vloss
+    #         # mirror val/auc as well if available (handy for switching plateau metric)
+    #         if "auc" in metrics:
+    #             val_auc = metrics["auc"]
+    #             if torch.is_tensor(val_auc) and val_auc.numel() == 1:
+    #                 val_auc = float(val_auc.item())
+    #             engine.state.metrics["val/auc"] = val_auc
+    #     except Exception:
+    #         pass
+
+    #     # (5) concise console line
+    #     if console_log:
+    #         _console_print_metrics(ep, metrics)
+
+    #     # (6) final log
+    #     import wandb  # safe import here so main works when this file is imported elsewhere
+    #     wandb.log(payload)
+
+    # two_pass_enabled = bool(cfg.get("two_pass_val", False))
+    # # log_calibrated = bool(cfg.get("log_calibrated", True))  # noqa unused
+    # default_watch = "auc" if has_cls else "dice"
+    # watch_metric = cfg.get("watch_metric", default_watch)
+    # cal_warmup = int(cfg.get("cal_warmup_epochs", 1))   # for 2-pass gate
+    # # es_warmup = int(cfg.get("cal_warmup_epochs", 1))     # noqa unused for early stop (or a separate cfg key)
+
+    # def _cast_loggable(v):
+    #     try:
+    #         import numpy as _np
+    #         import torch as _torch
+    #         if isinstance(v, (int, float, bool, str)):
+    #             return v
+    #         if _torch.is_tensor(v):
+    #             return float(v.item()) if v.numel() == 1 else v.detach().cpu().tolist()
+    #         if isinstance(v, _np.ndarray):
+    #             return float(v.item()) if v.size == 1 else v.tolist()
+    #         return v
+    #     except Exception:
+    #         return v
+
+    # if not two_pass_enabled:
+    #     @trainer.on(Events.EPOCH_COMPLETED)
+    #     def _run_std_val(engine):
+    #         std_evaluator.run(val_loader)
+    #         ep = int(engine.state.epoch)
+
+    #         payload = {"trainer/epoch": ep}
+    #         payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
+
+    #         # Preserve hook-derived threshold separately
+    #         thr_search = std_evaluator.state.metrics.get("threshold", None)
+    #         if thr_search is not None:
+    #             payload["val/search_threshold"] = float(thr_search)
+    #         # Log the *live* decision threshold used by metrics
+    #         payload["val/threshold"] = float(getattr(std_evaluator.state, "threshold", 0.5))
+    #         try:
+    #             payload["val/loss"] = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
+    #         except Exception:
+    #             pass
+    #         if cfg.get("console_epoch_log", True):
+    #             _console_print_metrics(ep, std_evaluator.state.metrics)
+    #         wandb.log(payload)
+    # else:
+    #     # use a TwoPass evaluator with .validate(...)
+    #     calibrator = None
+    #     if bool(cfg.get("two_pass_val", False)):
+    #         try:
+    #             calibrator = build_calibrator(cfg)
+    #         except Exception:
+    #             calibrator = None
+
+    #     two_pass = make_two_pass_evaluator(
+    #         calibrator=calibrator,
+    #         task=cfg.get("task", "multitask"),
+    #         trainer=trainer,
+    #         positive_index=int(cfg.get("positive_index", 1)),
+    #         cls_decision=str(cfg.get("cls_decision", "threshold")),
+    #         cls_threshold=float(cfg.get("cls_threshold", 0.5)),
+    #         num_classes=int(cfg.get("num_classes", 2)),
+    #         multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
+    #     )
+
+    #     def _runner(epoch: int):
+    #         # returns (t, cls_metrics, seg_metrics)
+    #         return two_pass.validate(epoch=epoch, model=model, val_loader=val_loader, base_rate=None)
+
+    #     attach_two_pass_validation(
+    #         trainer=trainer,
+    #         run_two_pass=_runner,
+    #         cal_warmup_epochs=int(cfg.get("cal_warmup_epochs", 1)),
+    #         disable_std_logging=True,
+    #         wandb_prefix="val/",
+    #         log_fn=wandb.log,
+    #     )
+
+    # cal_warmup = int(cfg.get("cal_warmup_epochs", 1))
+    # console_log = bool(cfg.get("console_epoch_log", True))
+
+    # @trainer.on(Events.EPOCH_COMPLETED)
+    # def _validate_and_log(engine):
+    #     ep = int(engine.state.epoch)
+    #     # Optional calibration -> update live threshold
+    #     if two_pass is not None and ep >= cal_warmup:
+    #         t, *_ = two_pass.validate(epoch=ep, model=model, val_loader=val_loader, base_rate=None)
+    #         if t is not None:
+    #             std_evaluator.state.threshold = float(t)
+    #     # Always evaluate once using current live threshold
+    #     std_evaluator.run(val_loader)
+    #     # Build W&B payload (flatten CM + per-cell, thresholds, loss)
+    #     metrics = std_evaluator.state.metrics or {}
+    #     payload = {"trainer/epoch": ep}
+    #     payload.update(_flatten_metrics_for_wandb(metrics))
+    #     # threshold proposed by the search (if present)
+    #     thr_search = metrics.get("threshold", None)
+    #     if thr_search is not None:
+    #         payload["val/search_threshold"] = float(thr_search)
+    #     # threshold actually used by the metrics this epoch
+    #     payload["val/threshold"] = float(getattr(std_evaluator.state, "threshold", 0.5))
+    #     if two_pass is not None and ep >= cal_warmup:
+    #         payload["val/cal_thr"] = float(getattr(std_evaluator.state, "threshold", 0.5))
+    #     # Validation loss (also mirror into trainer.state.metrics for plateau scheduler)
+    #     try:
+    #         vloss = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
+    #         payload["val/loss"] = vloss
+    #         engine.state.metrics = engine.state.metrics or {}
+    #         engine.state.metrics["val/loss"] = vloss
+    #     except Exception:
+    #         pass=
+    #     # Concise console line with real CM counts
+    #     if console_log:
+    #         _console_print_metrics(ep, metrics)
+    #     wandb.log(payload)
