@@ -9,6 +9,7 @@ from ignite.engine import Events, Engine
 from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
 from protocols import CalibratorProtocol
 from utils.safe import to_py, labels_to_1d_indices
+from posprob import PosProbCfg
 from metrics_utils import (
     extract_cls_logits_from_any,
     extract_seg_logits_from_any,
@@ -114,6 +115,7 @@ class TwoPassEvaluator:
         health_need_k: int = 3,
         health_warmup: Optional[int] = None,
         enable_decision_health: bool = False,
+        score_provider: PosProbCfg | None = None,
     ):
         self.calibrator = calibrator
         self._trainer = trainer
@@ -139,7 +141,10 @@ class TwoPassEvaluator:
         self.health_warmup = int(health_warmup) if health_warmup is not None else int(getattr(getattr(calibrator, "cfg", None), "warmup_epochs", 1))
         self._thr_box = ThresholdBox(value=float(cls_threshold))
         self._watchdog_active: bool = False   # suppress internal health logs when external watchdog is attached
-
+        # Single source of truth for score extraction / binarization
+        self._score_provider = score_provider or PosProbCfg(
+            binary_single_logit=True, positive_index=self.pos_idx
+        )
         # Threshold guardrails
         cfg = getattr(calibrator, "cfg", None)
         self.thr_min = float(getattr(cfg, "thr_min", 0.05))
@@ -361,10 +366,32 @@ class TwoPassEvaluator:
                     if isinstance(v, (int, float)):
                         dst[k] = float(v)
             # Vector-or-scalar metrics -> promote to per-index keys and mean
+            # if "prec" in raw:
+            #     promote_vec(dst, "prec", raw["prec"])        # yields 'prec', 'prec_0', 'prec_1', ...
+            # if "recall" in raw:
+            #     promote_vec(dst, "recall", raw["recall"])    # yields 'recall', 'recall_0', 'recall_1', ...
+            # Old name (“prec”/“recall”) or new name (“precision_pos”/“recall_pos”)
             if "prec" in raw:
-                promote_vec(dst, "prec", raw["prec"])        # yields 'prec', 'prec_0', 'prec_1', ...
+                promote_vec(dst, "prec", raw["prec"])
+            elif "precision_pos" in raw:
+                v = to_py(raw["precision_pos"])
+                if isinstance(v, (int, float)):
+                    dst["prec"] = float(v)
             if "recall" in raw:
-                promote_vec(dst, "recall", raw["recall"])    # yields 'recall', 'recall_0', 'recall_1', ...
+                promote_vec(dst, "recall", raw["recall"])
+            elif "recall_pos" in raw:
+                v = to_py(raw["recall_pos"])
+                if isinstance(v, (int, float)):
+                    dst["recall"] = float(v)
+            # Optional: also expose macro scores if present
+            if "precision_macro" in raw and "prec" not in dst:
+                vm = to_py(raw["precision_macro"])
+                if isinstance(vm, (int, float)):
+                    dst["prec_macro"] = float(vm)
+            if "recall_macro" in raw and "recall" not in dst:
+                vm = to_py(raw["recall_macro"])
+                if isinstance(vm, (int, float)):
+                    dst["recall_macro"] = float(vm)
             # Confusion matrix -> matrix list + per-cell ints
             if "cls_confmat" in raw:
                 add_confmat(dst, "cls_confmat", raw["cls_confmat"])
@@ -693,6 +720,7 @@ class TwoPassEvaluator:
                 decision="threshold",
                 positive_index=self.pos_idx,
                 thr_getter=_thr_getter,
+                score_provider=self._score_provider,
             )
 
             for name, m in cls_metrics.items():
@@ -844,7 +872,7 @@ def make_two_pass_evaluator(
     seg_num_classes: Optional[int] = None,
     loss_fn=None,
     enable_decision_health: bool = True,
-    score_provider=None,
+    score_provider: PosProbCfg | None = None,
     **_
 ) -> TwoPassEvaluator:
     """

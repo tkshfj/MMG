@@ -4,6 +4,7 @@
 - Refactor validation pipeline: gate decision health in sweeps; merge and alias seg metrics to val/dice|val/iou
 - Fix SelectIndex to accept metric factories; ensure per-class Precision/Recall pass Metric instances to avoid AttributeError.
 - Fix binary metric crash by unifying transforms: pass PosProbCfg into two-pass, binarize for Acc/Prec/Recall, keep probs for AUC; ensure both evaluators share the same score pipeline.
+- Fix metrics/evaluator: dict-safe transforms; drop eager indexing; fix positive_index
 
 # 2025-09-07
 - Refactor validation/logging: print CM counts, unify two-pass epoch handler, sanitize threshold keys.
