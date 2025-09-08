@@ -54,110 +54,6 @@ def make_cm_rates(cm: ConfusionMatrix) -> dict[str, Metric]:
     }
 
 
-def _resolve_thr(thr):
-    return float(thr() if callable(thr) else thr)
-
-
-# def _make_prob_and_bin_transforms(
-#     *,
-#     threshold,                 # float or callable -> float
-#     positive_index: int = 1,
-#     num_classes: int = 2,
-#     score_provider=None,       # optional PosProbCfg-like with pick_logits/logits_to_pos_prob/pick_labels
-# ) -> Tuple[Callable, Callable]:
-#     """
-#     Returns:
-#       prob_tf(output) -> (probs[B] or probs[B,C], labels[B])
-#       bin_tf(output)  -> (pred_bin[B] in {0,1} OR argmax[B] for multiclass, labels[B])
-#     """
-#     if score_provider is not None:
-#         def prob_tf(output):
-#             # output usually: (y_pred_like, y_true_like) or a mapping
-#             if isinstance(output, (tuple, list)) and len(output) >= 2:
-#                 y_pred_like, y_true_like = output[0], output[1]
-#             elif isinstance(output, dict):
-#                 y_pred_like = output
-#                 y_true_like = output
-#             else:
-#                 raise TypeError(f"Unsupported output type: {type(output)}")
-
-#             logits = score_provider.pick_logits(y_pred_like)
-#             probs = score_provider.logits_to_pos_prob(logits)  # -> [B] (binary)
-#             labels = score_provider.pick_labels(y_true_like).long().view(-1)
-#             if int(num_classes) > 2:
-#                 # If a custom provider is used with multiclass, it should return [B,C].
-#                 # Fall back to softmax if needed.
-#                 if probs.ndim == 1:
-#                     probs = torch.softmax(torch.as_tensor(logits, dtype=torch.float32), dim=-1)
-#             return probs.detach(), labels.detach()
-
-#         def bin_tf(output):
-#             probs, labels = prob_tf(output)
-#             if int(num_classes) > 2:
-#                 # multiclass: argmax over channel
-#                 if probs.ndim == 1:
-#                     # if probs came as [B], recompute from logits
-#                     if isinstance(output, (tuple, list)) and len(output) >= 2:
-#                         logits = score_provider.pick_logits(output[0])
-#                     else:
-#                         logits = score_provider.pick_logits(output)
-#                     y_hat = torch.as_tensor(logits).argmax(dim=-1).long()
-#                 else:
-#                     y_hat = probs.argmax(dim=-1).long()
-#             else:
-#                 t = _resolve_thr(threshold)
-#                 y_hat = (probs.view(-1) >= t).to(torch.long)
-#             return y_hat.detach(), labels.detach()
-#         return prob_tf, bin_tf
-
-#     # Fallback path: reuse your robust parsers
-#     def prob_tf(output):
-#         logits, y = cls_output_transform(output)
-#         probs = probs_from_logits(logits, num_classes=int(num_classes), positive_index=int(positive_index))
-#         return probs, y
-
-#     def bin_tf(output):
-#         logits, y = cls_output_transform(output)
-#         if int(num_classes) > 2 or (logits.ndim >= 2 and logits.shape[-1] > 2):
-#             y_hat = logits.argmax(dim=-1).long()
-#         else:
-#             p = positive_score_from_logits(logits, positive_index=int(positive_index)).view(-1)
-#             y_hat = (p >= _resolve_thr(threshold)).to(torch.long)
-#         return y_hat, y
-#     return prob_tf, bin_tf
-
-
-# def _make_cm_transform(
-#     *,
-#     decision: str,
-#     threshold,
-#     positive_index: int,
-# ) -> Callable:
-#     """
-#     ConfusionMatrix-friendly transform that yields:
-#       - multiclass: ([B,C] scores), labels
-#       - binary:     ([B,2] one-hot from threshold), labels
-#     """
-#     def cm_tf(output):
-#         logits, y = cls_output_transform(output)
-
-#         # multiclass or argmax decision -> pass scores; CM does argmax
-#         if str(decision).lower() == "argmax" or (logits.ndim >= 2 and logits.shape[-1] > 2):
-#             if logits.ndim == 1:  # edge case
-#                 logits_ = logits.unsqueeze(1)
-#             else:
-#                 logits_ = logits
-#             return logits_.float(), y
-
-#         # binary thresholding -> make two-channel one-hot
-#         p = positive_score_from_logits(logits, positive_index=int(positive_index)).view(-1)
-#         t = _resolve_thr(threshold)
-#         y_hat = (p >= t).float()
-#         y_pred = torch.stack([1.0 - y_hat, y_hat], dim=1)  # [B,2]
-#         return y_pred, y
-#     return cm_tf
-
-
 # Debug stats metric (global min/median/max over an epoch)
 class PosProbStats(Metric):
     """
@@ -549,155 +445,6 @@ def _resolve_threshold(thr: Union[float, Callable[[], float]]) -> float:
     return float(thr() if callable(thr) else thr)
 
 
-# class SelectIndex(Metric):
-#     """
-#     Wrap a vector-valued Metric (e.g., Precision/Recall with average=False)
-#     and expose a single class component at `index` as a scalar Metric.
-
-#     base_factory: () -> Metric  # must build a fresh ignite Metric instance
-#     index: int                  # which component to return
-#     """
-#     def __init__(self, base_factory, index: int):
-#         self._base_factory = base_factory
-#         self.index = int(index)
-#         self.base = None  # will be constructed on first reset()
-#         super().__init__()
-
-#     def reset(self) -> None:
-#         # Build (or rebuild) the underlying metric and reset it
-#         if self.base is None:
-#             self.base = self._base_factory()
-#         else:
-#             try:
-#                 self.base.reset()
-#             except Exception:
-#                 # In case the underlying metric can’t be safely reused
-#                 self.base = self._base_factory()
-
-#     def update(self, output) -> None:
-#         # Delegate to the underlying metric
-#         self.base.update(output)
-
-#     def compute(self):
-#         v = self.base.compute()
-#         if torch.is_tensor(v):
-#             v = v.detach().cpu()
-#             if v.numel() == 1 and v.ndim == 0:
-#                 return float(v.item())
-#             return float(v[self.index].item())
-#         if isinstance(v, np.ndarray):
-#             return float(v[self.index].item())
-#         return float(v[self.index])
-
-    # def compute(self):
-    #     # Pull the vector and select one component
-    #     v = self.base.compute()
-    #     if torch.is_tensor(v):
-    #         v = v.detach()
-    #         # Support 0-dim tensors by converting to Python number
-    #         if v.numel() == 1 and v.ndim == 0:
-    #             return v
-    #         return v[self.index]
-    #     # list/ndarray
-    #     return v[self.index]
-
-
-def _make_prob_transform(threshold_or_fn, score_provider):
-    # For AUC etc (probabilities).
-    def _xf(output):
-        y_pred_raw, y_true_raw = output
-        logits = score_provider.pick_logits(y_pred_raw)
-        probs = score_provider.logits_to_pos_prob(logits)
-        labels = score_provider.pick_labels(y_true_raw)
-        return probs.detach(), labels.detach()
-    return _xf
-
-
-def _make_bin_transform(threshold_or_fn, score_provider):
-    # For Acc/Prec/Recall/ConfMat (0/1 predictions).
-    def _thr():
-        return float(threshold_or_fn()) if callable(threshold_or_fn) else float(threshold_or_fn)
-
-    def _xf(output):
-        y_pred_raw, y_true_raw = output
-        logits = score_provider.pick_logits(y_pred_raw)
-        probs = score_provider.logits_to_pos_prob(logits)
-        pred01 = (probs >= _thr()).to(torch.long)
-        labels = score_provider.pick_labels(y_true_raw).to(torch.long)
-        return pred01.detach(), labels.detach()
-    return _xf
-
-
-def _binpred_transform(score_provider: PosProbCfg, threshold_fn: Callable[[], float]):
-    """Return (y_pred_int01, y_int01) for binary metrics."""
-    def _xf(output: Tuple, *args, **kwargs):
-        # output is (model_output, target)
-        model_out, target = output
-        probs, y = score_provider.output_to_probs_and_labels(model_out, target)  # probs:[B] in [0,1], y:[B] long
-        thr = float(threshold_fn())
-        y_pred = (probs >= thr).to(torch.long).view(-1)  # [B] in {0,1}
-        y = y.to(torch.long).view(-1)                    # [B] in {0,1}
-        return y_pred, y
-    return _xf
-
-
-def _auc_transform(score_provider: PosProbCfg):
-    """Return (prob, y) for ROC_AUC."""
-    def _xf(output: Tuple, *args, **kwargs):
-        model_out, target = output
-        probs, y = score_provider.output_to_probs_and_labels(model_out, target)  # probs:[B] float
-        return probs.view(-1).detach(), y.view(-1).to(torch.long)
-    return _xf
-
-
-# def make_cls_val_metrics(
-#     num_classes: int = 2,
-#     decision: str = "threshold",
-#     threshold: Callable[[], float] | float = 0.5,
-#     positive_index: int = 1,
-#     score_provider: PosProbCfg | None = None,
-# ):
-#     """
-#     Binary classification metrics:
-#       - AUC consumes probabilities
-#       - Acc/Prec/Recall/ConfMat consume 0/1 predictions
-#     """
-#     if score_provider is None:
-#         score_provider = PosProbCfg(binary_single_logit=True, positive_index=int(positive_index))
-
-#     # normalize threshold into a callable via def (no lambda)
-#     if isinstance(threshold, (int, float)):
-#         _thr_val = float(threshold)
-
-#         def threshold_fn() -> float:
-#             return _thr_val
-#     elif callable(threshold):
-#         def threshold_fn() -> float:
-#             return float(threshold())
-#     else:
-#         raise TypeError("threshold must be a float or a zero-arg callable returning a float")
-
-#     # output transforms
-#     xf_bin = _binpred_transform(score_provider, threshold_fn)
-#     xf_auc = _auc_transform(score_provider)
-#     acc = Accuracy(output_transform=xf_bin)                    # (int01, int01)
-#     prec = Precision(average=False, output_transform=xf_bin)    # per-class vector
-#     rec = Recall(average=False, output_transform=xf_bin)       # per-class vector
-#     auc = ROC_AUC(output_transform=xf_auc)                     # (prob, int)
-#     cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=xf_bin)
-
-#     metrics = {
-#         "acc": acc,
-#         "prec": prec,            # attach the full vector; pick components later
-#         "recall": rec,           # attach the full vector
-#         "auc": auc,
-#         "cls_confmat": cm,
-#     }
-#     if int(num_classes) == 2:
-#         metrics.update(make_cm_rates(cm))  # adds pos_rate and gt_pos_rate
-#     return metrics
-
-
 def make_cls_val_metrics(
     num_classes: int = 2,
     decision: str = "threshold",
@@ -758,52 +505,6 @@ def make_cls_val_metrics(
     if int(num_classes) == 2:
         metrics.update(make_cm_rates(cm))  # adds pos_rate and gt_pos_rate
     return metrics
-
-    # acc = Accuracy(output_transform=xf_bin)                   # xf_bin -> (int01, int01)
-    # prec = Precision(average=False, output_transform=xf_bin)   # vector
-    # rec = Recall(average=False, output_transform=xf_bin)    # vector
-    # auc = ROC_AUC(output_transform=xf_auc)                    # xf_auc -> (prob, int)
-
-    # return {
-    #     "acc": acc,
-    #     "prec_pos": prec[int(positive_index)],
-    #     "recall_pos": rec[int(positive_index)],
-    #     "auc": auc,
-    #     "cls_confmat": ConfusionMatrix(num_classes=2, output_transform=xf_bin),
-    # }
-
-    # # base metrics
-    # acc = Accuracy(output_transform=xf_bin)
-    # # prec_vec = Precision(average=False, output_transform=xf_bin)
-    # # rec_vec = Recall(average=False, output_transform=xf_bin)
-    # confmat = ConfusionMatrix(num_classes=int(num_classes), output_transform=xf_bin)
-    # auc = ROC_AUC(output_transform=xf_auc)
-
-    # # factories with def (no lambdas)
-    # def make_precision_vec():
-    #     return Precision(average=False, output_transform=xf_bin)
-
-    # def make_recall_vec():
-    #     return Recall(average=False, output_transform=xf_bin)
-
-    # metrics = {
-    #     "acc": acc,
-    #     "auc": auc,
-    #     "cls_confmat": confmat,
-    #     "prec": SelectIndex(make_precision_vec, positive_index),
-    #     "recall": SelectIndex(make_recall_vec, positive_index),
-    # }
-    # if int(num_classes) == 2:
-    #     metrics.update(make_cm_rates(confmat))
-    # return metrics
-
-    # return {
-    #     "acc": acc,
-    #     "auc": auc,
-    #     "cls_confmat": confmat,
-    #     "prec": SelectIndex(make_precision_vec, positive_index),
-    #     "recall": SelectIndex(make_recall_vec, positive_index),
-    # }
 
 
 # Standard classification output transforms
@@ -872,25 +573,6 @@ def cls_decision_output_transform(
     return y_hat.view(-1), y.view(-1).to(torch.long)
 
 
-# def cls_decision_output_transform(
-#     output: Any, *,
-#     decision: str = "threshold",
-#     # threshold: float = 0.5,
-#     threshold: Union[float, Callable[[], float]] = 0.5,
-#     positive_index: int = 1
-# ) -> tuple[torch.Tensor, torch.Tensor]:
-#     """Return (pred_indices, labels) for Acc/Prec/Rec/ConfMat."""
-#     logits, y = cls_output_transform(output)
-#     dec = str(decision).lower()
-#     if dec == "argmax" or (logits.ndim >= 2 and logits.shape[-1] > 2):
-#         y_hat = logits.argmax(dim=-1).long()
-#     else:
-#         p_pos = positive_score_from_logits(logits, positive_index=positive_index).view(-1)
-#         thr = _resolve_threshold(threshold)
-#         y_hat = (p_pos >= float(thr)).long()
-#     return y_hat.view(-1), y.view(-1)
-
-
 def cls_proba_output_transform(
     output: Any, *, positive_index: int = 1, num_classes: int = 2
 ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -949,11 +631,6 @@ def make_std_cls_metrics_with_cal_thr(
     cm_ot_cal = partial(cls_confmat_output_transform_thresholded, decision=decision, threshold=thr_getter, positive_index=positive_index)
 
     acc = Accuracy(output_transform=decision_ot)  # -> (int01, int01)
-    # prec_macro = Precision(average=True, output_transform=decision_ot)
-    # prec_vec = Precision(average=False, output_transform=decision_ot)  # vector per class
-    # rec_macro = Recall(average=True, output_transform=decision_ot)
-    # rec_vec = Recall(average=False, output_transform=decision_ot)  # vector per class
-    # vector (per-class) + macro; no indexing here
     prec_macro = Precision(average=True, output_transform=decision_ot, is_multilabel=False)
     prec_vec = Precision(average=False, output_transform=decision_ot, is_multilabel=False)
     rec_macro = Recall(average=True, output_transform=decision_ot, is_multilabel=False)
@@ -962,17 +639,11 @@ def make_std_cls_metrics_with_cal_thr(
     cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot_cal)
     metrics: dict[str, Metric] = {
         "acc": acc,
-        # "precision_macro": prec_macro,
-        # "precision_pos": prec_vec[int(positive_index)],  # Ignite-native selection
-        # "recall_macro": rec_macro,
-        # "recall_pos": rec_vec[int(positive_index)],
-        # "cls_confmat": cm,
         "precision_macro": prec_macro,
         "prec": prec_vec,        # expose full vector; we’ll pick class later
         "recall_macro": rec_macro,
         "recall": rec_vec,         # expose full vector
         "cls_confmat": cm,
-        # "auc": auc_metric,
     }
 
     if int(num_classes) <= 2:
@@ -1175,19 +846,10 @@ def make_metrics(
     # classification
     if "classification" in tasks or multitask:
         acc = Accuracy(output_transform=cls_ot)
-        # prec = Precision(output_transform=cls_ot, average=True)
-        # rec = Recall(output_transform=cls_ot, average=True)
         prec_macro = Precision(output_transform=cls_ot, average=True)
-        # prec_vec = Precision(output_transform=cls_ot, average=False)
-        # prec_pos = SelectIndex(prec_vec, positive_index)
-
-        rec_macro = Recall(output_transform=cls_ot, average=True)
-        # rec_vec = Recall(output_transform=cls_ot, average=False)
-        # rec_pos = SelectIndex(rec_vec, positive_index)
-
         prec_vec = Precision(average=False, output_transform=cls_ot)
+        rec_macro = Recall(output_transform=cls_ot, average=True)
         rec_vec = Recall(average=False, output_transform=cls_ot)
-
         auc = ROC_AUC(output_transform=auc_ot)
         # ConfusionMatrix must receive a callable output_transform, not a call
         cm_ot = partial(
@@ -1197,15 +859,12 @@ def make_metrics(
             positive_index=positive_index,
         )
         cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot)
-        # metrics.update({"acc": acc, "prec": prec, "recall": rec, "auc": auc, "cls_confmat": cm})
         metrics.update({
             "acc": acc,
             "precision_macro": prec_macro,
             "precision_pos": prec_vec[int(positive_index)],
-            # "precision_pos": prec_pos,
             "recall_macro": rec_macro,
             "recall_pos": rec_vec[int(positive_index)],
-            # "recall_pos": rec_pos,
             "auc": auc,
             "cls_confmat": cm,
         })

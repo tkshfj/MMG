@@ -8,7 +8,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-# ---- Import concrete model classes ----
+# Import concrete model classes
 from models.simple_cnn import SimpleCNNModel
 from models.densenet121 import DenseNet121Model
 from models.unet import UNetModel
@@ -17,9 +17,7 @@ from models.vit import ViTModel
 from models.swin_unetr import SwinUNETRModel
 
 
-# -------------------------------
 # Helpers (dims, bias init, checks)
-# -------------------------------
 def _cls_out_dim(cfg: dict) -> int:
     num_classes = int(cfg.get("num_classes", 2))
     single_logit = bool(cfg.get("binary_single_logit", True)) and num_classes == 2
@@ -61,37 +59,6 @@ def _maybe_init_cls_bias(module: nn.Module, cfg: dict) -> None:
             else:
                 vec[:] = torch.tensor([b, -b], dtype=vec.dtype, device=vec.device)
             last_lin.bias.copy_(vec)
-
-
-# def _maybe_init_cls_bias(module: nn.Module, cfg: dict) -> None:
-#     """
-#     Initialize the last Linear classifier bias from priors if class_counts=(neg,pos) is provided.
-#     - For C=1: bias = logit(p_pos)
-#     - For C=2: bias = [-b, +b]
-#     """
-#     counts = cfg.get("class_counts")
-#     try:
-#         neg, pos = float(counts[0]), float(counts[1])
-#     except Exception:
-#         return
-#     tot = neg + pos
-#     if tot <= 0:
-#         return
-#     p_pos = max(1e-6, min(1.0 - 1e-6, pos / tot))
-#     b = math.log(p_pos / (1.0 - p_pos))
-
-#     last_lin: Optional[nn.Linear] = None
-#     for m in module.modules():
-#         if isinstance(m, nn.Linear) and m.bias is not None:
-#             last_lin = m
-#     if last_lin is None:
-#         return
-
-#     with torch.no_grad():
-#         if last_lin.out_features == 1:
-#             last_lin.bias.fill_(b)
-#         elif last_lin.out_features == 2:
-#             last_lin.bias[:] = torch.tensor([-b, b], dtype=last_lin.bias.dtype, device=last_lin.bias.device)
 
 
 def _as_output_dict(out: Any, *, need_cls: bool, need_seg: bool) -> Dict[str, Any]:
@@ -151,7 +118,7 @@ def make_default_loss(cfg: dict, class_counts: list[int] | None):
         out: Dict[str, torch.Tensor] = {}
         loss_device = None
 
-        # --- classification ---
+        # classification
         if task in ("classification", "multitask") and "cls_logits" in outputs:
             logits = outputs["cls_logits"]      # [B, 1] or [B, C]
             loss_device = logits.device
@@ -181,7 +148,7 @@ def make_default_loss(cfg: dict, class_counts: list[int] | None):
             out["cls_loss"] = cls_loss
             total = total + alpha * cls_loss
 
-        # --- segmentation ---
+        # segmentation
         if task in ("segmentation", "multitask") and "seg_logits" in outputs:
             seg = outputs["seg_logits"]          # [B,K,H,W] or [B,K,D,H,W]
             loss_device = seg.device if loss_device is None else loss_device
@@ -209,95 +176,7 @@ def make_default_loss(cfg: dict, class_counts: list[int] | None):
     return _loss_fn
 
 
-# def make_default_loss(cfg: dict, class_counts: list[int] | None):
-#     """
-#     Returns a callable: (outputs, targets) -> dict(loss=..., [cls_loss=..., seg_loss=...]).
-#     Works with:
-#       outputs: {"cls_logits": [B,C?], "seg_logits": [B,K,H,W]?}
-#       targets: {"label": [B] or one-hot, "mask": [B,H,W] or one-hot}
-#     """
-#     task = str(cfg.get("task", "multitask")).lower()
-#     C_cls = int(cfg.get("num_classes", 2))
-#     K_seg = int(cfg.get("seg_num_classes", cfg.get("num_classes", 2)))  # noqa: F841
-#     single_logit = bool(cfg.get("binary_single_logit", True)) and C_cls == 2
-
-#     # --- classification criterion ---
-#     cls_crit = None
-#     if task in ("classification", "multitask"):
-#         if single_logit:
-#             # BCE with optional pos_weight = neg/pos
-#             pos_weight = None
-#             if class_counts and len(class_counts) == 2 and class_counts[1] > 0:
-#                 neg, pos = float(class_counts[0]), float(class_counts[1])
-#                 pos_weight = torch.tensor([neg / max(pos, 1e-6)], dtype=torch.float32)
-#             cls_crit = nn.BCEWithLogitsLoss(pos_weight=pos_weight)
-#         else:
-#             w = _class_weights_from_counts(class_counts, C_cls)
-#             cls_crit = nn.CrossEntropyLoss(weight=w)
-
-#     # --- segmentation criterion ---
-#     seg_crit = None
-#     if task in ("segmentation", "multitask"):
-#         w = None  # put class weights here if you have them
-#         seg_crit = nn.CrossEntropyLoss(weight=w)
-
-#     # weights for multitask
-#     alpha = float(cfg.get("alpha", 1.0))  # cls
-#     beta = float(cfg.get("beta", 1.0))   # seg
-
-#     def _loss_fn(outputs, targets):
-#         total = 0.0
-#         out = {}
-
-#         if cls_crit is not None and "cls_logits" in outputs:
-#             logits = outputs["cls_logits"]  # [B, C or 1]
-#             # labels -> indices [B]
-#             y = targets.get("label", targets.get("y", None))
-#             if y is None:
-#                 raise ValueError("Targets must include 'label' for classification.")
-#             y = torch.as_tensor(y, device=logits.device)
-
-#             if single_logit:
-#                 # BCE: labels to float and view as logits
-#                 yf = y.float()
-#                 if yf.ndim == 1:
-#                     yf = yf.view(-1, 1)
-#                 cls_loss = cls_crit(logits, yf)
-#             else:
-#                 # CE: labels to long indices
-#                 if y.ndim >= 2 and y.shape[-1] > 1:
-#                     y = y.argmax(dim=-1)
-#                 cls_loss = cls_crit(logits, y.long().view(-1))
-
-#             out["cls_loss"] = cls_loss
-#             total = total + alpha * cls_loss
-
-#         if seg_crit is not None and "seg_logits" in outputs:
-#             seg = outputs["seg_logits"]  # [B,K,H,W]
-#             mask = targets.get("mask")
-#             if mask is None:
-#                 lab = targets.get("label", {})
-#                 if isinstance(lab, dict):
-#                     mask = lab.get("mask")
-#             if mask is None:
-#                 raise ValueError("Targets must include 'mask' for segmentation.")
-#             mask = torch.as_tensor(mask, device=seg.device)
-#             # one-hot to indices if needed
-#             if mask.ndim == 4 and mask.shape[1] > 1:
-#                 mask = mask.argmax(dim=1)
-#             seg_loss = seg_crit(seg, mask.long())
-#             out["seg_loss"] = seg_loss
-#             total = total + beta * seg_loss
-
-#         out["loss"] = total if isinstance(total, torch.Tensor) else torch.tensor(total, device=logits.device if 'logits' in locals() else seg.device)
-#         return out
-
-#     return _loss_fn
-
-
-# -------------------------------
 # Generic builder adapter
-# -------------------------------
 def _build_with_class(cls: type, cfg: dict) -> nn.Module:
     # Prefer class-level builders if present
     for method_name in ("build", "from_config"):
@@ -327,9 +206,7 @@ def _build_with_class(cls: type, cfg: dict) -> nn.Module:
             return cls()  # last resort
 
 
-# -------------------------------
 # Registry: map name -> callable(cfg)->nn.Module
-# -------------------------------
 BuildFn = Callable[[dict], nn.Module]
 
 
@@ -398,9 +275,7 @@ MODEL_REGISTRY: Dict[str, BuildFn] = {
 }
 
 
-# -------------------------------
 # Public API
-# -------------------------------
 def build_model(cfg: dict) -> nn.Module:
     """
     Resolve and build a model from cfg['architecture']; validate the forward contract with a dummy pass.
@@ -469,28 +344,3 @@ def build_model(cfg: dict) -> nn.Module:
 
 
 __all__ = ["MODEL_REGISTRY", "build_model"]
-
-
-# # model_registry.py
-# from typing import Dict
-# from protocols import ModelRegistryProtocol
-
-# from models.simple_cnn import SimpleCNNModel
-# from models.densenet121 import DenseNet121Model
-# from models.unet import UNetModel
-# from models.multitask_unet import MultitaskUNetModel
-# from models.vit import ViTModel
-# from models.swin_unetr import SwinUNETRModel
-
-
-# MODEL_REGISTRY: Dict[str, ModelRegistryProtocol] = {
-#     "simple_cnn": SimpleCNNModel,
-#     "densenet121": DenseNet121Model,
-#     "unet": UNetModel,
-#     "multitask_unet": MultitaskUNetModel,
-#     "vit": ViTModel,
-#     "swin_unetr": SwinUNETRModel,
-# }
-
-
-# __all__ = ["MODEL_REGISTRY"]
