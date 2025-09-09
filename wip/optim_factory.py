@@ -49,6 +49,46 @@ def _extract_param_groups(parameters: Any) -> List[Dict[str, Any]]:
     raise ValueError("get_optimizer: unsupported parameters input.")
 
 
+def _dedupe_params(params):
+    """Preserve order, remove duplicates by id()."""
+    seen = set()
+    out = []
+    for p in params:
+        pid = id(p)
+        if pid not in seen:
+            seen.add(pid)
+            out.append(p)
+    return out
+
+
+def _consume_model_param_groups(parameters: Any) -> Optional[Dict[str, List[torch.nn.Parameter]]]:
+    """
+    If the model exposes param_groups(), normalize it to {name: [params,...]}.
+    Filters to requires_grad params and dedupes each group.
+    """
+    if not hasattr(parameters, "param_groups") or not callable(getattr(parameters, "param_groups")):
+        return None
+    pg = parameters.param_groups()
+    groups: Dict[str, List[torch.nn.Parameter]] = {}
+    if isinstance(pg, dict):
+        for k, v in pg.items():
+            lst = list(v)
+            lst = [p for p in lst if getattr(p, "requires_grad", False)]
+            groups[str(k)] = _dedupe_params(lst)
+    elif isinstance(pg, (list, tuple)):
+        # Accept list of lists or list of dicts with "params"
+        for i, g in enumerate(pg):
+            if isinstance(g, dict) and "params" in g:
+                lst = list(g["params"])
+            else:
+                lst = list(g)
+            lst = [p for p in lst if getattr(p, "requires_grad", False)]
+            groups[f"g{i}"] = _dedupe_params(lst)
+    else:
+        return None
+    return groups if any(groups.values()) else None
+
+
 # Optimizer factory
 def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = False) -> Optimizer:
     name = str(cfg.get("optimizer", "adamw")).lower()
@@ -69,6 +109,9 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
     # if str(cfg.get("param_groups", "single")).lower() == "split" and hasattr(parameters, "parameters"):
     #     base_lr = float(cfg.get("lr", 1e-3))
     #     head_multiplier = float(cfg.get("head_multiplier", 5.0))
+    # if str(cfg.get("param_groups", "single")).lower() == "split" and hasattr(parameters, "parameters"):
+
+    # handle split param groups here if a model was passed in and we can identify head vs backbone
     if str(cfg.get("param_groups", "single")).lower() == "split" and hasattr(parameters, "parameters"):
         base_lr = float(cfg.get("lr", 1e-3))
         # New: scale head LR down, and optionally raise WD on head
@@ -80,12 +123,17 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
         if head_wd_scale < 1.0:
             raise ValueError(f"head_wd_scale must be ≥ 1.0, got {head_wd_scale}")
 
-        # Prefer explicit helpers on the model (as we suggested for ViT)
-        head_params = None
-        backbone_params = None
-        if hasattr(parameters, "head_parameters") and callable(getattr(parameters, "head_parameters")):
+        # 0) Prefer model.param_groups() if available (exact control from the model)
+        model_groups = _consume_model_param_groups(parameters)
+        head_params = model_groups.get("head") if model_groups is not None else None
+        backbone_params = model_groups.get("backbone") if model_groups is not None else None
+
+        # 1) Prefer explicit helpers on the model (if param_groups() not provided or incomplete)        backbone_params = None
+        if head_params is None and hasattr(parameters, "head_parameters") and callable(getattr(parameters, "head_parameters")):
+            # if hasattr(parameters, "head_parameters") and callable(getattr(parameters, "head_parameters")):
             head_params = list(parameters.head_parameters())
-        if hasattr(parameters, "backbone_parameters") and callable(getattr(parameters, "backbone_parameters")):
+        # if hasattr(parameters, "backbone_parameters") and callable(getattr(parameters, "backbone_parameters")):
+        if backbone_params is None and hasattr(parameters, "backbone_parameters") and callable(getattr(parameters, "backbone_parameters")):
             backbone_params = list(parameters.backbone_parameters())
 
         # Fallback: if only head is known, derive backbone as the complement
@@ -93,9 +141,10 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
             head_ids = {id(p) for p in head_params}
             backbone_params = [p for p in parameters.parameters() if getattr(p, "requires_grad", False) and id(p) not in head_ids]
 
-        # Name-based fallback if helpers missing
+        # 2) Name-based fallback if helpers missing
         if head_params is None or backbone_params is None:
-            head_keys = tuple(k.lower() for k in cfg.get("head_keys", ("head", "classifier", "mlp_head", "fc", "cls")))
+            # head_keys = tuple(k.lower() for k in cfg.get("head_keys", ("head", "classifier", "mlp_head", "fc", "cls")))
+            head_keys = tuple(k.lower() for k in cfg.get("head_keys", ("classification_head", "head", "classifier", "mlp_head", "fc", "cls")))
             heads, backs = [], []
             for n, p in parameters.named_parameters():
                 if not getattr(p, "requires_grad", False):
@@ -103,6 +152,14 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
                 (heads if any(k in n.lower() for k in head_keys) else backs).append(p)
             if heads and backs:
                 head_params, backbone_params = heads, backs
+
+        # Clean up and sanity-check splits
+        if head_params is not None and backbone_params is not None:
+            head_params = _dedupe_params([p for p in head_params if getattr(p, "requires_grad", False)])
+            backbone_params = _dedupe_params([p for p in backbone_params if getattr(p, "requires_grad", False)])
+            # Ensure disjointness
+            head_ids = {id(p) for p in head_params}
+            backbone_params = [p for p in backbone_params if id(p) not in head_ids]
 
         # If we can split, build per-group settings (LR + optional WD scale on head)
         if head_params and backbone_params:
@@ -119,6 +176,11 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
             optimizer = opts[name](param_groups, **({k: v for k, v in opt_kwargs.items() if k != "weight_decay"}))
             if verbose:
                 total = sum(p.numel() for p in parameters.parameters() if getattr(p, "requires_grad", False))
+                # print("[optim] num trainable params:", total)
+                # for i, g in enumerate(optimizer.param_groups):
+                #     n = sum(getattr(p, "numel", lambda: 0)() for p in g["params"])
+                #     print(f"[optim] group {i}: {len(g['params'])} tensors, {n} params, "
+                #           f"lr={g.get('lr')}, wd={g.get('weight_decay')}")
                 print("[optim] num trainable params:", total)
                 for i, g in enumerate(optimizer.param_groups):
                     n = sum(getattr(p, "numel", lambda: 0)() for p in g["params"])

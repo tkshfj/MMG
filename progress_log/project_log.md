@@ -1,7 +1,11 @@
 # Project Log
 
+# 2025-09-10
+- Fix: Unify logit-to-prob mapping across OT & PosProb; use model.param_groups(); harden ViT head/backbone split & bias init
+
 # 2025-09-09
 - Fix: guard thresholds and metric device; refactor metrics; sweeps
+- Fix optimizer to honor model.param_groups; make fallback bias init device-safe.
 
 # 2025-09-08
 - Refactor validation pipeline: gate decision health in sweeps; merge and alias seg metrics to val/dice|val/iou

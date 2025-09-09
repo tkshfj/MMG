@@ -58,6 +58,8 @@ class ViTModel(nn.Module):
             img_size = _normalize_img_size(input_shape, in_ch, spatial_dims)
         else:
             img_size = tuple(int(s) for s in img_size)
+        if len(img_size) != spatial_dims:
+            raise ValueError(f"img_size {img_size} rank != spatial_dims={spatial_dims}")
 
         if isinstance(patch_size, int):
             ps = (patch_size,) * len(img_size)
@@ -68,7 +70,8 @@ class ViTModel(nn.Module):
 
         # Core dims (snap hidden_size to be divisible by num_heads)
         hidden_size = int(kwargs.get("hidden_size", cfg.get("hidden_size", 384)))
-        mlp_dim = int(kwargs.get("mlp_dim", cfg.get("mlp_dim", 3072)))
+        # mlp_dim = int(kwargs.get("mlp_dim", cfg.get("mlp_dim", 3072)))
+        mlp_dim = int(kwargs.get("mlp_dim", cfg.get("mlp_dim", 4 * hidden_size)))
         num_layers = int(kwargs.get("num_layers", cfg.get("num_layers", 12)))
         num_heads = int(kwargs.get("num_heads", cfg.get("num_heads", 8)))
         dropout = float(kwargs.get("dropout_rate", cfg.get("dropout_rate", 0.1)))
@@ -107,6 +110,8 @@ class ViTModel(nn.Module):
         head_p = float(cfg.get("head_dropout", dropout))
         if head_p > 0.0:
             head_attr = next((c for c in ("classification_head", "head", "cls_head", "classifier") if hasattr(self.net, c)), None)
+            # if head_attr == "classification_head" and not hasattr(self.net, "head"):
+            #     self.net.head = getattr(self.net, head_attr)  # alias for downstream matchers
             head_mod = getattr(self.net, head_attr) if head_attr is not None else None
             if isinstance(head_mod, nn.Linear):
                 in_features = head_mod.in_features
@@ -162,7 +167,7 @@ class ViTModel(nn.Module):
         if isinstance(x, torch.Tensor):
             return x
         if isinstance(x, dict):
-            for k in ("logits", "y_pred", "cls_logits", "output", "out"):
+            for k in ("logits", "y_pred", "cls_logits", "output", "out", "pred"):
                 v = x.get(k, None)
                 if isinstance(v, torch.Tensor):
                     return v
@@ -174,55 +179,80 @@ class ViTModel(nn.Module):
                     return t
         return None
 
-    def _init_binary_bias_from_prior(self, pos_prior: float):
-        eps = 1e-4
-        p = min(max(float(pos_prior), eps), 1 - eps)
-        import math
-        b = torch.tensor([math.log(torch.tensor(p / (1 - p)))], dtype=torch.float32)
-        # Try to find the final linear layer
-        for m in reversed(list(self.net.modules())):
-            if isinstance(m, nn.Linear) and m.out_features == 1 and m.bias is not None:
-                with torch.no_grad():
-                    m.bias.copy_(b)
-                logger.info("Initialized binary head bias to %.4f (pos_prior=%.4f).", b.item(), p)
-                break
-
     def _head_module(self) -> Optional[nn.Module]:
         for attr in ("classification_head", "head", "cls_head", "classifier"):
             if hasattr(self.net, attr):
                 return getattr(self.net, attr)
         return None
 
-    def backbone_parameters(self) -> Iterator[torch.nn.Parameter]:
+    def backbone_parameters(self) -> Iterator[nn.Parameter]:
         """
         All trainable params EXCEPT the classification head.
         Adjust the prefixes if head is named differently.
         """
-        head_prefixes: Tuple[str, ...] = ("head", "cls_head", "classifier")
-        for name, p in self.named_parameters():
-            if not p.requires_grad:
-                continue
-            if any(name.startswith(prefix) for prefix in head_prefixes):
-                continue
-            yield p
+        head = self._head_module()
+        head_param_ids = set()
+        if head is not None:
+            head_param_ids = {id(p) for p in head.parameters()}
+        for p in self.parameters():
+            if p.requires_grad and id(p) not in head_param_ids:
+                yield p
 
-    def head_parameters(self) -> Iterator[torch.nn.Parameter]:
-        """
-        Only the classification head params.
-        """
-        # Try common head names in order
-        for attr in ("head", "cls_head", "classifier"):
-            if hasattr(self, attr):
-                mod = getattr(self, attr)
-                for p in mod.parameters():
-                    if p.requires_grad:
-                        yield p
+    def _init_binary_bias_from_prior(self, p: float):
+        eps = 1e-4
+        p = float(min(max(p, eps), 1 - eps))
+        import math
+        b = torch.tensor([math.log(p / (1 - p))], dtype=torch.float32)
+        head = self._head_module()
+        if isinstance(head, nn.Linear) and head.out_features == 1 and head.bias is not None:
+            with torch.no_grad():
+                # head.bias.copy_(b)
+                head.bias.copy_(b.to(device=head.bias.device, dtype=head.bias.dtype))
+                logger.info("Initialized binary head bias to %.4f.", b.item())
+            return
+        if isinstance(head, nn.Sequential):
+            last = list(head.children())[-1]
+            if isinstance(last, nn.Linear) and last.out_features == 1 and last.bias is not None:
+                with torch.no_grad():
+                    # last.bias.copy_(b)
+                    last.bias.copy_(b.to(device=last.bias.device, dtype=last.bias.dtype))
+                    logger.info("Initialized binary head bias to %.4f.", b.item())
                 return
-        # Fallback: nothing matches → empty iterator
-        return iter(())
+        # fallback (rare)
+        for m in reversed(list(self.net.modules())):
+            if isinstance(m, nn.Linear) and m.out_features == 1 and m.bias is not None:
+                with torch.no_grad():
+                    # m.bias.copy_(b)
+                    m.bias.copy_(b.to(device=m.bias.device, dtype=m.bias.dtype))
+                    logger.info("Initialized binary head bias to %.4f.", b.item())
+                    break
+
+    def head_parameters(self) -> Iterator[nn.Parameter]:
+        """Only the classification head params."""
+        head = self._head_module()
+        if head is None:
+            return iter(())
+        for p in head.parameters():
+            if p.requires_grad:
+                yield p
+
+    def param_groups(self):
+        return {
+            "backbone": list(self.backbone_parameters()),
+            "head": list(self.head_parameters()),
+        }
 
     def forward(self, batch: Dict[str, torch.Tensor] | torch.Tensor) -> Dict[str, torch.Tensor]:
-        x = batch["image"] if isinstance(batch, dict) else batch
+        # x = batch["image"] if isinstance(batch, dict) else batch
+        if isinstance(batch, dict):
+            x = batch.get("image") or batch.get("images")
+            if x is None:
+                # last resort: first tensor value that looks like an image batch
+                x = next((v for v in batch.values() if isinstance(v, torch.Tensor) and v.ndim >= 4), None)
+            if x is None:
+                raise KeyError("[ViTModel] Could not find image tensor in batch dict.")
+        else:
+            x = batch
         raw = self.net(x)  # MONAI usually returns a Tensor
         logits = self._first_tensor(raw)
         if logits is None:
@@ -231,6 +261,8 @@ class ViTModel(nn.Module):
         # Contract: [B,C]. If backend gives [B], unsqueeze to [B,1] so registry check passes.
         if logits.ndim == 1:
             logits = logits.unsqueeze(1)
+        if logits.ndim == 2 and logits.shape[1] < 1:
+            raise RuntimeError(f"[ViTModel] num_classes < 1: got {tuple(logits.shape)}")
         elif logits.ndim != 2:
             raise RuntimeError(f"[ViTModel] Expected [B,C] or [B], got {tuple(logits.shape)}")
 

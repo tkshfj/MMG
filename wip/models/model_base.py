@@ -181,6 +181,9 @@ class BaseModel(ModelRegistryProtocol):
             decision=cls_decision,
             threshold=cls_threshold,
             positive_index=positive_index,
+            binary_single_logit=bool(cfg.get("binary_single_logit", (cls_classes == 2))),
+            binary_bce_from_two_logits=bool(cfg.get("binary_bce_from_two_logits", False)),
+            mode="auto",
         )
         # AUC uses base OT; no model hook needed
         auc_ot = cls_ots.base

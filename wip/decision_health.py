@@ -1,7 +1,6 @@
 # decision_health.py
 import logging
 import torch
-# from typing import Optional, Iterable
 from ignite.engine import Events
 
 logger = logging.getLogger(__name__)

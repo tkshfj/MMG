@@ -9,7 +9,7 @@ from ignite.engine import Events, Engine
 from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
 from protocols import CalibratorProtocol
 from utils.safe import to_py, labels_to_1d_indices
-from posprob import PosProbCfg
+from posprob import PosProbCfg, positive_score_from_logits
 from metrics_utils import (
     extract_cls_logits_from_any,
     extract_seg_logits_from_any,
@@ -17,7 +17,6 @@ from metrics_utils import (
     promote_vec,
     get_mask_from_batch,
     seg_confmat_output_transform,
-    positive_score_from_logits,
     # cls_output_transform,
     make_std_cls_metrics_with_cal_thr
 )

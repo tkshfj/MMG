@@ -11,7 +11,7 @@ from ignite.metrics import Accuracy, Precision, Recall, ConfusionMatrix, ROC_AUC
 # from ignite.metrics.confusion_matrix import ConfusionMatrix
 from ignite.metrics import DiceCoefficient, JaccardIndex, Metric, MetricsLambda, EpochMetric
 from utils.safe import to_tensor, labels_to_1d_indices, to_float_scalar, to_py
-from posprob import PosProbCfg
+from posprob import PosProbCfg, positive_score_from_logits
 
 
 # Helpers
@@ -22,16 +22,19 @@ def get_threshold_from_state(engine) -> float:
 
 
 def probs_from_logits(
-    logits: Any, *, num_classes: int = 2, positive_index: int = 1
+    logits: Any, *, num_classes: int = 2, positive_index: int = 1,
+    binary_single_logit: Optional[bool] = None,
+    binary_bce_from_two_logits: Optional[bool] = None,
 ) -> torch.Tensor:
-    """
-    Unified conversion:
-    - binary → p(pos) ∈ [N]
-    - multiclass → softmax probabilities ∈ [N, C]
-    """
-    t = to_tensor(logits).float()
+    t = torch.as_tensor(logits).float()
     if int(num_classes) <= 2:
-        return positive_score_from_logits(t, positive_index=positive_index).view(-1)
+        return positive_score_from_logits(
+            t,
+            positive_index=positive_index,
+            binary_single_logit=binary_single_logit,
+            binary_bce_from_two_logits=binary_bce_from_two_logits,
+            mode="auto",
+        ).view(-1)
     return torch.softmax(t, dim=-1)
 
 
@@ -124,45 +127,6 @@ def attach_classification_metrics(evaluator, cfg: Mapping[str, Any], *,
     PosProbStats(output_transform=auc_ot, device="cpu").attach(evaluator, "posprob_stats")
 
 
-# def attach_classification_metrics(
-#         evaluator,
-#         cfg: Mapping[str, Any]
-# ) -> None:
-
-#     def thr_getter() -> float:
-#         return get_threshold_from_state(evaluator)
-
-#     n_cls = int(cfg.get("num_classes", 2))
-#     pos_idx = int(cfg.get("positive_index", 1))
-
-#     metrics = make_cls_val_metrics(
-#         num_classes=n_cls,
-#         decision="threshold",
-#         threshold=thr_getter,
-#         positive_index=pos_idx,
-#     )
-#     # metrics["auc"].attach(evaluator, "val/auc")
-#     # metrics["cls_confmat"].attach(evaluator, "val/confmat")
-#     # if n_cls == 2:  # only in binary
-#     #     metrics["pos_rate"].attach(evaluator, "val/pos_rate")
-#     metrics["auc"].attach(evaluator, "val/auc")
-#     metrics["cls_confmat"].attach(evaluator, "val/confmat")
-#     if n_cls == 2:
-#         metrics["pos_rate"].attach(evaluator, "val/pos_rate")
-#         metrics["gt_pos_rate"].attach(evaluator, "val/gt_pos_rate")
-
-#     # for name, metric in pack.items():
-#     #     tag = "confmat" if name == "cls_confmat" else name
-#     #     metric.attach(evaluator, f"val/{tag}")
-#     # metrics["auc"].attach(evaluator, "val/auc")
-#     # metrics["cls_confmat"].attach(evaluator, "val/confmat")
-#     # if n_cls == 2:  # only when valid
-#     #     metrics["pos_rate"].attach(evaluator, "val/pos_rate")
-
-#     auc_ot = partial(cls_proba_output_transform, positive_index=pos_idx, num_classes=n_cls)
-#     PosProbStats(output_transform=auc_ot).attach(evaluator, "val/posprob_stats")
-
-
 # Helpers
 def _first_not_none(m: Mapping[str, Any], keys: tuple[str, ...]):
     """Return the first present key whose value is not None."""
@@ -172,73 +136,6 @@ def _first_not_none(m: Mapping[str, Any], keys: tuple[str, ...]):
             if v is not None:
                 return v
     return None
-
-
-def positive_score_from_logits(
-    logits: Any,
-    *,
-    positive_index: int = 1,
-    # New: accept flags or an explicit mode
-    binary_single_logit: Optional[bool] = None,
-    binary_bce_from_two_logits: Optional[bool] = None,
-    mode: Literal["auto", "bce_single", "ce_softmax", "bce_two_logit"] = "auto",
-) -> torch.Tensor:
-    """
-    Return p(pos) for binary classification.
-
-    Modes (selected either by flags or explicitly via `mode`):
-      - "bce_single":     sigmoid(logit)                            -> [B]
-      - "ce_softmax":     softmax(logits, -1)[..., pos_idx]         -> [B]
-      - "bce_two_logit":  sigmoid(logits[..., pos_idx])             -> [B]
-
-    Auto-resolution rules (if mode="auto"):
-      1) If binary_single_logit is True          -> bce_single
-      2) elif binary_bce_from_two_logits is True -> bce_two_logit
-      3) else:
-           - if last dim == 1 or tensor is 1D    -> bce_single
-           - else                                -> ce_softmax
-
-    Accepts logits shaped [..., C] or [...] where C∈{1,2+}; higher dims already
-    reduced by caller for classification (i.e., [B] or [B,C]).
-    """
-    t = to_tensor(logits).float()
-    # normalize shape references to last dim
-    last_dim = t.shape[-1] if t.ndim > 0 else 1
-
-    # Resolve mode if auto
-    if mode == "auto":
-        if binary_single_logit is True:
-            mode = "bce_single"
-        elif binary_bce_from_two_logits is True:
-            mode = "bce_two_logit"
-        else:
-            if t.ndim == 1 or last_dim == 1:
-                mode = "bce_single"
-            else:
-                mode = "ce_softmax"
-
-    # Apply chosen mapping
-    if mode == "bce_single":
-        # supports [B] or [B,1] ... → [B]
-        if t.ndim >= 2 and last_dim == 1:
-            t = t.squeeze(-1)
-        return torch.sigmoid(t)
-
-    if mode == "bce_two_logit":
-        # expect 2 logits (or at least a channel dimension)
-        if t.ndim == 1:
-            # edge case: if already the positive logit flattened
-            return torch.sigmoid(t)
-        return torch.sigmoid(t[..., int(positive_index)])
-
-    if mode == "ce_softmax":
-        # softmax over channel dim; then select positive channel
-        probs = torch.softmax(t, dim=-1)
-        return probs[..., int(positive_index)]
-
-    raise ValueError(
-        f"positive_score_from_logits: unsupported shape {tuple(t.shape)} for mode='{mode}'"
-    )
 
 
 def get_mask_from_batch(batch: Mapping[str, Any]) -> Optional[torch.Tensor]:
@@ -538,8 +435,8 @@ def make_cls_val_metrics(
 
     metrics = {
         "acc": acc,
-        "prec": prec,              # expose full vector; select later if needed
-        "recall": rec,             # expose full vector
+        "prec": prec,  # expose full vector; select later if needed
+        "recall": rec,  # expose full vector
         "auc": auc,
         "cls_confmat": cm,
     }
@@ -562,16 +459,21 @@ def make_default_cls_output_transforms(
     decision: str = "threshold",
     threshold: Union[float, Callable[[], float]] = 0.5,
     positive_index: int = 1,
+    binary_single_logit: Optional[bool] = None,
+    binary_bce_from_two_logits: Optional[bool] = None,
+    mode: Literal["auto", "bce_single", "ce_softmax", "bce_two_logit"] = "auto",
 ) -> ClsOTs:
-    """
-    Default, model-agnostic classification transforms with a single source of truth
-    for the decision rule and threshold.
-    """
+    """Default, model-agnostic classification transforms with a single source of truth for the decision rule and threshold."""
 
     def base(output):
         logits, y_true = cls_output_transform(output)
-        prob = positive_score_from_logits(logits, positive_index=positive_index).view(-1)
-        # prob = _prob_pos_from_logits(logits)
+        prob = positive_score_from_logits(
+            logits,
+            positive_index=positive_index,
+            binary_single_logit=binary_single_logit,
+            binary_bce_from_two_logits=binary_bce_from_two_logits,
+            mode="auto",
+        ).view(-1)
         return prob, y_true.long().view(-1)
 
     def thresholded(output):
@@ -580,7 +482,7 @@ def make_default_cls_output_transforms(
         y_hat = (prob >= thr).long()
         return y_hat, y_true
 
-    # CM: use the threshold-aware transform we already standardized
+    # CM: use the standardized threshold-aware transform
     cm = partial(
         cls_confmat_output_transform_thresholded,
         decision=decision,
@@ -942,7 +844,6 @@ __all__ = [
     "make_metrics",
     "extract_cls_logits_from_any",
     "extract_seg_logits_from_any",
-    "positive_score_from_logits",
     "attach_classification_metrics",
     "coerce_loss_dict"
 ]
