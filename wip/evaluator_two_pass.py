@@ -83,6 +83,28 @@ def as_bool(x, default: bool = True) -> bool:
     return default
 
 
+def _pos_rate(scores: np.ndarray, thr: float) -> float:
+    if scores.size == 0:
+        return 0.0
+    return float((scores >= float(thr)).mean())
+
+
+def _rate_match_threshold(scores: np.ndarray, target_rate: float) -> float:
+    """
+    Monotone projection: choose t so that pos_rate(scores >= t) ~= target_rate.
+    Using the (1 - target_rate)-quantile achieves that.
+    """
+    if scores.size == 0:
+        return 0.5
+    q = float(np.clip(1.0 - target_rate, 0.0, 1.0))
+    return float(np.quantile(scores, q))
+
+
+def _bounded_step(old: float, new: float, *, max_delta: float, lo: float, hi: float) -> float:
+    step = np.clip(new - old, -float(max_delta), float(max_delta))
+    return float(np.clip(old + step, float(lo), float(hi)))
+
+
 class ThresholdBox:
     def __init__(self, value=0.5):
         self.value = float(value)
@@ -174,6 +196,23 @@ class TwoPassEvaluator:
             logger.info("%s out of [0,1]: %.6f -> clamped", ctx, f)
         return float(min(1.0, max(0.0, f)))
 
+    def _resolve_rate_tolerance(self) -> float:
+        if getattr(self, "rate_tol_override", None) is not None:
+            return float(self.rate_tol_override)
+        cfg = getattr(self.calibrator, "cfg", None)
+        # try multiple names to be sweep-friendly
+        for k in ("rate_tolerance", "cal_rate_tolerance"):
+            if cfg is not None and hasattr(cfg, k):
+                return float(getattr(cfg, k))
+        return 0.10
+
+    def _resolve_max_delta(self) -> float:
+        # single source of truth for max step
+        if hasattr(self, "cal_max_delta"):
+            return float(self.cal_max_delta)
+        cfg = getattr(self.calibrator, "cfg", None)
+        return float(getattr(cfg, "cal_max_delta", 0.10))
+
     # Public guards
     @property
     def has_cls(self) -> bool:
@@ -190,7 +229,6 @@ class TwoPassEvaluator:
         if self.seg_eval_fn is not None:
             raw = dict(self.seg_eval_fn(model, val_loader))  # whatever shim returns
             flat: Dict[str, Any] = {}
-
             # Dice / IoU / Loss
             if "dice" in raw:
                 promote_vec(flat, "dice", raw["dice"])
@@ -198,13 +236,11 @@ class TwoPassEvaluator:
                 promote_vec(flat, "iou", raw["iou"])
             if "loss" in raw:
                 flat["loss"] = float(to_py(raw["loss"]))
-
-            # Confusion matrix (any reasonable key we use)
+            # Confusion matrix (any reasonable key)
             for k in ("seg_confmat", "confmat", "seg_cm"):
                 if k in raw:
                     add_confmat(flat, "seg_confmat", raw[k])
                     break
-
             # Keep any other simple scalars (auto-sanitized)
             for k, v in raw.items():
                 if k in flat:
@@ -217,7 +253,6 @@ class TwoPassEvaluator:
         # Fallback: naive per-batch dice/iou
         dice_scores, iou_scores = [], []
         device = getattr(model, "device", next(model.parameters()).device)
-        # device = _safe_model_device(model)
         with torch.inference_mode():
             for batch in val_loader:
                 x = batch["image"].to(device, non_blocking=True)
@@ -234,11 +269,9 @@ class TwoPassEvaluator:
 
                 # handle binary vs multi-class correctly
                 if seg_logits.shape[1] == 1:  # binary
-                    prob = torch.sigmoid(seg_logits[:, 0])          # [B,H,W]
-                    # pred = (prob >= 0.5).to(y_mask.dtype)           # indices {0,1}
-                    pred = (prob >= self.seg_threshold).long()          # indices {0,1}
-                else:                                              # multiclass
-                    # pred = torch.softmax(seg_logits, dim=1).argmax(1)  # [B,H,W]
+                    prob = torch.sigmoid(seg_logits[:, 0])  # [B,H,W]
+                    pred = (prob >= self.seg_threshold).long()  # indices {0,1}
+                else:  # multiclass
                     pred = torch.softmax(seg_logits, dim=1).argmax(1).long()  # [B,H,W]
 
                 # Ensure masks have (B,H,W)
@@ -287,18 +320,14 @@ class TwoPassEvaluator:
                     if isinstance(v, (int, float)):
                         dst[k] = float(v)
             # Vector-or-scalar metrics -> promote to per-index keys and mean
-            # if "prec" in raw:
-            #     promote_vec(dst, "prec", raw["prec"])        # yields 'prec', 'prec_0', 'prec_1', ...
-            # if "recall" in raw:
-            #     promote_vec(dst, "recall", raw["recall"])    # yields 'recall', 'recall_0', 'recall_1', ...
             # Old name (“prec”/“recall”) or new name (“precision_pos”/“recall_pos”)
-            if "prec" in raw:
+            if "prec" in raw:  # yields 'prec', 'prec_0', 'prec_1', ...
                 promote_vec(dst, "prec", raw["prec"])
             elif "precision_pos" in raw:
                 v = to_py(raw["precision_pos"])
                 if isinstance(v, (int, float)):
                     dst["prec"] = float(v)
-            if "recall" in raw:
+            if "recall" in raw:  # yields 'recall', 'recall_0', 'recall_1', ...
                 promote_vec(dst, "recall", raw["recall"])
             elif "recall_pos" in raw:
                 v = to_py(raw["recall_pos"])
@@ -331,14 +360,14 @@ class TwoPassEvaluator:
         cls_metrics: Dict[str, Any] = {}
         seg_metrics: Dict[str, Any] = {}
 
-        # Seed threshold (previous accepted, or calibrator hint, or current box)
-        t_seed: float
-        if self.calibrator is not None and hasattr(self.calibrator, "t_prev"):
-            t_seed = float(self.calibrator.t_prev)
-        elif self.last_threshold is not None:
+        # Seed threshold (trust only previously accepted → box; never seed from calibrator)
+        if self.last_threshold is not None:
             t_seed = float(self.last_threshold)
         else:
-            t_seed = float(self._thr_box.value)
+            try:
+                t_seed = float(self._thr_box.value)
+            except Exception:
+                t_seed = 0.5
         t_seed = self._clamp_thr01(t_seed, default=0.5, ctx="init_thr")
 
         # Classification
@@ -350,7 +379,7 @@ class TwoPassEvaluator:
             if base_rate is None and labels.size > 0:
                 base_rate = float((labels == 1).mean())
 
-            # 1) Candidate threshold from calibrator (or stick with seed)
+            # Candidate threshold from calibrator (or stick with seed)
             t_cand = t_seed
             if self.calibrator is not None:
                 try:
@@ -360,18 +389,20 @@ class TwoPassEvaluator:
                 except Exception:
                     logger.warning("calibrator.pick failed; keeping seed threshold", exc_info=True)
 
-            # 2) Guardrails & acceptance: only adopt candidate if sane/stable
+            # Guardrails & acceptance: only adopt candidate if sane/stable
             def _accept(t_try: float) -> bool:
-                # warmup
-                if epoch < int(self.thr_warmup_epochs):
-                    return False
-                if scores.size == 0:
+                # warmup & data presence
+                if epoch < int(self.thr_warmup_epochs) or scores.size == 0:
                     return False
                 # clamp to global bounds
                 t_try = float(min(self.thr_max, max(self.thr_min, t_try)))
-                # basic sanity on pos_rate
-                pos_rate = float((scores >= t_try).mean())
-                if not (self.thr_posrate_min <= pos_rate <= self.thr_posrate_max):
+                # # basic sanity on pos_rate
+                # pos_rate = float((scores >= t_try).mean())
+                # if not (self.thr_posrate_min <= pos_rate <= self.thr_posrate_max):
+                #     return False
+                # basic sanity on pos_rate envelope (absolute bounds)
+                pr = _pos_rate(scores, t_try)
+                if not (self.thr_posrate_min <= pr <= self.thr_posrate_max):
                     return False
                 # auc floor
                 auc_val = _safe_auc(labels, scores)
@@ -384,56 +415,100 @@ class TwoPassEvaluator:
                     tn = int(((labels == 0) & (pred == 0)).sum())
                     if tp < self.thr_min_tp or tn < self.thr_min_tn:
                         return False
+                # max jump (delta) vs last accepted
+                # max_delta = float(getattr(getattr(self.calibrator, "cfg", None), "cal_max_delta", 1.0))
+                max_delta = self._resolve_max_delta()
+                if self.last_threshold is not None and abs(t_try - float(self.last_threshold)) > max_delta:
+                    return False
+
                 return True
 
-            t_final = float(t_seed)
-            if _accept(t_cand):
-                # clamp into [thr_min, thr_max] on accept
-                t_final = float(min(self.thr_max, max(self.thr_min, t_cand)))
-            # remember accepted threshold
+            # Finalize exactly once, then write the box once
+            accepted = _accept(t_cand)
+            t_final = float(min(self.thr_max, max(self.thr_min, t_cand))) if accepted else float(t_seed)
+
+            # decision-health (optional, authoritative projection)
+            # If enabled and base_rate is known, keep pos_rate near base ± tolerance by projecting the threshold.
+            # if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
+            #     # source for tolerance: explicit override > calibrator.cfg > default
+            #     rate_tol = (
+            #         self.rate_tol_override
+            #         if getattr(self, "rate_tol_override", None) is not None
+            #         else getattr(getattr(self.calibrator, "cfg", None), "rate_tolerance", 0.10)
+            #     )
+            #     if rate_tol is None:
+            #         rate_tol = 0.10
+
+            #     pr_now = _pos_rate(scores, t_final)
+
+            if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
+                rate_tol = self._resolve_rate_tolerance()
+                pr_now = _pos_rate(scores, t_final)
+                if abs(pr_now - float(base_rate)) > rate_tol:
+                    t_dm = _rate_match_threshold(scores, float(base_rate))
+                    t_final = _bounded_step(
+                        float(t_final), float(t_dm),
+                        max_delta=self._resolve_max_delta(),
+                        lo=float(self.thr_min), hi=float(self.thr_max)
+                    )
+                delta = abs(pr_now - float(base_rate))
+                if delta > float(rate_tol):
+                    # Project to rate-matched threshold, then bound by max-delta and global bounds.
+                    t_dm = _rate_match_threshold(scores, float(base_rate))
+                    max_delta = float(getattr(getattr(self.calibrator, "cfg", None), "cal_max_delta", 0.10))
+                    t_final = _bounded_step(
+                        float(t_final), float(t_dm),
+                        max_delta=max_delta, lo=float(self.thr_min), hi=float(self.thr_max)
+                    )
+
+            # remember accepted threshold and publish it once
             self.last_threshold = float(t_final)
-
-            # 3) Wire the accepted threshold to the metric transforms
+            # Wire the accepted threshold to the metric transforms
             self._thr_box.value = self._clamp_thr01(self.last_threshold, default=0.5, ctx="thr_box")
-
             # Inject threshold into the evaluator used for metrics
             self._ensure_std_engine()
-            # self._thr_box.value = float(t)
-            self._thr_box.value = float(self.last_threshold)
 
             # Allow the step to know device & pinning
             pin = bool(getattr(val_loader, "pin_memory", False))
             setattr(self._std_engine.state, "device", device)
             setattr(self._std_engine.state, "non_blocking", pin)
-
             # Run once to populate metrics
             self._std_engine.run(val_loader)
             raw = dict(self._std_engine.state.metrics or {})
-
             # Ingest metrics (scalars, vectors, confmat)
             _ingest_cls_metric_map(cls_metrics, raw)
-
             # record the threshold we used this epoch (post-clamp)
             cls_metrics["threshold"] = float(self._thr_box.value)
             cls_metrics["cal_thr"] = float(self._thr_box.value)
 
-            # # Decision-health logging (same behavior as before)
-            # if base_rate is not None:
+            # (optional) a concise status line for debugging / audits
+            if base_rate is not None:
+                cls_metrics["base_rate"] = float(base_rate)
+
             # Decision-health logging (gated)
             if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
+                rate_tol = self._resolve_rate_tolerance()
                 pos_rate = float(cls_metrics.get("pos_rate", 0.0))
-                rate_tol = self.rate_tol_override
-                if rate_tol is None and self.calibrator is not None:
-                    rate_tol = getattr(self.calibrator.cfg, "rate_tol", 0.10)
-                if rate_tol is not None:
-                    delta = abs(pos_rate - base_rate)
-                    was_bad = (delta > rate_tol)
-                    self.bad_count = self.bad_count + 1 if was_bad else 0
-                    if not getattr(self, "_watchdog_active", False):
-                        logger.info(
-                            "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
-                            pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
-                        )
+                delta = abs(pos_rate - base_rate)
+                self.bad_count = self.bad_count + 1 if (delta > rate_tol) else 0
+                if not getattr(self, "_watchdog_active", False):
+                    logger.info("[decision health] pos=%.4f base=%.4f Δ=%.4f tol=%.4f bad_now=%d",
+                                pos_rate, base_rate, delta, rate_tol, self.bad_count)
+
+            # if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
+            #     pos_rate = float(cls_metrics.get("pos_rate", 0.0))
+            #     rate_tol = self.rate_tol_override
+            #     if rate_tol is None and self.calibrator is not None:
+            #         rate_tol = getattr(self.calibrator.cfg, "rate_tol", 0.10)
+            #     if rate_tol is not None:
+            #         delta = abs(pos_rate - base_rate)
+            #         was_bad = (delta > rate_tol)
+            #         self.bad_count = self.bad_count + 1 if was_bad else 0
+            #         if not getattr(self, "_watchdog_active", False):
+            #             logger.info(
+            #                 "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
+            #                 pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
+            #             )
 
         # Segmentation
         if self.has_seg:

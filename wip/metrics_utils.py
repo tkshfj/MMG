@@ -60,11 +60,15 @@ class PosProbStats(Metric):
     Computes min/median/max/mean over per-sample positive-class probabilities.
     Expects output_transform to yield (probs, y_true).
     """
-    def __init__(self, output_transform=None, device=None):
+    def __init__(self, output_transform=None, device: "str | torch.device" = "cpu"):
         if output_transform is None:
             def _identity(x):
                 return x
             output_transform = _identity
+        # super().__init__(output_transform=output_transform, device=device)
+        # Ignite expects a concrete device; avoid passing None.
+        if device is None:
+            device = "cpu"
         super().__init__(output_transform=output_transform, device=device)
 
     def reset(self):
@@ -87,9 +91,13 @@ class PosProbStats(Metric):
 
 
 # Metric attachers
-def attach_classification_metrics(evaluator, cfg: Mapping[str, Any]) -> None:
-    def thr_getter() -> float:
-        return get_threshold_from_state(evaluator)
+def attach_classification_metrics(evaluator, cfg: Mapping[str, Any], *,
+                                  thr_getter: Callable[[], float] | None = None,
+                                  score_provider: PosProbCfg | None = None) -> None:
+    if thr_getter is None:
+        def thr_getter():
+            # fallback if caller didn't pass the two-pass box
+            return float(getattr(evaluator.state, "threshold", cfg.get("cls_threshold", 0.5)))
 
     n_cls = int(cfg.get("num_classes", 2))
     pos_idx = int(cfg.get("positive_index", 1))
@@ -99,27 +107,60 @@ def attach_classification_metrics(evaluator, cfg: Mapping[str, Any]) -> None:
         decision="threshold",
         threshold=thr_getter,
         positive_index=pos_idx,
+        score_provider=score_provider,
     )
-    # metrics["auc"].attach(evaluator, "val/auc")
-    # metrics["cls_confmat"].attach(evaluator, "val/confmat")
-    # if n_cls == 2:  # only in binary
-    #     metrics["pos_rate"].attach(evaluator, "val/pos_rate")
-    metrics["auc"].attach(evaluator, "val/auc")
-    metrics["cls_confmat"].attach(evaluator, "val/confmat")
+    metrics["auc"].attach(evaluator, "auc")
+    metrics["cls_confmat"].attach(evaluator, "cls_confmat")
     if n_cls == 2:
-        metrics["pos_rate"].attach(evaluator, "val/pos_rate")
-        metrics["gt_pos_rate"].attach(evaluator, "val/gt_pos_rate")
-
-    # for name, metric in pack.items():
-    #     tag = "confmat" if name == "cls_confmat" else name
-    #     metric.attach(evaluator, f"val/{tag}")
-    # metrics["auc"].attach(evaluator, "val/auc")
-    # metrics["cls_confmat"].attach(evaluator, "val/confmat")
-    # if n_cls == 2:  # only when valid
-    #     metrics["pos_rate"].attach(evaluator, "val/pos_rate")
-
+        # attach predicted positive rate, derived from the same CM → same threshold
+        from metrics_utils import make_cm_rates
+        rates = make_cm_rates(metrics["cls_confmat"])
+        rates["pos_rate"].attach(evaluator, "pos_rate")
+        # metrics["gt_pos_rate"].attach(evaluator, "val/gt_pos_rate")
+    # helpful, threshold-free distribution debug
+    from functools import partial
     auc_ot = partial(cls_proba_output_transform, positive_index=pos_idx, num_classes=n_cls)
-    PosProbStats(output_transform=auc_ot).attach(evaluator, "val/posprob_stats")
+    # PosProbStats(output_transform=auc_ot).attach(evaluator, "val/posprob_stats")
+    PosProbStats(output_transform=auc_ot, device="cpu").attach(evaluator, "posprob_stats")
+
+
+# def attach_classification_metrics(
+#         evaluator,
+#         cfg: Mapping[str, Any]
+# ) -> None:
+
+#     def thr_getter() -> float:
+#         return get_threshold_from_state(evaluator)
+
+#     n_cls = int(cfg.get("num_classes", 2))
+#     pos_idx = int(cfg.get("positive_index", 1))
+
+#     metrics = make_cls_val_metrics(
+#         num_classes=n_cls,
+#         decision="threshold",
+#         threshold=thr_getter,
+#         positive_index=pos_idx,
+#     )
+#     # metrics["auc"].attach(evaluator, "val/auc")
+#     # metrics["cls_confmat"].attach(evaluator, "val/confmat")
+#     # if n_cls == 2:  # only in binary
+#     #     metrics["pos_rate"].attach(evaluator, "val/pos_rate")
+#     metrics["auc"].attach(evaluator, "val/auc")
+#     metrics["cls_confmat"].attach(evaluator, "val/confmat")
+#     if n_cls == 2:
+#         metrics["pos_rate"].attach(evaluator, "val/pos_rate")
+#         metrics["gt_pos_rate"].attach(evaluator, "val/gt_pos_rate")
+
+#     # for name, metric in pack.items():
+#     #     tag = "confmat" if name == "cls_confmat" else name
+#     #     metric.attach(evaluator, f"val/{tag}")
+#     # metrics["auc"].attach(evaluator, "val/auc")
+#     # metrics["cls_confmat"].attach(evaluator, "val/confmat")
+#     # if n_cls == 2:  # only when valid
+#     #     metrics["pos_rate"].attach(evaluator, "val/pos_rate")
+
+#     auc_ot = partial(cls_proba_output_transform, positive_index=pos_idx, num_classes=n_cls)
+#     PosProbStats(output_transform=auc_ot).attach(evaluator, "val/posprob_stats")
 
 
 # Helpers

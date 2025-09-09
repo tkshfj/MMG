@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-09-09
+- Fix: guard thresholds and metric device; refactor metrics; sweeps
+
 # 2025-09-08
 - Refactor validation pipeline: gate decision health in sweeps; merge and alias seg metrics to val/dice|val/iou
 - Fix SelectIndex to accept metric factories; ensure per-class Precision/Recall pass Metric instances to avoid AttributeError.

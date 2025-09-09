@@ -7,109 +7,106 @@ metric:
   goal: maximize
 
 parameters:
-  # Fixed experiment knobs
-  architecture: {value: densenet121}
-  task: {value: classification}
-  run_cap: {value: 20}
+  # Fixed experiment shape
+  architecture: { value: densenet121 }
+  task:         { value: classification }
+  run_cap:      { value: 20 }
+  in_channels:  { value: 1 }
+  input_shape:  { value: [256, 256] }
+  num_classes:  { value: 2 }
+  class_balance: { value: inverse }
 
-  # Execution
-  epochs: {value: 40}
-  num_workers: {value: 12}
-  debug: {value: true}
-  debug_transforms: {value: false}
-  console_iter_log: {value: false}
-  console_epoch_log: {value: true}
-  seed: {value: 42}
+  # Binary head
+  binary_single_logit:        { value: true }
+  binary_bce_from_two_logits: { value: false }
+
+  # Exec / logging
+  epochs:            { value: 40 }
+  num_workers:       { value: 8 }
+  seed:              { value: 42 }
+  debug:             { value: true }
+  debug_transforms:  { value: false }
+  console_iter_log:  { value: false }
+  console_epoch_log: { value: true }
   init_head_bias_from_prior: { value: true }
   init_threshold_from_prior: { value: false }
 
-  # Two-pass validation / calibration
-  two_pass_val: {value: true}
-  log_calibrated: {value: true}
+  # Two-pass validation + calibrator (candidate source)
+  two_pass_val:   { value: true }
+  log_calibrated: { value: true }
 
-  calibration_method:
-    values: ["youden", "f1", "rate_match"]
-  cal_q_bounds: {value: [0.10, 0.90]}
-  cal_min_tp: {values: [5, 10, 20]}
-  cal_bootstraps: {values: [0, 25]}
+  calibration_method: { values: [rate_match, youden, f1] }
+  cal_fallback:       { values: [rate_match, keep_last] }
+  cal_q_bounds:       { value: [0.10, 0.90] }
+  cal_min_tp:         { values: [5, 10, 20] }
+  cal_bootstraps:     { values: [0, 25] }
+  cal_warmup_epochs:  { values: [1, 2, 3] }
+  cal_init_threshold: { values: [0.40, 0.50, 0.60] }
+  cal_ema_beta:       { values: [0.10, 0.20, 0.30] }
+  cal_max_delta:      { values: [0.05, 0.10, 0.20] }
+  cal_rate_tolerance: { values: [0.10, 0.12, 0.15, 0.20] }  # feeds calibrator.cfg.rate_tolerance
+  cal_auc_floor:      { values: [0.50, 0.55] }
 
-  cal_warmup_epochs: {values: [1, 2, 3]}
-  cal_init_threshold: {values: [0.40, 0.50, 0.60]}
-  cal_ema_beta: {values: [0.10, 0.20, 0.30]}
-  cal_max_delta: {values: [0.05, 0.10, 0.20]}
-  cal_rate_tolerance: {values: [0.08, 0.10, 0.12, 0.15]}
-  cal_auc_floor: {values: [0.50, 0.52, 0.55]}
-  cal_fallback: {values: ["rate_match", "keep_last"]}
+  # Guardrails (authoritative acceptance layer)
+  thr_warmup_epochs: { values: [1, 2, 3] }         # distinct from cal_warmup if desired
+  thr_min:           { value: 0.05 }
+  thr_max:           { value: 0.95 }
+  thr_posrate_min:   { value: 0.05 }               # reject all-neg (≈0) and extreme envelopes
+  thr_posrate_max:   { value: 0.95 }               # reject all-pos (≈1)
+  thr_min_tp:        { values: [0, 5, 10] }        # optional count sanity
+  thr_min_tn:        { values: [0, 5] }
 
-  # Data / labels
-  in_channels: {value: 1}
-  input_shape: {value: [256, 256]}
-  num_classes: {value: 2}
-  class_counts: {value: [331, 232]}
-  class_balance: {value: inverse}
-  batch_size: {values: [32, 64]}
+  # Decision-health (optional, enforced after acceptance)
+  enable_decision_health: { value: true }  # { values: [false, true] }
+  health_warmup:          { value: 1 }  # { values: [0, 1, 2] }
+  rate_tol_override:      { value: 0.10 }  # { values: [0.05, 0.10, 0.15] }  # ± tolerance around base rate
 
-  # Model (DenseNet121)
-  pretrained: {values: [false, true]}
+  # Loss / decision display (seed threshold only; acceptance overrides)
+  cls_loss:       { value: auto }
+  cls_decision:   { value: threshold }
+  cls_threshold:  { values: [0.4, 0.5, 0.6] }
+  positive_index: { value: 1 }
 
-  # Loss weighting
-  alpha: {values: [1.0, 2.0]}
-  beta:  {values: [0.5, 1.0]}
-  multi_weight: {value: 0.65}
-
-  # Optimizer / weight decay
-  optimizer: {value: adamw}
-  weight_decay:
-    distribution: log_uniform_values
-    min: 0.00001
-    max: 0.001
-
-  # Param-group strategy
-  param_groups: {value: split}  # or values: [single, split]
-  base_lr:
+  # Core tunables
+  batch_size:
+    values: [32, 64]
+  lr:
     distribution: log_uniform_values
     min: 0.00003
     max: 0.0003
-  head_multiplier: {values: [5, 10, 15]}
-  head_lr_scale: 0.5       # lower LR on head
-  head_wd_scale: 1.5       # slightly higher WD on head
-  head_keys: ["head","classifier","mlp_head","fc","cls"]  # optional
-
-  # Single-group LR
-  lr:
+  weight_decay:
     distribution: log_uniform_values
-    min: 0.0001
-    max: 0.003
+    min: 0.000005
+    max: 0.00005
+  dropout_rate:
+    distribution: uniform
+    min: 0.18
+    max: 0.24
 
-  # Split LRs
-  # base_lr:
-  #   distribution: log_uniform_values
-  #   min: 0.00002
-  #   max: 0.0001
-  # head_multiplier: {values: [5.0, 10.0, 15.0]}
+  # LR strategy
+  lr_strategy: { values: ["none", "cosine", "warmcos", "plateau"] }
 
-  # LR scheduler
-  lr_scheduler: {values: ["none", "cosine", "warmcos", "plateau"]}
+  # Cosine
+  T_max:   { value: 40 }
+  eta_min: { value: 0.0 }
 
-  # Cosine params
-  T_max: {value: 40}
-  eta_min: {value: 0.0}
+  # Warmup (used by warmcos)
+  warmup_epochs:       { values: [0, 2, 3] }
+  warmup_start_factor: { values: [0.1, 0.2] }
 
-  # Warmup params
-  warmup_epochs: {values: [0, 2, 3]}
-  warmup_start_factor: {values: [0.1, 0.2]}
+  # Plateau
+  plateau_metric:   { value: val/loss }
+  plateau_mode:     { value: min }
+  patience:         { value: 0 }
+  factor:           { values: [0.5, 0.3] }
+  plateau_threshold: { values: [0.0001, 0.0005] }
 
-  # Plateau params
-  plateau_metric: {value: val/loss}
-  plateau_mode:   {value: min}
-  patience: {values: [3, 6]}
-  factor:   {values: [0.5, 0.3]}
-  threshold: {value: 0.0001}
+  # Param-group strategy
+  param_groups:  { values: [single, split] }
+  head_lr_scale: { value: 0.5 }
+  head_wd_scale: { value: 1.5 }
+  head_keys:     { value: ["head","classifier","mlp_head","fc","cls"] }
 
-  # Classification decision defaults
-  binary_single_logit: {value: true}
-  binary_bce_from_two_logits: {value: false}
-  cls_loss: {value: auto}
-  cls_decision:  {value: threshold}
-  cls_threshold: {value: 0.5}
-  positive_index: {value: 1}
+  # Model/Optimizer
+  pretrained:    { values: [false, true] }
+  optimizer:   { value: adamw }

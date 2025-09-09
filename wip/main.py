@@ -26,9 +26,9 @@ from engine_utils import (
     get_label_indices_from_batch, build_evaluator, attach_best_checkpoint,
     attach_val_threshold_search, attach_pos_score_debug_once,
 )
-from evaluator_two_pass import make_two_pass_evaluator  # attach_two_pass_validation
+from evaluator_two_pass import make_two_pass_evaluator
 from calibration import build_calibrator
-from metrics_utils import make_cls_val_metrics
+from metrics_utils import make_cls_val_metrics, attach_classification_metrics
 from optim_factory import get_optimizer, make_scheduler
 from handlers import register_handlers, configure_wandb_step_semantics
 from constants import CHECKPOINT_DIR
@@ -429,6 +429,13 @@ def run(
             multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
             enable_decision_health=health_on,
             score_provider=ppcfg,
+        )
+        # give std evaluator the same probability mapping and threshold
+        attach_classification_metrics(
+            std_evaluator,
+            cfg,
+            thr_getter=lambda: float(two_pass._thr_box.value),  # single source of truth
+            score_provider=two_pass._score_provider,  # same prob mapping
         )
 
     @trainer.on(Events.EPOCH_COMPLETED)
