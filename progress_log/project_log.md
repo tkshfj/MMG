@@ -2,6 +2,7 @@
 
 # 2025-09-10
 - Fix: Unify logit-to-prob mapping across OT & PosProb; use model.param_groups(); harden ViT head/backbone split & bias init
+- Refactor Ignite OTs into factories, fix label parsing, and align two-pass evaluator and metric wiring with PosProbCfg to resolve dtype and transform signature errors.
 
 # 2025-09-09
 - Fix: guard thresholds and metric device; refactor metrics; sweeps

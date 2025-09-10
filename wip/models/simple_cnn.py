@@ -53,6 +53,11 @@ class SimpleCNNModel(nn.Module):
         self._cfg = dict(cfg) if cfg is not None else {}
         self._cfg.update({k: v for k, v in kwargs.items() if k not in self._cfg})
 
+    def param_groups(self):
+        # No real backbone/head split here, but keep the interface
+        return {"backbone": list(self.features.parameters()),
+                "head": list(self.cls_head.parameters())}
+
     def forward(self, batch: Dict[str, torch.Tensor] | torch.Tensor) -> Dict[str, torch.Tensor]:
         x = batch["image"] if isinstance(batch, dict) else batch
         h = self.features(x)            # [B, 64, H', W']

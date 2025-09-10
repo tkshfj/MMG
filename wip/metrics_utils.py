@@ -10,7 +10,7 @@ from monai.data.meta_tensor import MetaTensor
 from ignite.metrics import Accuracy, Precision, Recall, ConfusionMatrix, ROC_AUC
 # from ignite.metrics.confusion_matrix import ConfusionMatrix
 from ignite.metrics import DiceCoefficient, JaccardIndex, Metric, MetricsLambda, EpochMetric
-from utils.safe import to_tensor, labels_to_1d_indices, to_float_scalar, to_py
+from utils.safe import to_tensor, to_float_scalar, to_py  # labels_to_1d_indices
 from posprob import PosProbCfg, positive_score_from_logits
 
 
@@ -94,9 +94,12 @@ class PosProbStats(Metric):
 
 
 # Metric attachers
-def attach_classification_metrics(evaluator, cfg: Mapping[str, Any], *,
-                                  thr_getter: Callable[[], float] | None = None,
-                                  score_provider: PosProbCfg | None = None) -> None:
+def attach_classification_metrics(
+        evaluator, cfg: Mapping[str, Any], *,
+        thr_getter: Callable[[], float] | None = None,
+        score_provider: PosProbCfg | None = None,
+        ppcfg: PosProbCfg | None
+) -> None:
     if thr_getter is None:
         def thr_getter():
             # fallback if caller didn't pass the two-pass box
@@ -104,12 +107,14 @@ def attach_classification_metrics(evaluator, cfg: Mapping[str, Any], *,
 
     n_cls = int(cfg.get("num_classes", 2))
     pos_idx = int(cfg.get("positive_index", 1))
+    pp = ppcfg or score_provider or PosProbCfg(positive_index=pos_idx)
 
     metrics = make_cls_val_metrics(
         num_classes=n_cls,
         decision="threshold",
         threshold=thr_getter,
         positive_index=pos_idx,
+        ppcfg=pp,
         score_provider=score_provider,
     )
     metrics["auc"].attach(evaluator, "auc")
@@ -121,8 +126,9 @@ def attach_classification_metrics(evaluator, cfg: Mapping[str, Any], *,
         rates["pos_rate"].attach(evaluator, "pos_rate")
         # metrics["gt_pos_rate"].attach(evaluator, "val/gt_pos_rate")
     # helpful, threshold-free distribution debug
-    from functools import partial
-    auc_ot = partial(cls_proba_output_transform, positive_index=pos_idx, num_classes=n_cls)
+    # from functools import partial
+    # auc_ot = partial(cls_proba_output_transform, positive_index=pos_idx, num_classes=n_cls)
+    auc_ot = cls_proba_output_transform(ppcfg=pp, positive_index=pos_idx, num_classes=n_cls)
     # PosProbStats(output_transform=auc_ot).attach(evaluator, "val/posprob_stats")
     PosProbStats(output_transform=auc_ot, device="cpu").attach(evaluator, "posprob_stats")
 
@@ -212,54 +218,6 @@ def extract_seg_logits_from_any(out: Any) -> torch.Tensor:
     if found is None:
         raise KeyError(f"Segmentation logits not found; expected one of keys={KEYS} or a [B,C,H,W] tensor.")
     return found
-
-
-def _extract_logits_and_labels(output: Any) -> tuple[torch.Tensor, torch.Tensor]:
-    if isinstance(output, (tuple, list)) and len(output) >= 2:
-        y_pred_like, y_true_like = output[0], output[1]
-
-        # logits
-        if isinstance(y_pred_like, Mapping):
-            logits = extract_cls_logits_from_any(y_pred_like)
-        else:
-            logits = y_pred_like
-
-        # labels
-        if isinstance(y_true_like, Mapping):
-            labels_any = _first_not_none(y_true_like, ("label", "y", "target"))
-        else:
-            labels_any = y_true_like
-
-    elif isinstance(output, Mapping):
-        # logits (no tensor truthiness)
-        logits = extract_cls_logits_from_any(output)
-
-        # top-level labels (no `or` chains)
-        labels_any = _first_not_none(output, ("label", "y", "target"))
-        if isinstance(labels_any, Mapping):
-            labels_any = _first_not_none(labels_any, ("label", "y", "target"))
-
-    else:
-        raise TypeError(f"Unsupported output type for output_transform: {type(output)}")
-
-    if logits is None:
-        raise KeyError("Missing logits for classification.")
-    if labels_any is None:
-        raise KeyError("Missing labels for classification.")
-
-    y_pred = torch.as_tensor(logits)
-    y_true = torch.as_tensor(labels_any)
-
-    # Normalize labels to 1D indices
-    try:
-        y_true = labels_to_1d_indices(y_true)
-    except Exception:
-        if y_true.ndim > 1 and y_true.shape[-1] > 1:
-            y_true = y_true.argmax(dim=-1)
-        else:
-            y_true = y_true.view(-1)
-
-    return y_pred.float(), y_true.long().view(-1)
 
 
 def seg_confmat(pred_idx: torch.Tensor, true_idx: torch.Tensor, num_classes: int) -> torch.Tensor:
@@ -380,82 +338,134 @@ def train_loss_output_transform(output: Any) -> dict[str, float]:
 
 
 def _resolve_threshold(thr: Union[float, Callable[[], float]]) -> float:
-    return float(thr() if callable(thr) else thr)
+    return float(thr()) if callable(thr) else float(thr)
+
+
+def _extract_logits_and_labels(output: Any, ppcfg: PosProbCfg) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Accept dict/tuple outputs and return (logits, labels[N]).
+    """
+    # Get logits container
+    if isinstance(output, (tuple, list)) and len(output) >= 2:
+        y_pred, y_any = output[0], output[1]
+    elif isinstance(output, Mapping):
+        y_pred = output
+        # prefer top-level 'y', else fallbacks inside 'label'
+        y_any = output.get("y", None)
+        if y_any is None:
+            lab = output.get("label", None)
+            if isinstance(lab, Mapping):
+                y_any = lab.get("label") or lab.get("y") or lab.get("target")
+            else:
+                y_any = lab
+        if y_any is None:
+            # last resorts
+            y_any = output.get("target", output.get("labels"))
+    else:
+        # best-effort (not typical)
+        y_pred, y_any = output, output
+
+    logits = ppcfg.pick_logits(y_pred).float()
+
+    if y_any is None:
+        raise KeyError("No labels found in output: expected keys like 'y' or 'label{label|y|target}'")
+    labels = ppcfg.pick_labels(y_any).view(-1).long()
+    return logits, labels
+
+
+def _cls_probs_and_labels_from_engine_output(output: Any, ppcfg: PosProbCfg) -> tuple[torch.Tensor, torch.Tensor]:
+    logits, labels = _extract_logits_and_labels(output, ppcfg)
+    if logits.ndim >= 2 and logits.shape[-1] > 2:
+        probs = torch.softmax(logits.float(), dim=-1)        # [N,C]
+    else:
+        probs = ppcfg.logits_to_pos_prob(logits).reshape(-1)  # [N]
+    return probs, labels
+
+
+def _cls_cm_output_transform(output: Any, *, ppcfg: PosProbCfg, threshold: float | callable, positive_index: int) -> tuple[torch.Tensor, torch.Tensor]:
+    probs, labels = _cls_probs_and_labels_from_engine_output(output, ppcfg)
+    thr = float(threshold()) if callable(threshold) else float(threshold)
+    if probs.ndim == 1:
+        # build 2-column probs so CM/Acc/Prec/Rec work
+        yhat = (probs >= thr).long()
+        two_col = torch.stack([1 - yhat, yhat], dim=1)
+        return two_col, labels
+    else:
+        # multi-class → argmax
+        yhat = probs.argmax(dim=1)
+        two_col = torch.nn.functional.one_hot(yhat, num_classes=probs.shape[1]).to(probs.dtype)
+        return two_col, labels
 
 
 def make_cls_val_metrics(
-    num_classes: int = 2,
-    decision: str = "threshold",
-    threshold: Callable[[], float] | float = 0.5,
+    *,
+    num_classes: int,
+    ppcfg: PosProbCfg,
     positive_index: int = 1,
-    score_provider: PosProbCfg | None = None,  # kept for API compat; not required here
+    cls_decision: str = "threshold",
+    cls_threshold: float | callable = 0.5,
+    device: Optional[torch.device] = None,
 ) -> dict[str, Metric]:
-    """
-    Classification metrics using dict/tuple-robust transforms already defined above.
-    """
-    # Normalize threshold into a callable
-    if isinstance(threshold, (int, float)):
-        _thr_val = float(threshold)
-
-        def threshold_fn() -> float:
-            return _thr_val
-    elif callable(threshold):
-
-        def threshold_fn() -> float:
-            return float(threshold())
-    else:
-        raise TypeError("threshold must be a float or a zero-arg callable returning a float")
-
-    decision_ot = partial(
-        cls_decision_output_transform,
-        decision=decision,
-        threshold=threshold_fn,
-        positive_index=positive_index,
+    from ignite.metrics import Accuracy, Precision, Recall, ROC_AUC, ConfusionMatrix, MetricsLambda
+    dev = device or torch.device("cpu")
+    # AUC uses raw probabilities (binary [N] or multi [N,C])
+    auc = ROC_AUC(
+        output_transform=lambda out: _cls_probs_and_labels_from_engine_output(out, ppcfg),
+        device=dev,
     )
-    proba_ot = partial(
-        cls_proba_output_transform,
-        positive_index=positive_index,
-        num_classes=num_classes,
+    cm = ConfusionMatrix(
+        num_classes=int(num_classes),
+        output_transform=lambda out: _cls_cm_output_transform(out, ppcfg=ppcfg, threshold=cls_threshold, positive_index=int(positive_index)),
+        device=dev,
     )
-    cm_ot = partial(
-        cls_confmat_output_transform_thresholded,
-        decision=decision,
-        threshold=threshold_fn,
-        positive_index=positive_index,
-    )
-
-    acc = Accuracy(output_transform=decision_ot)
-    prec = Precision(average=False, output_transform=decision_ot, is_multilabel=False)
-    rec = Recall(average=False, output_transform=decision_ot, is_multilabel=False)
-    auc = ROC_AUC(output_transform=proba_ot) if int(num_classes) <= 2 else EpochMetric(
-        lambda y_pred, y_true: __import__("sklearn.metrics", fromlist=["roc_auc_score"]).roc_auc_score(y_true, y_pred, average="macro", multi_class="ovr"),
-        output_transform=proba_ot,
-    )
-    cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot)
-
-    metrics = {
-        "acc": acc,
-        "prec": prec,  # expose full vector; select later if needed
-        "recall": rec,  # expose full vector
+    acc = Accuracy(
+        output_transform=lambda out: _cls_cm_output_transform(out, ppcfg=ppcfg, threshold=cls_threshold, positive_index=int(positive_index)),
+        device=dev)
+    prec_macro = Precision(
+        average=True,
+        output_transform=lambda out: _cls_cm_output_transform(out, ppcfg=ppcfg, threshold=cls_threshold, positive_index=int(positive_index)),
+        device=dev)
+    rec_macro = Recall(
+        average=True,
+        output_transform=lambda out: _cls_cm_output_transform(out, ppcfg=ppcfg, threshold=cls_threshold, positive_index=int(positive_index)),
+        device=dev)
+    prec_vec = Precision(
+        average=False,
+        output_transform=lambda out: _cls_cm_output_transform(out, ppcfg=ppcfg, threshold=cls_threshold, positive_index=int(positive_index)),
+        device=dev)
+    rec_vec = Recall(
+        average=False,
+        output_transform=lambda out: _cls_cm_output_transform(out, ppcfg=ppcfg, threshold=cls_threshold, positive_index=int(positive_index)),
+        device=dev)
+    return {
         "auc": auc,
+        "acc": acc,
+        "precision_macro": prec_macro,
+        "recall_macro": rec_macro,
+        "precision_pos": MetricsLambda(lambda v: v[int(positive_index)], prec_vec),
+        "recall_pos": MetricsLambda(lambda v: v[int(positive_index)], rec_vec),
         "cls_confmat": cm,
     }
-    if int(num_classes) == 2:
-        metrics.update(make_cm_rates(cm))  # adds pos_rate and gt_pos_rate
-    return metrics
+
+
+def cls_output_transform(*, ppcfg: PosProbCfg) -> Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]:
+    """Factory: returns callable that yields (logits, labels)."""
+    def _ot(output: Any) -> Tuple[torch.Tensor, torch.Tensor]:
+        return _extract_logits_and_labels(output, ppcfg)
+    return _ot
 
 
 # Standard classification output transforms
 @dataclass(frozen=True)
 class ClsOTs:
     """Pack of classification output transforms."""
-    base: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]        # (prob_pos, y)
+    base: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]  # (prob_pos, y)
     thresholded: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]  # (y_hat, y)
-    cm: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]          # ([B,C] scores, y)
+    cm: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]  # ([B,C] scores, y)
 
 
 def make_default_cls_output_transforms(
-    *,
+    *, ppcfg: PosProbCfg, num_classes: int,
     decision: str = "threshold",
     threshold: Union[float, Callable[[], float]] = 0.5,
     positive_index: int = 1,
@@ -464,98 +474,44 @@ def make_default_cls_output_transforms(
     mode: Literal["auto", "bce_single", "ce_softmax", "bce_two_logit"] = "auto",
 ) -> ClsOTs:
     """Default, model-agnostic classification transforms with a single source of truth for the decision rule and threshold."""
-
-    def base(output):
-        logits, y_true = cls_output_transform(output)
-        prob = positive_score_from_logits(
-            logits,
-            positive_index=positive_index,
-            binary_single_logit=binary_single_logit,
-            binary_bce_from_two_logits=binary_bce_from_two_logits,
-            mode="auto",
-        ).view(-1)
-        return prob, y_true.long().view(-1)
+    base = cls_proba_output_transform(ppcfg=ppcfg, num_classes=num_classes, positive_index=positive_index)
 
     def thresholded(output):
-        prob, y_true = base(output)
+        probs, y_true = base(output)
         thr = _resolve_threshold(threshold)
-        y_hat = (prob >= thr).long()
-        return y_hat, y_true
+        if probs.ndim == 1:
+            y_hat = (probs >= thr).long()
+        else:
+            y_hat = probs.argmax(dim=1).long()
+        return y_hat.view(-1), y_true.view(-1)
 
-    # CM: use the standardized threshold-aware transform
-    cm = partial(
-        cls_confmat_output_transform_thresholded,
-        decision=decision,
-        threshold=threshold,
-        positive_index=positive_index,
+    cm = cls_confmat_output_transform_thresholded(
+        ppcfg=ppcfg, decision=decision, threshold=threshold,
+        positive_index=positive_index, num_classes=num_classes
     )
-
     return ClsOTs(base=base, thresholded=thresholded, cm=cm)
 
 
-def cls_output_transform(output: Any) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return (logits, labels)."""
-    logits, y = _extract_logits_and_labels(output)
-    return logits.float(), y.long().view(-1)
-
-
 def cls_decision_output_transform(
-    output: Any, *,
-    decision: str = "threshold",
+    *,
+    ppcfg: PosProbCfg,
+    decision: str = "threshold",             # "threshold" or "argmax"
     threshold: Union[float, Callable[[], float]] = 0.5,
     positive_index: int = 1,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    logits, y = cls_output_transform(output)
-    dec = str(decision).lower()
-    if dec == "argmax" or (logits.ndim >= 2 and logits.shape[-1] > 2):
-        y_hat = logits.argmax(dim=-1).to(torch.long)
-    else:
-        p_pos = positive_score_from_logits(logits, positive_index=positive_index).view(-1)
-        thr = _resolve_threshold(threshold)
-        y_hat = (p_pos >= float(thr)).to(torch.long)
-    return y_hat.view(-1), y.view(-1).to(torch.long)
+) -> Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]:
+    """Factory: returns (y_hat_indices, y_true)."""
+    dec = decision.lower()
 
-
-def cls_proba_output_transform(
-    output: Any, *, positive_index: int = 1, num_classes: int = 2
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Return (probs, labels) for ROC-AUC (binary->[N], multi->[N,C])."""
-    logits, y = cls_output_transform(output)
-    return probs_from_logits(logits, num_classes=int(num_classes), positive_index=int(positive_index)), y
-
-
-def cls_confmat_output_transform_thresholded(
-    output,
-    *,
-    decision: str = "threshold",
-    threshold: float | Callable[[], float] = 0.5,
-    positive_index: int = 1,
-):
-    # Reuse robust parsing
-    logits, y_true = cls_output_transform(output)
-
-    # ensure tensor
-    if hasattr(logits, "as_tensor"):
-        logits = logits.as_tensor()
-    logits = torch.as_tensor(logits, dtype=torch.float32)
-
-    if hasattr(y_true, "as_tensor"):
-        y_true = y_true.as_tensor()
-    y_true = torch.as_tensor(y_true, dtype=torch.long).view(-1)
-
-    # multiclass or explicit argmax path: pass [B,C] scores; CM will argmax
-    if decision == "argmax" or (logits.ndim >= 2 and logits.shape[-1] > 2):
-        if logits.ndim == 1:
-            logits = logits.unsqueeze(1)
-        return logits.float(), y_true
-
-    # binary/threshold path: build 2-channel one-hot so CM’s argmax == thresholded decision
-    thr = _resolve_threshold(threshold)
-    # get P(pos)
-    p_pos = positive_score_from_logits(logits, positive_index=positive_index).view(-1)
-    y_hat = (p_pos >= thr).float()  # [B] in {0,1}
-    y_pred = torch.stack([1.0 - y_hat, y_hat], dim=1)  # [B,2]
-    return y_pred, y_true
+    def _ot(output: Any) -> Tuple[torch.Tensor, torch.Tensor]:
+        logits, y = _extract_logits_and_labels(output, ppcfg)
+        if dec == "argmax" or (logits.ndim >= 2 and logits.shape[-1] > 2):
+            y_hat = logits.argmax(dim=-1).long()
+        else:
+            p_pos = ppcfg.logits_to_pos_prob(logits).view(-1)
+            thr = _resolve_threshold(threshold)
+            y_hat = (p_pos >= thr).long()
+        return y_hat.view(-1), y.view(-1)
+    return _ot
 
 
 def make_std_cls_metrics_with_cal_thr(
@@ -564,14 +520,25 @@ def make_std_cls_metrics_with_cal_thr(
     decision: str = "threshold",
     positive_index: int = 1,
     thr_getter: Callable[[], float] | float = 0.5,
+    ppcfg: PosProbCfg | None = None,
+    score_provider: PosProbCfg | None = None,
+    device: torch.device | None = None,
     **kwargs,
 ):
     if "pos_index" in kwargs:   # back-compat
         positive_index = int(kwargs.pop("pos_index"))
-
-    decision_ot = partial(cls_decision_output_transform, decision=decision, threshold=thr_getter, positive_index=positive_index)
-    proba_ot = partial(cls_proba_output_transform, positive_index=positive_index, num_classes=num_classes)
-    cm_ot_cal = partial(cls_confmat_output_transform_thresholded, decision=decision, threshold=thr_getter, positive_index=positive_index)
+    # Resolve a single PosProbCfg source-of-truth
+    pp = ppcfg or score_provider or PosProbCfg(positive_index=int(positive_index))
+    # decision_ot = partial(cls_decision_output_transform, decision=decision, threshold=thr_getter, positive_index=positive_index)
+    decision_ot = cls_decision_output_transform(ppcfg=pp, decision=decision, threshold=thr_getter, positive_index=positive_index)
+    # proba_ot = partial(cls_proba_output_transform, positive_index=positive_index, num_classes=num_classes)
+    proba_ot = cls_proba_output_transform(
+        ppcfg=pp, num_classes=num_classes, positive_index=positive_index
+    )
+    # cm_ot_cal = partial(cls_confmat_output_transform_thresholded, decision=decision, threshold=thr_getter, positive_index=positive_index)
+    cm_ot_cal = cls_confmat_output_transform_thresholded(
+        ppcfg=pp, decision=decision, threshold=thr_getter, positive_index=positive_index, num_classes=num_classes
+    )
 
     acc = Accuracy(output_transform=decision_ot)  # -> (int01, int01)
     prec_macro = Precision(average=True, output_transform=decision_ot, is_multilabel=False)
@@ -583,9 +550,9 @@ def make_std_cls_metrics_with_cal_thr(
     metrics: dict[str, Metric] = {
         "acc": acc,
         "precision_macro": prec_macro,
-        "prec": prec_vec,        # expose full vector; we’ll pick class later
+        "prec": prec_vec,  # expose full vector
         "recall_macro": rec_macro,
-        "recall": rec_vec,         # expose full vector
+        "recall": rec_vec,  # expose full vector
         "cls_confmat": cm,
     }
 
@@ -601,6 +568,55 @@ def make_std_cls_metrics_with_cal_thr(
         metrics.update(make_cm_rates(cm))
 
     return metrics
+
+
+def cls_proba_output_transform(
+    *,
+    ppcfg: PosProbCfg,
+    num_classes: int,
+    positive_index: int = 1,
+) -> Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]:
+    """Factory: probabilities for AUC. Binary -> [N]; multiclass -> [N,C]."""
+    def _ot(output: Any) -> Tuple[torch.Tensor, torch.Tensor]:
+        logits, y = _extract_logits_and_labels(output, ppcfg)
+        if (logits.ndim >= 2 and logits.shape[-1] > 2) or int(num_classes) > 2:
+            probs = torch.softmax(logits, dim=-1)           # [N,C]
+        else:
+            probs = ppcfg.logits_to_pos_prob(logits).view(-1)  # [N]
+        return probs, y
+    return _ot
+
+
+def cls_confmat_output_transform_thresholded(
+    *,
+    ppcfg: PosProbCfg,
+    decision: str = "threshold",             # same semantics as above
+    threshold: Union[float, Callable[[], float]] = 0.5,
+    positive_index: int = 1,
+    num_classes: int = 2,
+) -> Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]:
+    """
+    Factory: ConfusionMatrix OT.
+    - Multiclass: returns probs [N,C] (CM will argmax internally).
+    - Binary: thresholds to indices and returns 2-col one-hot scores [N,2].
+    """
+    dec = decision.lower()
+
+    def _ot(output: Any) -> Tuple[torch.Tensor, torch.Tensor]:
+        logits, y = _extract_logits_and_labels(output, ppcfg)
+
+        # Multiclass path or explicit argmax -> provide [N,C] scores
+        if dec == "argmax" or (logits.ndim >= 2 and logits.shape[-1] > 2) or int(num_classes) > 2:
+            probs = torch.softmax(logits, dim=-1)
+            return probs, y
+
+        # Binary path -> apply threshold, then emit 2-col one-hot predictions
+        p_pos = ppcfg.logits_to_pos_prob(logits).view(-1)
+        thr = _resolve_threshold(threshold)
+        yhat = (p_pos >= thr).long()
+        two_col = torch.stack([1 - yhat, yhat], dim=1)  # [N,2]
+        return two_col, y
+    return _ot
 
 
 def _parse_seg_logits_and_target(output: Any) -> tuple[torch.Tensor, torch.Tensor]:
@@ -663,12 +679,7 @@ def seg_confmat_output_transform_default(output: Any, *, threshold: float = 0.5)
     return y_hat, y.long()
 
 
-def seg_output_transform(
-    output,
-    *,
-    threshold: float = 0.5,
-    # num_classes: Optional[int] = None,
-):
+def seg_output_transform(output, *, threshold: float = 0.5,):
 
     # parse container
     if isinstance(output, (list, tuple)) and len(output) == 2:
@@ -771,79 +782,70 @@ def make_metrics(
     auc_ot=None,   # base (prob, y)
     seg_cm_ot=None,
     multitask: bool = False,
+    ppcfg: PosProbCfg | None = None,
+    device: torch.device | None = None,
 ) -> dict[str, Any]:
+    dev = device or torch.device("cpu")
+    pp = ppcfg or PosProbCfg(positive_index=int(positive_index))
     metrics: dict[str, Any] = {}
 
-    # If caller didn't provide output transforms, build the standard pack
     if cls_ot is None or auc_ot is None:
         ots = make_default_cls_output_transforms(
-            decision=cls_decision,
-            threshold=cls_threshold,
-            positive_index=positive_index,
+            ppcfg=pp, num_classes=num_classes,
+            decision=cls_decision, threshold=cls_threshold, positive_index=positive_index,
         )
-        # thresholded -> (y_hat, y) for Acc/Prec/Rec
         cls_ot = ots.thresholded
-        # base -> (p_pos, y) for AUC
         auc_ot = ots.base
 
-    # classification
     if "classification" in tasks or multitask:
-        acc = Accuracy(output_transform=cls_ot)
-        prec_macro = Precision(output_transform=cls_ot, average=True)
-        prec_vec = Precision(average=False, output_transform=cls_ot)
-        rec_macro = Recall(output_transform=cls_ot, average=True)
-        rec_vec = Recall(average=False, output_transform=cls_ot)
-        auc = ROC_AUC(output_transform=auc_ot)
-        # ConfusionMatrix must receive a callable output_transform, not a call
-        cm_ot = partial(
-            cls_confmat_output_transform_thresholded,
-            decision=cls_decision,
-            threshold=cls_threshold,
-            positive_index=positive_index,
+        acc = Accuracy(output_transform=cls_ot, device=dev)
+        prec_vec = Precision(average=False, output_transform=cls_ot, is_multilabel=False, device=dev)
+        rec_vec = Recall(average=False, output_transform=cls_ot, is_multilabel=False, device=dev)
+        prec_mac = Precision(average=True, output_transform=cls_ot, is_multilabel=False, device=dev)
+        rec_mac = Recall(average=True, output_transform=cls_ot, is_multilabel=False, device=dev)
+        auc = ROC_AUC(output_transform=auc_ot, device=dev)
+
+        cm_ot = cls_confmat_output_transform_thresholded(
+            ppcfg=pp, decision=cls_decision, threshold=cls_threshold,
+            positive_index=positive_index, num_classes=num_classes
         )
-        cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot)
+        cm = ConfusionMatrix(num_classes=int(num_classes), output_transform=cm_ot, device=dev)
+
         metrics.update({
             "acc": acc,
-            "precision_macro": prec_macro,
-            "precision_pos": prec_vec[int(positive_index)],
-            "recall_macro": rec_macro,
-            "recall_pos": rec_vec[int(positive_index)],
+            "precision_macro": prec_mac,
+            "recall_macro": rec_mac,
+            "precision_pos": MetricsLambda(lambda v: v[int(positive_index)], prec_vec),
+            "recall_pos": MetricsLambda(lambda v: v[int(positive_index)], rec_vec),
             "auc": auc,
             "cls_confmat": cm,
         })
         if int(num_classes) == 2:
             metrics.update(make_cm_rates(cm))
 
-    # segmentation
     if "segmentation" in tasks or multitask:
-        # ConfusionMatrix over seg classes
         _seg_cm_ot = seg_cm_ot or partial(seg_confmat_output_transform_default, threshold=float(seg_threshold))
-        seg_cm = ConfusionMatrix(num_classes=int(seg_num_classes or num_classes), output_transform=_seg_cm_ot)
+        seg_cm = ConfusionMatrix(num_classes=int(seg_num_classes or num_classes), output_transform=_seg_cm_ot, device=dev)
         dice = DiceCoefficient(cm=seg_cm)
         iou = JaccardIndex(cm=seg_cm)
-
         metrics.update({"dice": dice, "iou": iou, "seg_confmat": seg_cm})
 
-    # loss metrics wiring
-
-    # Combined score (if both present)
     if ("classification" in tasks and "segmentation" in tasks or multitask) and "auc" in metrics and "dice" in metrics:
-        eps = 1e-8
-        w = 0.65  # keep default; or pull from cfg where we call this
-
-        def _multi_score(auc, dice, _w=w, _eps=eps):
-            return 1.0 / (_w / (auc + _eps) + (1.0 - _w) / (dice + _eps))
-        metrics["multi"] = MetricsLambda(_multi_score, metrics["auc"], metrics["dice"])
-
+        eps, w = 1e-8, 0.65
+        metrics["multi"] = MetricsLambda(lambda a, d, _w=w, _e=eps: 1.0 / (_w / (a + _e) + (1 - _w) / (d + _e)),
+                                         metrics["auc"], metrics["dice"])
     return metrics
 
 
 __all__ = [
     "cls_output_transform",
+    "cls_proba_output_transform",
+    "cls_decision_output_transform",
+    "cls_confmat_output_transform_thresholded",
     "make_cls_val_metrics",
     "make_metrics",
     "extract_cls_logits_from_any",
     "extract_seg_logits_from_any",
     "attach_classification_metrics",
-    "coerce_loss_dict"
+    "coerce_loss_dict",
 ]

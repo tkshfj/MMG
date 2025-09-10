@@ -254,8 +254,9 @@ def decision_from_logits(
     """
     if to_pos_prob is None:
         # Fallback: construct a minimal PosProbCfg (kept for backward compat)
-        pp = PosProbCfg(binary_single_logit=(logits.ndim in (1, 2) and (logits.ndim == 1 or logits.shape[-1] == 1)),
-                        positive_index=int(positive_index))
+        pp = PosProbCfg(
+            binary_single_logit=(logits.ndim in (1, 2) and (logits.ndim == 1 or logits.shape[-1] == 1)),
+            positive_index=int(positive_index))
         probs = pp.logits_to_pos_prob(logits)
     else:
         probs = to_pos_prob(logits)
@@ -332,6 +333,10 @@ def build_trainer(
     # attach device/non_blocking on state AFTER the trainer exists
     _attach_device_state(trainer, device, getattr(train_data_loader, "pin_memory", False))
 
+    if not hasattr(trainer.state, "ppcfg"):
+        trainer.state.ppcfg = PosProbCfg()  # or accept ppcfg param like evaluator
+        trainer.state.to_pos_prob = trainer.state.ppcfg.logits_to_pos_prob
+
     # attach training metrics (names MUST be bare, e.g., "auc", "accuracy")
     if train_metrics:
         # idempotency guard (avoid double-attach if rebuild/reuse)
@@ -346,17 +351,22 @@ def build_trainer(
 def build_evaluator(
     *,
     device: torch.device,
-    data_loader,                        # required (val loader)
+    data_loader,  # required (val loader)
     network: torch.nn.Module,
-    prepare_batch: Callable,            # (batch, device, non_blocking) -> (x, targets)
+    prepare_batch: Callable,  # (batch, device, non_blocking) -> (x, targets)
     metrics: Dict[str, Any] | None = None,
     include_seg: bool = True,
     inferer: Optional[Callable] = None,
     non_blocking: Optional[bool] = None,
     trainer_for_logging: Optional[Engine] = None,
+    ppcfg: Optional[PosProbCfg] = None,
 ) -> Engine:
     """Custom evaluator that returns an out_map dict compatible with metrics."""
     nb_default = bool(non_blocking) if non_blocking is not None else False
+
+    # single source-of-truth scorer
+    if ppcfg is None:
+        ppcfg = PosProbCfg()  # defaults: positive_index=1, binary_single_logit=True, mode="auto"
 
     def _eval_step(engine: Engine, batch: Mapping[str, Any]) -> Dict[str, Any]:
         dev = getattr(engine.state, "device", device)
@@ -416,6 +426,9 @@ def build_evaluator(
     # Persist device hints on the engine (spawn-safe)
     setattr(evaluator.state, "device", device)
     setattr(evaluator.state, "non_blocking", pin)
+    # bind unified scorer to engine.state
+    setattr(evaluator.state, "ppcfg", ppcfg)
+    setattr(evaluator.state, "to_pos_prob", ppcfg.logits_to_pos_prob)
 
     if metrics:
         if not getattr(evaluator.state, "_val_metrics_attached", False):
@@ -440,12 +453,17 @@ def attach_engine_metrics(
     seg_num_classes: Optional[int] = None,
     seg_threshold: Optional[float] = None,
     seg_ignore_index: Optional[int] = None,
+    ppcfg: Optional[PosProbCfg] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     """
     Build and attach metrics to trainer and evaluator with bare names.
     Returns (train_metrics, val_metrics).
     """
     task_set = set(tasks)
+
+    # single PosProbCfg for both trainer/evaluator metrics
+    if ppcfg is None:
+        ppcfg = PosProbCfg(positive_index=int(positive_index))
 
     # training metrics (keep light; classification-only by default)
     train_metrics = make_metrics(
@@ -454,6 +472,7 @@ def attach_engine_metrics(
         cls_decision=cls_decision,
         cls_threshold=cls_threshold,
         positive_index=positive_index,
+        ppcfg=ppcfg,
     )
     if not getattr(trainer.state, "_train_metrics_attached", False):
         for k, m in train_metrics.items():
@@ -464,6 +483,8 @@ def attach_engine_metrics(
     if getattr(evaluator.state, "threshold", None) is None:
         evaluator.state.threshold = float(cls_threshold)
 
+    dev = getattr(trainer.state, "device", None) or getattr(evaluator.state, "device", None) or torch.device("cpu")
+
     # validation metrics: start with classification
     val_metrics = make_cls_val_metrics(
         num_classes=num_classes,
@@ -471,6 +492,8 @@ def attach_engine_metrics(
         # threshold=cls_threshold,
         threshold=lambda: float(getattr(evaluator.state, "threshold", cls_threshold)),
         positive_index=positive_index,
+        ppcfg=ppcfg,
+        device=dev,
     )
 
     # optional: add segmentation validation metrics
@@ -796,6 +819,150 @@ def attach_lr_scheduling(
         scheduler.step()
 
 
+def _best_threshold_from_probs(p: torch.Tensor, y_true: torch.Tensor, mode: str = "bal_acc") -> tuple[float, dict]:
+    """
+    p: (N,) positive-class probabilities in [0,1]
+    y_true: (N,) {0,1}
+    Returns (threshold, stats_dict)
+    """
+    with torch.no_grad():
+        p = p.detach().float().clamp_(0.0, 1.0).view(-1)     # keep device, in-place clamp
+        y = y_true.detach().long().view(-1).to(p.device)
+        # candidate thresholds: unique preds + endpoints
+        # stay on the same device; quantile works on CUDA too
+        cand = torch.quantile(p, torch.linspace(0, 1, 101, device=p.device)).unique()
+
+        best_thr, best_score, best_stats = 0.5, -1.0, {}
+        for thr in cand:
+            y_hat = (p >= thr).long()
+            tp = int(((y_hat == 1) & (y == 1)).sum())
+            tn = int(((y_hat == 0) & (y == 0)).sum())
+            fp = int(((y_hat == 1) & (y == 0)).sum())
+            fn = int(((y_hat == 0) & (y == 1)).sum())
+
+            prec = tp / max(tp + fp, 1)
+            rec1 = tp / max(tp + fn, 1)   # recall for class 1
+            rec0 = tn / max(tn + fp, 1)   # recall for class 0
+            bal_acc = 0.5 * (rec0 + rec1)
+            f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
+            pos_rate = (tp + fp) / max(len(y), 1)
+
+            score = bal_acc if mode == "bal_acc" else f1
+            if score > best_score:
+                best_score = float(score)
+                best_thr = float(thr)
+                best_stats = dict(
+                    tp=tp, tn=tn, fp=fp, fn=fn,
+                    prec=float(prec), rec=float(rec1),
+                    rec_0=float(rec0), rec_1=float(rec1),
+                    bal_acc=float(bal_acc), f1=float(f1),
+                    pos_rate=float(pos_rate),
+                )
+
+        return best_thr, best_stats
+
+
+def attach_val_threshold_search(
+    *,
+    evaluator: Engine,
+    mode: str = "bal_acc",   # "bal_acc" or "f1"
+    logger=None,
+    positive_index: int = 1,
+    score_kwargs: Optional[Dict[str, Any]] = None,
+):
+    """
+    Collect positive-class probabilities each val epoch, pick a threshold on the same scale,
+    and write confusion/summary stats into evaluator.state.metrics.
+    Adds guards to avoid locking into degenerate thresholds when pos_rate is 0 or 1.
+    """
+    buf = {"scores": [], "targets": []}
+    state = {"last_good_thr": 0.5}  # retains last non-degenerate threshold in (0,1)
+
+    @evaluator.on(Events.EPOCH_STARTED)
+    def _reset_buffers(_):
+        buf["scores"].clear()
+        buf["targets"].clear()
+
+    @evaluator.on(Events.ITERATION_COMPLETED)
+    def _collect(engine):
+        out = engine.state.output
+        if isinstance(out, (tuple, list)) and len(out) >= 2:
+            logits, y_true = out[0], out[1]
+        elif isinstance(out, dict) and "y_pred" in out and "y" in out:
+            logits, y_true = out["y_pred"], out["y"]
+        else:
+            return
+        if logits is None:
+            return
+        to_pos_prob = getattr(engine.state, "to_pos_prob", None)
+        if to_pos_prob is None:
+            return
+        prob = to_pos_prob(logits)
+        buf["scores"].append(prob.detach().reshape(-1))
+        buf["targets"].append(torch.as_tensor(y_true).detach().reshape(-1).long())
+
+    @evaluator.on(Events.EPOCH_COMPLETED)
+    def _choose_threshold(engine: Engine):
+        if not buf["scores"]:
+            return
+        probs = torch.cat(buf["scores"], dim=0).clamp(0.0, 1.0)
+        y_true = torch.cat(buf["targets"], dim=0).long()
+
+        thr, stats = _best_threshold_from_probs(probs, y_true, mode=mode)
+        y_hat = (probs >= thr).long()
+        pos_rate = float(y_hat.float().mean().item())
+
+        # Basic sanity summaries
+        m = engine.state.metrics
+        m["score_mean"] = float(probs.mean().item())
+        m["score_std"] = float(probs.std(unbiased=False).item())
+        m["gt_pos_rate"] = float((y_true == 1).float().mean().item())
+
+        # Compute decisions at proposed thr
+        y_hat = (probs >= thr).long()
+        pos_rate = float(y_hat.float().mean().item())
+
+        # Degenerate guard: if all-positive or all-negative decisions, keep last good threshold
+        if pos_rate in (0.0, 1.0):
+            thr = float(state["last_good_thr"])
+            y_hat = (probs >= thr).long()
+            pos_rate = float(y_hat.float().mean().item())
+        else:
+            state["last_good_thr"] = float(thr)
+
+        # recompute confusion matrix at chosen thr for consistency
+        tp = int(((y_hat == 1) & (y_true == 1)).sum())
+        tn = int(((y_hat == 0) & (y_true == 0)).sum())
+        fp = int(((y_hat == 1) & (y_true == 0)).sum())
+        fn = int(((y_hat == 0) & (y_true == 1)).sum())
+
+        prec = tp / max(tp + fp, 1)
+        rec1 = tp / max(tp + fn, 1)
+        rec0 = tn / max(tn + fp, 1)
+        bal_acc = 0.5 * (rec0 + rec1)
+        f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
+
+        m["threshold"] = float(thr)
+        m["cls_confmat"] = [[tn, fp], [fn, tp]]
+        m["cls_confmat_00"] = float(tn)
+        m["cls_confmat_01"] = float(fp)
+        m["cls_confmat_10"] = float(fn)
+        m["cls_confmat_11"] = float(tp)
+        m["prec"] = float(prec)
+        m["recall"] = float(rec1)
+        m["recall_0"] = float(rec0)
+        m["recall_1"] = float(rec1)
+        m["bal_acc"] = float(bal_acc)
+        m["f1"] = float(f1)
+        m["pos_rate"] = float(pos_rate)
+
+        if logger is not None:
+            try:
+                logger("val/threshold", float(thr))
+            except Exception:
+                pass
+
+
 def attach_pos_score_debug_once(
     evaluator: Engine,
     *,
@@ -891,6 +1058,97 @@ def attach_pos_score_debug_once(
             pass
 
 
+def attach_val_stack(
+    *,
+    evaluator: Engine,
+    num_classes: int,
+    ppcfg: PosProbCfg,
+    # classification controls
+    has_cls: bool = True,
+    cls_decision: str = "threshold",
+    threshold_getter: Callable[[], float] | float = 0.5,
+    positive_index: int = 1,
+    # segmentation controls
+    has_seg: bool = False,
+    seg_num_classes: Optional[int] = None,
+    seg_threshold: Optional[float] = None,
+    seg_ignore_index: Optional[int] = None,
+    # calibration / debug
+    enable_threshold_search: bool = True,
+    calibration_method: str = "bal_acc",  # or "f1"
+    enable_pos_score_debug_once: bool = False,
+    pos_debug_bins: int = 20,
+    pos_debug_tag: str = "debug_pos",
+    device: Optional[torch.device] = None,
+) -> Dict[str, Any]:
+    """
+    Compose the 'val stack' on a single evaluator:
+      - attach classification metrics via unified PosProbCfg
+      - optionally attach segmentation metrics
+      - optionally attach one-shot pos-score debug
+      - optionally attach per-epoch threshold search
+    Returns a dict of metrics that were attached (for reference).
+    """
+    attached: Dict[str, Any] = {}
+    # Resolve a concrete device for Ignite metrics
+    dev = device or getattr(evaluator.state, "device", None) or torch.device("cpu")
+
+    # classification metrics
+    if has_cls:
+        # normalize threshold_getter to a callable
+        if not callable(threshold_getter):
+            _thr_val = float(threshold_getter)
+            threshold_getter = lambda: _thr_val  # noqa: E731
+
+        cls_metrics = make_cls_val_metrics(
+            num_classes=int(num_classes),
+            ppcfg=ppcfg,  # unified scorer
+            positive_index=int(positive_index),
+            cls_decision=str(cls_decision),
+            cls_threshold=threshold_getter,
+            device=dev,
+        )
+        for k, m in cls_metrics.items():
+            m.attach(evaluator, k)
+        attached.update(cls_metrics)
+
+    # segmentation metrics
+    if has_seg:
+        try:
+            seg_nc = int(seg_num_classes) if seg_num_classes is not None else int(num_classes)
+            seg_thr = float(seg_threshold) if seg_threshold is not None else 0.5
+            seg_metrics = make_seg_val_metrics(
+                num_classes=seg_nc,
+                threshold=seg_thr,
+                ignore_index=seg_ignore_index,
+            )
+            # namespace seg/* to avoid key collisions
+            for k, m in seg_metrics.items():
+                m.attach(evaluator, f"seg/{k}")
+            attached.update({f"seg/{k}": v for k, v in seg_metrics.items()})
+        except Exception:
+            pass
+
+    # optional one-shot positive-score debug
+    if enable_pos_score_debug_once:
+        attach_pos_score_debug_once(
+            evaluator=evaluator,
+            positive_index=int(positive_index),
+            bins=int(pos_debug_bins),
+            tag=str(pos_debug_tag),
+        )
+
+    # optional per-epoch threshold search (writes summaries into evaluator.state.metrics)
+    if enable_threshold_search and has_cls:
+        attach_val_threshold_search(
+            evaluator=evaluator,
+            mode=str(calibration_method),
+            positive_index=int(positive_index),
+        )
+
+    return attached
+
+
 def _make_score_fn(metric_key: str, mode: str = "max"):
     sign = 1.0 if str(mode).lower() == "max" else -1.0
 
@@ -984,162 +1242,6 @@ def attach_best_checkpoint(
     evaluator.add_event_handler(Events.COMPLETED, checkpoint)
 
 
-def _best_threshold_from_probs(p: torch.Tensor, y_true: torch.Tensor, mode: str = "bal_acc") -> tuple[float, dict]:
-    """
-    p: (N,) positive-class probabilities in [0,1]
-    y_true: (N,) {0,1}
-    Returns (threshold, stats_dict)
-    """
-    with torch.no_grad():
-        p = p.detach().float().clamp_(0.0, 1.0).view(-1)     # keep device, in-place clamp
-        y = y_true.detach().long().view(-1).to(p.device)
-        # candidate thresholds: unique preds + endpoints
-        # stay on the same device; quantile works on CUDA too
-        cand = torch.quantile(p, torch.linspace(0, 1, 101, device=p.device)).unique()
-
-        best_thr, best_score, best_stats = 0.5, -1.0, {}
-        for thr in cand:
-            y_hat = (p >= thr).long()
-            tp = int(((y_hat == 1) & (y == 1)).sum())
-            tn = int(((y_hat == 0) & (y == 0)).sum())
-            fp = int(((y_hat == 1) & (y == 0)).sum())
-            fn = int(((y_hat == 0) & (y == 1)).sum())
-
-            prec = tp / max(tp + fp, 1)
-            rec1 = tp / max(tp + fn, 1)   # recall for class 1
-            rec0 = tn / max(tn + fp, 1)   # recall for class 0
-            bal_acc = 0.5 * (rec0 + rec1)
-            f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
-            pos_rate = (tp + fp) / max(len(y), 1)
-
-            score = bal_acc if mode == "bal_acc" else f1
-            if score > best_score:
-                best_score = float(score)
-                best_thr = float(thr)
-                best_stats = dict(
-                    tp=tp, tn=tn, fp=fp, fn=fn,
-                    prec=float(prec), rec=float(rec1),
-                    rec_0=float(rec0), rec_1=float(rec1),
-                    bal_acc=float(bal_acc), f1=float(f1),
-                    pos_rate=float(pos_rate),
-                )
-
-        return best_thr, best_stats
-
-
-def attach_val_threshold_search(
-    *,
-    evaluator: Engine,
-    mode: str = "bal_acc",   # "bal_acc" or "f1"
-    logger=None,
-    positive_index: int = 1,
-    score_kwargs: Optional[Dict[str, Any]] = None,
-):
-    """
-    Collect positive-class probabilities each val epoch, pick a threshold on the same scale,
-    and write confusion/summary stats into evaluator.state.metrics.
-    Adds guards to avoid locking into degenerate thresholds when pos_rate is 0 or 1.
-    """
-    buf = {"scores": [], "targets": []}
-    state = {"last_good_thr": 0.5}  # retains last non-degenerate threshold in (0,1)
-
-    @evaluator.on(Events.EPOCH_STARTED)
-    def _reset_buffers(_):
-        buf["scores"].clear()
-        buf["targets"].clear()
-
-    @evaluator.on(Events.ITERATION_COMPLETED)
-    def _collect(engine):
-        out = engine.state.output
-        if isinstance(out, (tuple, list)) and len(out) >= 2:
-            logits, y_true = out[0], out[1]
-        elif isinstance(out, dict) and "y_pred" in out and "y" in out:
-            logits, y_true = out["y_pred"], out["y"]
-        else:
-            return
-        if logits is None:
-            return
-        to_pos_prob = getattr(engine.state, "to_pos_prob", None)
-        if to_pos_prob is None:
-            return
-        prob = to_pos_prob(logits)
-        buf["scores"].append(prob.detach().reshape(-1))
-        buf["targets"].append(torch.as_tensor(y_true).detach().reshape(-1).long())
-
-        # # Architecture-aware: pass cfg-driven kwargs straight through.
-        # prob = positive_score_from_logits(
-        #     logits,
-        #     positive_index=int(positive_index),
-        #     **(score_kwargs or {}),
-        # )
-        # buf["scores"].append(prob.detach().reshape(-1))
-        # buf["targets"].append(torch.as_tensor(y_true).detach().reshape(-1).long())
-
-    @evaluator.on(Events.EPOCH_COMPLETED)
-    def _choose_threshold(engine: Engine):
-        if not buf["scores"]:
-            return
-        probs = torch.cat(buf["scores"], dim=0).clamp(0.0, 1.0)
-        y_true = torch.cat(buf["targets"], dim=0).long()
-
-        thr, stats = _best_threshold_from_probs(probs, y_true, mode=mode)
-        y_hat = (probs >= thr).long()
-        pos_rate = float(y_hat.float().mean().item())
-
-        # thr, stats = _best_threshold_from_probs(probs, y_true, mode=mode)
-        # pos_rate = float(stats["pos_rate"])
-
-        # Basic sanity summaries
-        m = engine.state.metrics
-        m["score_mean"] = float(probs.mean().item())
-        m["score_std"] = float(probs.std(unbiased=False).item())
-        m["gt_pos_rate"] = float((y_true == 1).float().mean().item())
-
-        # Compute decisions at proposed thr
-        y_hat = (probs >= thr).long()
-        pos_rate = float(y_hat.float().mean().item())
-
-        # Degenerate guard: if all-positive or all-negative decisions, keep last good threshold
-        if pos_rate in (0.0, 1.0):
-            thr = float(state["last_good_thr"])
-            y_hat = (probs >= thr).long()
-            pos_rate = float(y_hat.float().mean().item())
-        else:
-            state["last_good_thr"] = float(thr)
-
-        # recompute confusion matrix at chosen thr for consistency
-        tp = int(((y_hat == 1) & (y_true == 1)).sum())
-        tn = int(((y_hat == 0) & (y_true == 0)).sum())
-        fp = int(((y_hat == 1) & (y_true == 0)).sum())
-        fn = int(((y_hat == 0) & (y_true == 1)).sum())
-
-        prec = tp / max(tp + fp, 1)
-        rec1 = tp / max(tp + fn, 1)
-        rec0 = tn / max(tn + fp, 1)
-        bal_acc = 0.5 * (rec0 + rec1)
-        f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
-
-        m["threshold"] = float(thr)
-        m["cls_confmat"] = [[tn, fp], [fn, tp]]
-        m["cls_confmat_00"] = float(tn)
-        m["cls_confmat_01"] = float(fp)
-        m["cls_confmat_10"] = float(fn)
-        m["cls_confmat_11"] = float(tp)
-        m["prec"] = float(prec)
-        m["recall"] = float(rec1)
-        m["recall_0"] = float(rec0)
-        m["recall_1"] = float(rec1)
-        m["bal_acc"] = float(bal_acc)
-        m["f1"] = float(f1)
-        m["pos_rate"] = float(pos_rate)
-
-        if logger is not None:
-            try:
-                logger("val/threshold", float(thr))
-            except Exception:
-                pass
-
-
 def maybe_update_best(engine: Engine, *, watch_metric: str, mode: str, state: dict) -> bool:
     """
     Update state['best'] with a finite float from engine.state.metrics[watch_metric].
@@ -1164,6 +1266,7 @@ __all__ = [
     "attach_lr_scheduling",
     "attach_pos_score_debug_once",
     "attach_val_threshold_search",
+    "attach_val_stack",
     "attach_early_stopping",
     "attach_best_checkpoint",
     "build_trainer",

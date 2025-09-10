@@ -17,7 +17,6 @@ from metrics_utils import (
     promote_vec,
     get_mask_from_batch,
     seg_confmat_output_transform,
-    # cls_output_transform,
     make_std_cls_metrics_with_cal_thr
 )
 
@@ -395,10 +394,6 @@ class TwoPassEvaluator:
                     return False
                 # clamp to global bounds
                 t_try = float(min(self.thr_max, max(self.thr_min, t_try)))
-                # # basic sanity on pos_rate
-                # pos_rate = float((scores >= t_try).mean())
-                # if not (self.thr_posrate_min <= pos_rate <= self.thr_posrate_max):
-                #     return False
                 # basic sanity on pos_rate envelope (absolute bounds)
                 pr = _pos_rate(scores, t_try)
                 if not (self.thr_posrate_min <= pr <= self.thr_posrate_max):
@@ -415,7 +410,6 @@ class TwoPassEvaluator:
                     if tp < self.thr_min_tp or tn < self.thr_min_tn:
                         return False
                 # max jump (delta) vs last accepted
-                # max_delta = float(getattr(getattr(self.calibrator, "cfg", None), "cal_max_delta", 1.0))
                 max_delta = self._resolve_max_delta()
                 if self.last_threshold is not None and abs(t_try - float(self.last_threshold)) > max_delta:
                     return False
@@ -425,20 +419,6 @@ class TwoPassEvaluator:
             # Finalize exactly once, then write the box once
             accepted = _accept(t_cand)
             t_final = float(min(self.thr_max, max(self.thr_min, t_cand))) if accepted else float(t_seed)
-
-            # decision-health (optional, authoritative projection)
-            # If enabled and base_rate is known, keep pos_rate near base ± tolerance by projecting the threshold.
-            # if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
-            #     # source for tolerance: explicit override > calibrator.cfg > default
-            #     rate_tol = (
-            #         self.rate_tol_override
-            #         if getattr(self, "rate_tol_override", None) is not None
-            #         else getattr(getattr(self.calibrator, "cfg", None), "rate_tolerance", 0.10)
-            #     )
-            #     if rate_tol is None:
-            #         rate_tol = 0.10
-
-            #     pr_now = _pos_rate(scores, t_final)
 
             if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
                 rate_tol = self._resolve_rate_tolerance()
@@ -493,21 +473,6 @@ class TwoPassEvaluator:
                 if not getattr(self, "_watchdog_active", False):
                     logger.info("[decision health] pos=%.4f base=%.4f Δ=%.4f tol=%.4f bad_now=%d",
                                 pos_rate, base_rate, delta, rate_tol, self.bad_count)
-
-            # if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
-            #     pos_rate = float(cls_metrics.get("pos_rate", 0.0))
-            #     rate_tol = self.rate_tol_override
-            #     if rate_tol is None and self.calibrator is not None:
-            #         rate_tol = getattr(self.calibrator.cfg, "rate_tol", 0.10)
-            #     if rate_tol is not None:
-            #         delta = abs(pos_rate - base_rate)
-            #         was_bad = (delta > rate_tol)
-            #         self.bad_count = self.bad_count + 1 if was_bad else 0
-            #         if not getattr(self, "_watchdog_active", False):
-            #             logger.info(
-            #                 "[decision health] pos=%.4f base=%.4f Δ=%.4f bad_prev=%d bad_now=%d",
-            #                 pos_rate, base_rate, delta, max(0, self.bad_count - 1), self.bad_count
-            #             )
 
         # Segmentation
         if self.has_seg:

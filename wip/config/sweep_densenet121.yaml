@@ -48,12 +48,12 @@ parameters:
   cal_auc_floor:      { values: [0.50, 0.55] }
 
   # Guardrails (authoritative acceptance layer)
-  thr_warmup_epochs: { values: [1, 2, 3] }         # distinct from cal_warmup if desired
+  thr_warmup_epochs: { values: [1, 2, 3] }  # distinct from cal_warmup if desired
   thr_min:           { value: 0.05 }
   thr_max:           { value: 0.95 }
-  thr_posrate_min:   { value: 0.05 }               # reject all-neg (≈0) and extreme envelopes
-  thr_posrate_max:   { value: 0.95 }               # reject all-pos (≈1)
-  thr_min_tp:        { values: [0, 5, 10] }        # optional count sanity
+  thr_posrate_min:   { value: 0.05 }  # reject all-neg (≈0) and extreme envelopes
+  thr_posrate_max:   { value: 0.95 }  # reject all-pos (≈1)
+  thr_min_tp:        { values: [0, 5, 10] }  # optional count sanity
   thr_min_tn:        { values: [0, 5] }
 
   # Decision-health (optional, enforced after acceptance)

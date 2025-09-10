@@ -23,12 +23,10 @@ from data_utils import build_dataloaders
 from model_registry import build_model, make_default_loss
 from engine_utils import (
     build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
-    get_label_indices_from_batch, build_evaluator, attach_best_checkpoint,
-    attach_val_threshold_search, attach_pos_score_debug_once,
+    get_label_indices_from_batch, build_evaluator, attach_best_checkpoint, attach_val_stack,
 )
 from evaluator_two_pass import make_two_pass_evaluator
 from calibration import build_calibrator
-from metrics_utils import make_cls_val_metrics, attach_classification_metrics
 from optim_factory import get_optimizer, make_scheduler
 from handlers import register_handlers, configure_wandb_step_semantics
 from constants import CHECKPOINT_DIR
@@ -282,6 +280,14 @@ def run(
     # loss (generic, uses class_counts for weights/pos_weight)
     loss_fn = make_default_loss(cfg, class_counts=cfg.get("class_counts"))
 
+    # Single source of truth for scores
+    ppcfg = PosProbCfg(
+        positive_index=int(cfg.get("positive_index", 1)),
+        binary_single_logit=bool(cfg.get("binary_single_logit", True)),
+        binary_bce_from_two_logits=bool(cfg.get("binary_bce_from_two_logits", False)),
+        mode=str(cfg.get("posprob_mode", "auto")),
+    )
+
     # engines
     trainer = build_trainer(
         device=device,
@@ -301,6 +307,7 @@ def run(
         prepare_batch=prepare_batch_std,
         metrics=None,
         include_seg=has_seg,
+        ppcfg=ppcfg,
     )
     # Seed the evaluator’s live threshold once
     std_evaluator.state.threshold = float(cfg.get("cls_threshold", 0.5))
@@ -309,11 +316,6 @@ def run(
     if bool(cfg.get("init_threshold_from_prior", False)):
         std_evaluator.state.threshold = float(pos_prior)
 
-    # Single source of truth for scores
-    ppcfg = PosProbCfg(
-        binary_single_logit=bool(cfg.get("binary_single_logit", True)),
-        positive_index=int(cfg.get("positive_index", 1)),
-    )
     # Make the score provider discoverable by helpers
     std_evaluator.state.score_fn = ppcfg
 
@@ -346,60 +348,28 @@ def run(
         fn, tp = int(cm[1, 0]), int(cm[1, 1])  # noqa unused
         return True, tn, tp
 
-    # Helper: current live decision threshold (single SoT)
+    # One-liner: compose the whole validation stack on std_evaluator
     def get_live_thr() -> float:
-        return float(getattr(std_evaluator.state, "threshold", 0.5))
+        return float(getattr(std_evaluator.state, "threshold", cfg.get("cls_threshold", 0.5)))
 
-    score_kwargs = {
-        "binary_single_logit": ppcfg.binary_single_logit,
-        "positive_index": ppcfg.positive_index,
-        # keep the legacy knob if search uses it in logits picking
-        "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
-    }
-
-    attach_val_threshold_search(
+    attach_val_stack(
         evaluator=std_evaluator,
-        mode=str(cfg.get("calibration_method", "bal_acc")),  # or "f1"
-        positive_index=ppcfg.positive_index,
-        score_kwargs=score_kwargs,
+        num_classes=int(cfg.get("num_classes", 2)),
+        ppcfg=ppcfg,
+        has_cls=has_cls,
+        cls_decision=str(cfg.get("cls_decision", "threshold")),
+        threshold_getter=get_live_thr,
+        positive_index=int(cfg.get("positive_index", 1)),
+        has_seg=has_seg and not bool(cfg.get("two_pass_val", False)),   # seg metrics here only when 2-pass is OFF
+        seg_num_classes=cfg.get("seg_num_classes"),
+        seg_threshold=cfg.get("seg_threshold"),
+        seg_ignore_index=cfg.get("seg_ignore_index"),
+        enable_threshold_search=True,
+        calibration_method=str(cfg.get("calibration_method", "bal_acc")),
+        enable_pos_score_debug_once=bool(cfg.get("debug_pos_once", False) or cfg.get("debug", False)),
+        pos_debug_bins=int(cfg.get("pos_hist_bins", 20)),
+        pos_debug_tag=str(cfg.get("pos_debug_tag", "debug_pos")),
     )
-
-    if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
-        attach_pos_score_debug_once(
-            evaluator=std_evaluator,
-            bins=int(cfg.get("pos_hist_bins", 20)),
-            tag=str(cfg.get("pos_debug_tag", "debug_pos")),
-            positive_index=ppcfg.positive_index,
-            score_kwargs=score_kwargs,
-        )
-
-    # Optionally compute per-epoch threshold & confusion stats for classification
-    if has_cls:
-        val_metrics = make_cls_val_metrics(
-            num_classes=int(cfg.get("num_classes", 2)),
-            decision=str(cfg.get("cls_decision", "threshold")),
-            threshold=get_live_thr,
-            positive_index=int(cfg.get("positive_index", 1)),
-            score_provider=ppcfg,
-        )
-        for k, m in val_metrics.items():
-            m.attach(std_evaluator, k)
-
-    # When we have segmentation but two-pass is disabled, attach seg metrics here
-    if has_seg and not bool(cfg.get("two_pass_val", False)):
-        try:
-            # Prefer project-local helper if it exists
-            from seg_eval import make_seg_val_metrics  # util, if present
-            seg_metrics = make_seg_val_metrics(
-                num_classes=int(cfg.get("num_classes", 2)),
-                threshold=float(cfg.get("seg_threshold", 0.5)),
-            )
-            # Keep a "seg/" namespace for clarity
-            for k, m in seg_metrics.items():
-                m.attach(std_evaluator, f"seg/{k}")
-        except Exception:
-            # Fallback: do nothing rather than crash; two-pass path will still merge seg metrics
-            pass
 
     # scheduler/watch setup
     two_pass_enabled = bool(cfg.get("two_pass_val", False))
@@ -428,15 +398,16 @@ def run(
             num_classes=int(cfg.get("num_classes", 2)),
             multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
             enable_decision_health=health_on,
-            score_provider=ppcfg,
+            # score_provider=ppcfg,
         )
         # give std evaluator the same probability mapping and threshold
-        attach_classification_metrics(
-            std_evaluator,
-            cfg,
-            thr_getter=lambda: float(two_pass._thr_box.value),  # single source of truth
-            score_provider=two_pass._score_provider,  # same prob mapping
-        )
+        # attach_classification_metrics(
+        #     std_evaluator,
+        #     cfg,
+        #     thr_getter=lambda: float(two_pass._thr_box.value),  # single source of truth
+        #     # score_provider=two_pass._score_provider,  # same prob mapping
+        #     ppcfg=ppcfg,
+        # )
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def _validate_and_log(engine):
@@ -728,3 +699,57 @@ if __name__ == "__main__":
 
         # Run training with explicit loaders & device
         run(cfg, train_loader, val_loader, test_loader, device)
+
+    # # current live decision threshold (single SoT)
+    # def get_live_thr() -> float:
+    #     return float(getattr(std_evaluator.state, "threshold", 0.5))
+
+    # score_kwargs = {
+    #     "binary_single_logit": ppcfg.binary_single_logit,
+    #     "positive_index": ppcfg.positive_index,
+    #     "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
+    # }
+
+    # attach_val_threshold_search(
+    #     evaluator=std_evaluator,
+    #     mode=str(cfg.get("calibration_method", "bal_acc")),  # or "f1"
+    #     positive_index=ppcfg.positive_index,
+    #     score_kwargs=score_kwargs,
+    # )
+
+    # if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
+    #     attach_pos_score_debug_once(
+    #         evaluator=std_evaluator,
+    #         bins=int(cfg.get("pos_hist_bins", 20)),
+    #         tag=str(cfg.get("pos_debug_tag", "debug_pos")),
+    #         positive_index=ppcfg.positive_index,
+    #         score_kwargs=score_kwargs,
+    #     )
+
+    # # Optionally compute per-epoch threshold & confusion stats for classification
+    # if has_cls:
+    #     val_metrics = make_cls_val_metrics(
+    #         num_classes=int(cfg.get("num_classes", 2)),
+    #         decision=str(cfg.get("cls_decision", "threshold")),
+    #         threshold=get_live_thr,
+    #         positive_index=int(cfg.get("positive_index", 1)),
+    #         score_provider=ppcfg,
+    #     )
+    #     for k, m in val_metrics.items():
+    #         m.attach(std_evaluator, k)
+
+    # # When we have segmentation but two-pass is disabled, attach seg metrics here
+    # if has_seg and not bool(cfg.get("two_pass_val", False)):
+    #     try:
+    #         # Prefer project-local helper if it exists
+    #         from seg_eval import make_seg_val_metrics  # util, if present
+    #         seg_metrics = make_seg_val_metrics(
+    #             num_classes=int(cfg.get("num_classes", 2)),
+    #             threshold=float(cfg.get("seg_threshold", 0.5)),
+    #         )
+    #         # Keep a "seg/" namespace for clarity
+    #         for k, m in seg_metrics.items():
+    #             m.attach(std_evaluator, f"seg/{k}")
+    #     except Exception:
+    #         # Fallback: do nothing rather than crash; two-pass path will still merge seg metrics
+    #         pass
