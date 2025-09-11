@@ -2,12 +2,13 @@
 from __future__ import annotations
 import logging
 logger = logging.getLogger(__name__)
-
+from dataclasses import dataclass
+import numpy as np
 import math
 import torch
 from enum import Enum
+from types import SimpleNamespace
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union, Mapping
-
 from ignite.handlers import EarlyStopping, Checkpoint, DiskSaver
 from monai.engines import SupervisedTrainer
 from ignite.engine import Events, Engine
@@ -862,6 +863,202 @@ def _best_threshold_from_probs(p: torch.Tensor, y_true: torch.Tensor, mode: str 
         return best_thr, best_stats
 
 
+# threshold calibration helpers (logits-aware)
+@dataclass
+class CalCfg:
+    thr_min: float = 0.05
+    thr_max: float = 0.95
+    thr_posrate_min: float = 0.05
+    thr_posrate_max: float = 0.95
+    thr_min_tp: int = 0
+    thr_min_tn: int = 0
+    cal_auc_floor: float = 0.50
+    cal_warmup_epochs: int = 1
+    cal_max_delta: float = 0.10
+    # low-spread guard
+    cal_min_std: float = 1e-4
+    cal_min_iqr: float = 1e-3
+    # smoothing & stability
+    ema_beta: float = 0.3            # 0..1, fraction of movement applied this epoch
+    thr_hysteresis: float = 0.02     # inner pos-rate corridor margin
+
+
+def _safe_auc_np(labels: np.ndarray, scores: np.ndarray) -> float:
+    y = labels.astype(np.int64)
+    n_pos = int((y == 1).sum())
+    n_neg = int((y == 0).sum())
+    if n_pos == 0 or n_neg == 0:
+        return float("nan")
+    try:
+        from sklearn.metrics import roc_auc_score
+        return float(roc_auc_score(y, scores))
+    except Exception:
+        # rank-based fallback (ties handled)
+        order = np.argsort(scores)
+        s_sorted = scores[order]
+        ranks = np.empty_like(s_sorted, dtype=np.float64)
+        i = 0
+        while i < len(s_sorted):
+            j = i
+            while j + 1 < len(s_sorted) and s_sorted[j + 1] == s_sorted[i]:
+                j += 1
+            ranks[i:j + 1] = (i + j + 2) / 2.0
+            i = j + 1
+        r = np.empty_like(scores, dtype=np.float64)
+        r[order] = ranks
+        sum_pos = float(r[y == 1].sum())
+        return float((sum_pos - n_pos * (n_pos + 1) / 2.0) / (n_pos * n_neg))
+
+
+def _bounded_step(old: float, new: float, *, max_delta: float, lo: float, hi: float) -> float:
+    step = np.clip(new - old, -float(max_delta), float(max_delta))
+    return float(np.clip(old + step, float(lo), float(hi)))
+
+
+def _rate_match_threshold(probs: np.ndarray, target_rate: float) -> float:
+    q = float(np.clip(1.0 - target_rate, 0.0, 1.0))
+    return float(np.quantile(probs, q))
+
+
+def _spread(x: np.ndarray) -> tuple[float, float]:
+    if x.size == 0:
+        return 0.0, 0.0
+    std = float(np.std(x))
+    q10 = float(np.quantile(x, 0.10))
+    q90 = float(np.quantile(x, 0.90))
+    return std, (q90 - q10)
+
+
+def pick_threshold_from_logits(
+    *,
+    logits: torch.Tensor,
+    labels: torch.Tensor,
+    prev_thr: float,
+    epoch: int,
+    cfg: CalCfg,
+    to_pos_prob: callable,           # e.g., evaluator.state.to_pos_prob
+    base_rate: float | None = None,  # optional
+    mode: str = "bal_acc",           # or "f1"
+) -> tuple[float, dict]:
+    """
+    Returns (new_threshold, stats dict). Computes on logits -> probs inside.
+    Applies spread guards, pos-rate envelope, AUC floor, min TP/TN, and bounded movement.
+    """
+    # logits -> probs, labels -> np
+    with torch.no_grad():
+        p = to_pos_prob(logits).detach().reshape(-1).clamp(0, 1).cpu().numpy()
+        y = labels.detach().reshape(-1).long().cpu().numpy()
+
+    n = p.size
+    stats_out: dict = {"n": int(n)}
+    if n == 0:
+        return float(prev_thr), stats_out
+
+    # spread guard
+    std, iqr = _spread(p)
+    stats_out["spread_std"] = std
+    stats_out["spread_iqr"] = iqr
+
+    # degenerate/flat probs → soft pos-rate clamp into envelope using current distribution
+    if std < cfg.cal_min_std and iqr < cfg.cal_min_iqr:
+        pos_rate_prev = float((p >= prev_thr).mean())
+        # if outside envelope, set quantile threshold to project inside bounds
+        if pos_rate_prev < cfg.thr_posrate_min or pos_rate_prev > cfg.thr_posrate_max:
+            target = cfg.thr_posrate_min if pos_rate_prev < cfg.thr_posrate_min else cfg.thr_posrate_max
+            thr_star = _rate_match_threshold(p, target)
+            thr_star = _bounded_step(prev_thr, thr_star, max_delta=cfg.cal_max_delta, lo=cfg.thr_min, hi=cfg.thr_max)
+            stats_out.update({"reason": "low_spread_clamp", "pos_rate_prev": pos_rate_prev, "thr_star": float(thr_star)})
+            return float(thr_star), stats_out
+        # already in bounds: keep previous
+        stats_out.update({"reason": "low_spread_keep", "pos_rate_prev": pos_rate_prev})
+        return float(prev_thr), stats_out
+
+    # candidate search on probs: quantile grid (101 pts)
+    qs = np.unique(np.quantile(p, np.linspace(0, 1, 101)))
+    best_thr, best_score = prev_thr, -1.0
+    best = {}
+
+    for t in qs:
+        y_hat = (p >= t).astype(np.int64)
+        tp = int(((y_hat == 1) & (y == 1)).sum())
+        tn = int(((y_hat == 0) & (y == 0)).sum())
+        fp = int(((y_hat == 1) & (y == 0)).sum())
+        fn = int(((y_hat == 0) & (y == 1)).sum())
+        prec = tp / max(tp + fp, 1)
+        rec1 = tp / max(tp + fn, 1)
+        rec0 = tn / max(tn + fp, 1)
+        bal_acc = 0.5 * (rec0 + rec1)
+        f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
+        score = bal_acc if mode == "bal_acc" else f1
+        if score > best_score:
+            best_score = score
+            best_thr = float(t)
+            best = dict(tp=tp, tn=tn, fp=fp, fn=fn, prec=prec, rec=rec1, rec_0=rec0, rec_1=rec1,
+                        bal_acc=bal_acc, f1=f1, pos_rate=float((y_hat == 1).mean()))
+
+    # guardrails
+    # 1) warmup
+    if epoch < int(cfg.cal_warmup_epochs):
+        stats_out.update({"reason": "warmup", "cand": best_thr})
+        return float(prev_thr), stats_out
+
+    # 2) envelope clamp
+    pr = float((p >= best_thr).mean())
+    if pr < cfg.thr_posrate_min or pr > cfg.thr_posrate_max:
+        stats_out.update({"reason": "posrate_envelope_reject", "cand": best_thr, "pos_rate": pr})
+        return float(prev_thr), stats_out
+
+    # 3) AUC floor
+    auc_val = _safe_auc_np(y, p)
+    stats_out["auc"] = auc_val
+    if not (isinstance(auc_val, float) and np.isfinite(auc_val) and auc_val >= cfg.cal_auc_floor):
+        stats_out.update({"reason": "auc_floor_reject", "cand": best_thr})
+        return float(prev_thr), stats_out
+
+    # 4) min counts
+    if cfg.thr_min_tp > 0 or cfg.thr_min_tn > 0:
+        y_hat = (p >= best_thr).astype(np.int64)
+        tp = int(((y == 1) & (y_hat == 1)).sum())
+        tn = int(((y == 0) & (y_hat == 0)).sum())
+        if tp < cfg.thr_min_tp or tn < cfg.thr_min_tn:
+            stats_out.update({"reason": "min_counts_reject", "cand": best_thr, "tp": tp, "tn": tn})
+            return float(prev_thr), stats_out
+
+    # 5) bounded movement and global bounds
+    thr_clamped = float(np.clip(best_thr, cfg.thr_min, cfg.thr_max))
+    new_thr = _bounded_step(prev_thr, thr_clamped, max_delta=cfg.cal_max_delta, lo=cfg.thr_min, hi=cfg.thr_max)
+
+    # 6) optional rate match to base_rate (then bounded)
+    if base_rate is not None:
+        pr_now = float((p >= new_thr).mean())
+        # if too far from base, nudge toward rate-matched
+        rate_tol = getattr(cfg, "cal_rate_tolerance", 0.15)
+        if abs(pr_now - float(base_rate)) > rate_tol:
+            t_dm = _rate_match_threshold(p, float(base_rate))
+            new_thr = _bounded_step(new_thr, t_dm, max_delta=cfg.cal_max_delta, lo=cfg.thr_min, hi=cfg.thr_max)
+            stats_out["rate_match_applied"] = True
+
+    # 7) hysteresis on decision rate (dampen flips when comfortably inside corridor)
+    pmin, pmax = float(cfg.thr_posrate_min), float(cfg.thr_posrate_max)
+    margin = float(getattr(cfg, "thr_hysteresis", 0.02))
+    pos_rate_candidate = float((p >= new_thr).mean())
+    if (pmin + margin) <= pos_rate_candidate <= (pmax - margin):
+        # Within inner corridor → keep previous threshold (no change)
+        stats_out["hysteresis_hold"] = True
+        new_thr = prev_thr
+
+    # 8) EMA smoothing (apply a fraction of the movement)
+    beta = float(getattr(cfg, "ema_beta", 0.3))
+    if beta > 0.0:
+        new_thr = float(prev_thr + beta * (new_thr - prev_thr))
+
+    # 9) final clamp
+    new_thr = float(np.clip(new_thr, cfg.thr_min, cfg.thr_max))
+
+    stats_out.update({"reason": "accepted", "cand": best_thr, "final": new_thr, **best})
+    return float(new_thr), stats_out
+
+
 def attach_val_threshold_search(
     *,
     evaluator: Engine,
@@ -876,7 +1073,7 @@ def attach_val_threshold_search(
     Adds guards to avoid locking into degenerate thresholds when pos_rate is 0 or 1.
     """
     buf = {"scores": [], "targets": []}
-    state = {"last_good_thr": 0.5}  # retains last non-degenerate threshold in (0,1)
+    state = {"last_good_thr": 0.5}  # noqa F841 retains last non-degenerate threshold in (0,1)
 
     @evaluator.on(Events.EPOCH_STARTED)
     def _reset_buffers(_):
@@ -897,70 +1094,121 @@ def attach_val_threshold_search(
         to_pos_prob = getattr(engine.state, "to_pos_prob", None)
         if to_pos_prob is None:
             return
-        prob = to_pos_prob(logits)
-        buf["scores"].append(prob.detach().reshape(-1))
-        buf["targets"].append(torch.as_tensor(y_true).detach().reshape(-1).long())
+        # prob = to_pos_prob(logits)
+        # buf["scores"].append(prob.detach().reshape(-1))
+        # buf["targets"].append(torch.as_tensor(y_true).detach().reshape(-1).long())
+        p = to_pos_prob(logits).detach().reshape(-1).clamp_(0.0, 1.0).cpu()  # <-- .cpu()
+        y = torch.as_tensor(y_true).detach().reshape(-1).long().cpu()        # <-- .cpu()
+        buf["scores"].append(p)
+        buf["targets"].append(y)
 
     @evaluator.on(Events.EPOCH_COMPLETED)
     def _choose_threshold(engine: Engine):
         if not buf["scores"]:
             return
+
+        # We already stored CPU probs & labels in _collect — switch to logits-first:
+        # If we prefer to keep _collect as logits, change that collection and adapt here.
         probs = torch.cat(buf["scores"], dim=0).clamp(0.0, 1.0)
         y_true = torch.cat(buf["targets"], dim=0).long()
 
-        thr, stats = _best_threshold_from_probs(probs, y_true, mode=mode)
-        y_hat = (probs >= thr).long()
-        pos_rate = float(y_hat.float().mean().item())
+        # Reconstruct logits-like via logit(p) for the helper, so the same path is exercised.
+        # (Or, better: collect logits in _collect and skip this inversion.)
+        eps = 1e-6
+        p_np = probs.numpy()
+        logits_np = np.log(np.clip(p_np, eps, 1 - eps)) - np.log(np.clip(1 - p_np, eps, 1 - eps))
+        logits = torch.from_numpy(logits_np)
+        labels = y_true
 
-        # Basic sanity summaries
+        # prev = float(getattr(evaluator.state, "threshold", 0.5))
+        prev = float(engine.state.threshold) if hasattr(engine.state, "threshold") else float(getattr(engine.state, "cls_threshold", 0.5))
+        # Write it back once so future epochs never fall back to cfg
+        engine.state.threshold = prev
+        # Single source of truth scorer
+        to_pos_prob = getattr(engine.state, "to_pos_prob", None)
+        if to_pos_prob is None:
+            return
+
+        # Pull config knobs if attached on engine.state or via a namespaced object
+        cfg_obj = SimpleNamespace(
+            thr_min=getattr(engine.state, "thr_min", 0.05),
+            thr_max=getattr(engine.state, "thr_max", 0.95),
+            thr_posrate_min=getattr(engine.state, "thr_posrate_min", 0.05),
+            thr_posrate_max=getattr(engine.state, "thr_posrate_max", 0.95),
+            thr_min_tp=getattr(engine.state, "thr_min_tp", 0),
+            thr_min_tn=getattr(engine.state, "thr_min_tn", 0),
+            cal_auc_floor=getattr(engine.state, "cal_auc_floor", 0.50),
+            cal_warmup_epochs=getattr(engine.state, "thr_warmup_epochs", 1),
+            cal_max_delta=getattr(engine.state, "cal_max_delta", 0.10),
+            cal_min_std=getattr(engine.state, "cal_min_std", 1e-4),
+            cal_min_iqr=getattr(engine.state, "cal_min_iqr", 1e-3),
+            cal_rate_tolerance=getattr(engine.state, "cal_rate_tolerance", 0.15),
+            ema_beta=getattr(engine.state, "cal_ema_beta", 0.3),
+            thr_hysteresis=getattr(engine.state, "thr_hysteresis", 0.02),
+        )
+        # calcfg = CalCfg(**cfg_obj.__dict__)
+        import inspect
+        # 1) Only pass fields CalCfg actually accepts
+        _allowed = set(inspect.signature(CalCfg).parameters.keys())
+        _d = dict(cfg_obj.__dict__)  # shallow copy
+        # 2) Backward-compat: map legacy keys -> current field names
+        #    Adjust this mapping to whatever CalCfg expects in codebase.
+        legacy_map = {
+            "cal_rate_tolerance": "rate_tolerance",   # or "rate_tol" if that's current name
+            "rate_tol_override": "rate_tolerance",     # let explicit override win
+            "cal_ema_beta": "ema_beta",
+        }
+        for src, dst in legacy_map.items():
+            if src in _d and dst not in _d:
+                _d[dst] = _d[src]
+        # 3) Drop any keys CalCfg doesn't take
+        _d = {k: v for k, v in _d.items() if k in _allowed}
+        calcfg = CalCfg(**_d)
+
+        # optional base rate (use ground-truth mean if not injected)
+        base_rate = float((labels.numpy() == 1).mean())
+
+        new_thr, s = pick_threshold_from_logits(
+            logits=logits,
+            labels=labels,
+            prev_thr=prev,
+            epoch=int(getattr(engine.state, "epoch", 0) or 0),
+            cfg=calcfg,
+            to_pos_prob=to_pos_prob,
+            base_rate=base_rate,
+            mode=str((score_kwargs or {}).get("mode", "bal_acc")),
+        )
+
+        # summaries
+        probs_final = to_pos_prob(torch.from_numpy(logits_np)).numpy()  # for consistent metrics dump
+        y_hat = (probs_final >= new_thr).astype(np.int64)
+        tp = int(((labels.numpy() == 1) & (y_hat == 1)).sum())
+        tn = int(((labels.numpy() == 0) & (y_hat == 0)).sum())
+        fp = int(((labels.numpy() == 0) & (y_hat == 1)).sum())
+        fn = int(((labels.numpy() == 1) & (y_hat == 0)).sum())
+        pos_rate = float(y_hat.mean())
+
         m = engine.state.metrics
-        m["score_mean"] = float(probs.mean().item())
-        m["score_std"] = float(probs.std(unbiased=False).item())
-        m["gt_pos_rate"] = float((y_true == 1).float().mean().item())
+        m["score_mean"] = float(p_np.mean())
+        m["score_std"] = float(p_np.std())
+        m["gt_pos_rate"] = float((labels.numpy() == 1).mean())
 
-        # Compute decisions at proposed thr
-        y_hat = (probs >= thr).long()
-        pos_rate = float(y_hat.float().mean().item())
+        m["search_threshold"] = float(new_thr)
+        m["search_confmat"] = [[tn, fp], [fn, tp]]
+        m["search_confmat_00"] = float(tn)
+        m["search_confmat_01"] = float(fp)
+        m["search_confmat_10"] = float(fn)
+        m["search_confmat_11"] = float(tp)
+        m["search_pos_rate"] = float(pos_rate)
+        if "auc" in s:
+            m["search_auc"] = float(s["auc"])
 
-        # Degenerate guard: if all-positive or all-negative decisions, keep last good threshold
-        if pos_rate in (0.0, 1.0):
-            thr = float(state["last_good_thr"])
-            y_hat = (probs >= thr).long()
-            pos_rate = float(y_hat.float().mean().item())
-        else:
-            state["last_good_thr"] = float(thr)
-
-        # recompute confusion matrix at chosen thr for consistency
-        tp = int(((y_hat == 1) & (y_true == 1)).sum())
-        tn = int(((y_hat == 0) & (y_true == 0)).sum())
-        fp = int(((y_hat == 1) & (y_true == 0)).sum())
-        fn = int(((y_hat == 0) & (y_true == 1)).sum())
-
-        prec = tp / max(tp + fp, 1)
-        rec1 = tp / max(tp + fn, 1)
-        rec0 = tn / max(tn + fp, 1)
-        bal_acc = 0.5 * (rec0 + rec1)
-        f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
-
-        m["threshold"] = float(thr)
-        m["cls_confmat"] = [[tn, fp], [fn, tp]]
-        m["cls_confmat_00"] = float(tn)
-        m["cls_confmat_01"] = float(fp)
-        m["cls_confmat_10"] = float(fn)
-        m["cls_confmat_11"] = float(tp)
-        m["prec"] = float(prec)
-        m["recall"] = float(rec1)
-        m["recall_0"] = float(rec0)
-        m["recall_1"] = float(rec1)
-        m["bal_acc"] = float(bal_acc)
-        m["f1"] = float(f1)
-        m["pos_rate"] = float(pos_rate)
-
-        if logger is not None:
-            try:
-                logger("val/threshold", float(thr))
-            except Exception:
-                pass
+        evaluator.state.threshold = float(new_thr)
+        try:
+            if hasattr(evaluator, "trainer"):
+                evaluator.trainer.state.threshold = float(new_thr)
+        except Exception:
+            pass
 
 
 def attach_pos_score_debug_once(
@@ -1277,3 +1525,86 @@ __all__ = [
     "make_warmup_safe_score_fn",
     "maybe_update_best",
 ]
+
+# @evaluator.on(Events.EPOCH_COMPLETED)
+# def _choose_threshold(engine: Engine):
+#     if not buf["scores"]:
+#         return
+#     probs = torch.cat(buf["scores"], dim=0).clamp(0.0, 1.0)
+#     y_true = torch.cat(buf["targets"], dim=0).long()
+
+#     thr, stats = _best_threshold_from_probs(probs, y_true, mode=mode)
+#     y_hat = (probs >= thr).long()
+#     pos_rate = float(y_hat.float().mean().item())
+
+#     # Basic sanity summaries
+#     m = engine.state.metrics
+#     m["score_mean"] = float(probs.mean().item())
+#     m["score_std"] = float(probs.std(unbiased=False).item())
+#     m["gt_pos_rate"] = float((y_true == 1).float().mean().item())
+
+#     # Compute decisions at proposed thr
+#     y_hat = (probs >= thr).long()
+#     pos_rate = float(y_hat.float().mean().item())
+
+#     # Degenerate guard: if all-positive or all-negative decisions, keep last good threshold
+#     if pos_rate in (0.0, 1.0):
+#         thr = float(state["last_good_thr"])
+#         y_hat = (probs >= thr).long()
+#         pos_rate = float(y_hat.float().mean().item())
+#     else:
+#         state["last_good_thr"] = float(thr)
+
+#     # recompute confusion matrix at chosen thr for consistency
+#     tp = int(((y_hat == 1) & (y_true == 1)).sum())
+#     tn = int(((y_hat == 0) & (y_true == 0)).sum())
+#     fp = int(((y_hat == 1) & (y_true == 0)).sum())
+#     fn = int(((y_hat == 0) & (y_true == 1)).sum())
+
+#     prec = tp / max(tp + fp, 1)
+#     rec1 = tp / max(tp + fn, 1)
+#     rec0 = tn / max(tn + fp, 1)
+#     bal_acc = 0.5 * (rec0 + rec1)
+#     f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
+
+#     # m["threshold"] = float(thr)
+#     # m["cls_confmat"] = [[tn, fp], [fn, tp]]
+#     # m["cls_confmat_00"] = float(tn)
+#     # m["cls_confmat_01"] = float(fp)
+#     # m["cls_confmat_10"] = float(fn)
+#     # m["cls_confmat_11"] = float(tp)
+#     # m["prec"] = float(prec)
+#     # m["recall"] = float(rec1)
+#     # m["recall_0"] = float(rec0)
+#     # m["recall_1"] = float(rec1)
+#     # m["bal_acc"] = float(bal_acc)
+#     # m["f1"] = float(f1)
+#     # m["pos_rate"] = float(pos_rate)
+
+#     m["search_threshold"] = float(thr)
+#     m["search_confmat"] = [[tn, fp], [fn, tp]]
+#     m["search_confmat_00"] = float(tn)
+#     m["search_confmat_01"] = float(fp)
+#     m["search_confmat_10"] = float(fn)
+#     m["search_confmat_11"] = float(tp)
+#     m["search_prec"] = float(prec)
+#     m["search_recall"] = float(rec1)
+#     m["search_recall_0"] = float(rec0)
+#     m["search_recall_1"] = float(rec1)
+#     m["search_bal_acc"] = float(bal_acc)
+#     m["search_f1"] = float(f1)
+#     m["search_pos_rate"] = float(pos_rate)
+
+#     if logger is not None:
+#         try:
+#             logger("val/threshold", float(thr))
+#         except Exception:
+#             pass
+
+#     evaluator.state.threshold = float(thr)  # single SoT for val metrics
+#     # mirror to trainer so train-time decisions/loggers see it next epoch
+#     try:
+#         if hasattr(evaluator, "trainer"):
+#             evaluator.trainer.state.threshold = float(thr)
+#     except Exception:
+#         pass

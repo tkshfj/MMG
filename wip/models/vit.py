@@ -4,6 +4,7 @@ from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Tuple
 import torch
 import torch.nn as nn
 from monai.networks.nets import ViT
+from models.model_base import BaseModel
 
 logger = logging.getLogger(__name__)
 
@@ -29,7 +30,7 @@ def _normalize_img_size(
     )
 
 
-class ViTModel(nn.Module):
+class ViTModel(nn.Module, BaseModel):
     """
     MONAI ViT for classification, mirroring SimpleCNNModel:
       - __init__(cfg: Optional[Mapping], **kwargs)
@@ -159,8 +160,13 @@ class ViTModel(nn.Module):
                 logger.warning("Bias init skipped (class_counts=%s): %s", cc, e)
 
         # Keep a snapshot for downstream utilities
-        self._cfg = dict(cfg)
-        self._cfg.update({k: v for k, v in kwargs.items() if k not in self._cfg})
+        # self._cfg = dict(cfg)
+        # self._cfg.update({k: v for k, v in kwargs.items() if k not in self._cfg})
+        self.config = dict(cfg) if cfg is not None else {}
+        self.config.update({k: v for k, v in kwargs.items() if k not in self.config})
+        # self.config = dict(cfg) if cfg is not None else {}
+        # for k, v in (kwargs or {}).items():
+        #     self.config.setdefault(k, v)
 
     @staticmethod
     def _first_tensor(x):

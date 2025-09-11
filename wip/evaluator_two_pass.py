@@ -136,7 +136,9 @@ class TwoPassEvaluator:
         health_warmup: Optional[int] = None,
         enable_decision_health: bool = False,
         score_provider: PosProbCfg | None = None,
+        cfg: dict | None = None,
     ):
+        self.cfg = dict(cfg) if cfg is not None else {}
         self.calibrator = calibrator
         self._trainer = trainer
         self.pos_idx = int(positive_index)
@@ -166,15 +168,18 @@ class TwoPassEvaluator:
             binary_single_logit=True, positive_index=self.pos_idx
         )
         # Threshold guardrails
-        cfg = getattr(calibrator, "cfg", None)
-        self.thr_min = float(getattr(cfg, "thr_min", 0.05))
-        self.thr_max = float(getattr(cfg, "thr_max", 0.95))
-        self.thr_posrate_min = float(getattr(cfg, "thr_posrate_min", 0.02))
-        self.thr_posrate_max = float(getattr(cfg, "thr_posrate_max", 0.98))
-        self.thr_warmup_epochs = int(getattr(cfg, "thr_warmup_epochs", max(3, int(getattr(cfg, "warmup_epochs", 1)))))
-        self.cal_auc_floor = float(getattr(cfg, "cal_auc_floor", 0.50))
-        self.thr_min_tp = int(getattr(cfg, "thr_min_tp", 0))
-        self.thr_min_tn = int(getattr(cfg, "thr_min_tn", 0))
+        _ccfg = getattr(calibrator, "cfg", None)
+        self.thr_min = float(getattr(_ccfg, "thr_min", 0.05))
+        self.thr_max = float(getattr(_ccfg, "thr_max", 0.95))
+        self.thr_posrate_min = float(getattr(_ccfg, "thr_posrate_min", 0.02))
+        self.thr_posrate_max = float(getattr(_ccfg, "thr_posrate_max", 0.98))
+        self.thr_warmup_epochs = int(getattr(_ccfg, "thr_warmup_epochs", max(5, int(getattr(_ccfg, "warmup_epochs", 1)))))
+        self.cal_auc_floor = float(getattr(_ccfg, "cal_auc_floor", 0.50))
+        self.thr_min_tp = int(getattr(_ccfg, "thr_min_tp", 0))
+        self.thr_min_tn = int(getattr(_ccfg, "thr_min_tn", 0))
+        # smoothing & hysteresis knobs (gentle defaults)
+        self.cal_ema_beta = float(getattr(_ccfg, "cal_ema_beta", 0.30))
+        self.thr_hysteresis = float(getattr(_ccfg, "thr_hysteresis", 0.02))
 
     # central threshold sanitizer
     def _clamp_thr01(self, value, *, default: float = 0.5, ctx: str = "thr") -> float:
@@ -210,6 +215,49 @@ class TwoPassEvaluator:
             return float(self.cal_max_delta)
         cfg = getattr(self.calibrator, "cfg", None)
         return float(getattr(cfg, "cal_max_delta", 0.10))
+
+    # Low-spread clamp (always-on pre-step)
+    def _low_spread_posrate_clamp(self, probs: np.ndarray, t_seed: float) -> float:
+        """
+        If scores have (very) low spread and the current pos-rate (under t_seed)
+        sits outside the allowed corridor, softly move the threshold toward the
+        corridor using a quantile projection, bounded by cal_max_delta and [thr_min, thr_max].
+        Returns the (possibly) adjusted seed threshold.
+        """
+        if probs.size == 0:
+            return float(t_seed)
+
+        std = float(np.std(probs))
+        q10 = float(np.quantile(probs, 0.10))
+        q90 = float(np.quantile(probs, 0.90))
+        iqr = q90 - q10
+        pos_rate_seed = float((probs >= float(t_seed)).mean())
+
+        cfg = getattr(self.calibrator, "cfg", None)
+        cal_min_std = float(getattr(cfg, "cal_min_std", 1e-4))
+        cal_min_iqr = float(getattr(cfg, "cal_min_iqr", 1e-3))
+
+        if std >= cal_min_std or iqr >= cal_min_iqr:
+            # Not low-spread → leave seed as-is
+            return float(t_seed)
+
+        # Low-spread; if rate sits outside corridor, project toward the nearest bound
+        if pos_rate_seed < self.thr_posrate_min or pos_rate_seed > self.thr_posrate_max:
+            target = self.thr_posrate_min if pos_rate_seed < self.thr_posrate_min else self.thr_posrate_max
+            t_dm = _rate_match_threshold(probs, float(target))
+            t_adj = _bounded_step(
+                float(t_seed), float(t_dm),
+                max_delta=self._resolve_max_delta(),
+                lo=float(self.thr_min), hi=float(self.thr_max)
+            )
+            logger.info(
+                "[cal] low-spread clamp %.4f → %.4f (pos_rate %.3f → [%0.2f,%0.2f]) std=%.4g iqr=%.4g",
+                float(t_seed), float(t_adj), pos_rate_seed, self.thr_posrate_min, self.thr_posrate_max, std, iqr
+            )
+            return float(t_adj)
+
+        # Low-spread but already inside corridor → keep seed
+        return float(t_seed)
 
     # Public guards
     @property
@@ -303,6 +351,8 @@ class TwoPassEvaluator:
     # main entrypoint
     @torch.inference_mode()
     def validate(self, epoch: int, model, val_loader, base_rate: Optional[float] = None) -> Tuple[float, Dict, Dict]:
+        # Make val_loader discoverable by decision-health wiring
+        self.val_loader = val_loader
 
         def _ingest_cls_metric_map(dst: Dict[str, Any], raw: Dict[str, Any]) -> None:
             """
@@ -370,101 +420,107 @@ class TwoPassEvaluator:
 
         # Classification
         if self.has_cls:
-            # Gather scores/labels for calibration
-            scores, labels = self._gather_scores_labels(model, val_loader, device)
+            # A) collect LOGITS + labels
+            logits_np, labels = self._gather_logits_labels(model, val_loader, device)
 
             # derive base rate if not provided
             if base_rate is None and labels.size > 0:
                 base_rate = float((labels == 1).mean())
 
-            # Candidate threshold from calibrator (or stick with seed)
+            # B) logits -> probs once (PosProbCfg = single SoT)
+            #    Support either 1-logit (BCE) or C-logits (CE); keep on CPU numpy
+            if logits_np.ndim == 1 or (logits_np.ndim == 2 and logits_np.shape[-1] == 1):
+                # 1-logit case
+                t = torch.from_numpy(logits_np.reshape(-1))
+            else:
+                # multi-logit case [N, C]
+                t = torch.from_numpy(logits_np)
+            probs = self._score_provider.logits_to_pos_prob(t).detach().reshape(-1).clamp_(0, 1).cpu().numpy()
+            # Always-on low-spread clamp (pre-calibrator); does not early-return
+            t_seed = self._low_spread_posrate_clamp(probs, float(t_seed))
+
+            # C) Candidate from calibrator (now pass PROBS, unchanged API)
             t_cand = t_seed
             if self.calibrator is not None:
                 try:
-                    picked = self.calibrator.pick(epoch, scores, labels, base_rate)
+                    picked = self.calibrator.pick(epoch, probs, labels, base_rate)
                     t_new = picked[0] if isinstance(picked, (tuple, list)) else picked
                     t_cand = self._clamp_thr01(t_new, default=t_seed, ctx="calibrator_thr")
                 except Exception:
                     logger.warning("calibrator.pick failed; keeping seed threshold", exc_info=True)
 
-            # Guardrails & acceptance: only adopt candidate if sane/stable
-            def _accept(t_try: float) -> bool:
-                # warmup & data presence
-                if epoch < int(self.thr_warmup_epochs) or scores.size == 0:
+            # D) Smooth + guardrails + acceptance (operate on PROBS)
+            prev = float(self.last_threshold if self.last_threshold is not None else t_seed)
+            # 1) clamp candidate into global bounds
+            t_cand = float(min(self.thr_max, max(self.thr_min, t_cand)))
+            # 2) hysteresis: if candidate's pos-rate is comfortably inside corridor, hold position
+            pr_cand = _pos_rate(probs, t_cand)
+            if (self.thr_posrate_min + self.thr_hysteresis) <= pr_cand <= (self.thr_posrate_max - self.thr_hysteresis):
+                t_cand = prev
+            # 3) EMA smoothing and max-delta bounding (gentle movement)
+            t_smooth = prev + self.cal_ema_beta * (t_cand - prev)
+            t_smooth = _bounded_step(prev, t_smooth, max_delta=self._resolve_max_delta(), lo=self.thr_min, hi=self.thr_max)
+
+            # 4) acceptance checks AFTER smoothing
+            def _accept_smoothed(t_try: float) -> bool:
+                if epoch < int(self.thr_warmup_epochs) or probs.size == 0:
                     return False
-                # clamp to global bounds
                 t_try = float(min(self.thr_max, max(self.thr_min, t_try)))
-                # basic sanity on pos_rate envelope (absolute bounds)
-                pr = _pos_rate(scores, t_try)
+                # pos-rate corridor
+                pr = _pos_rate(probs, t_try)
                 if not (self.thr_posrate_min <= pr <= self.thr_posrate_max):
                     return False
-                # auc floor
-                auc_val = _safe_auc(labels, scores)
+                # auc floor on the *scores* distribution (model separability)
+                auc_val = _safe_auc(labels, probs)
                 if not (isinstance(auc_val, float) and math.isfinite(auc_val) and auc_val >= self.cal_auc_floor):
                     return False
-                # optional count constraints
+                # enforce BOTH TN and TP mins
                 if self.thr_min_tp > 0 or self.thr_min_tn > 0:
-                    pred = (scores >= t_try).astype(np.int64)
+                    pred = (probs >= t_try).astype(np.int64)
                     tp = int(((labels == 1) & (pred == 1)).sum())
                     tn = int(((labels == 0) & (pred == 0)).sum())
                     if tp < self.thr_min_tp or tn < self.thr_min_tn:
                         return False
-                # max jump (delta) vs last accepted
+                # movement guard vs last accepted
                 max_delta = self._resolve_max_delta()
                 if self.last_threshold is not None and abs(t_try - float(self.last_threshold)) > max_delta:
                     return False
-
                 return True
+            if _accept_smoothed(t_smooth):
+                t_final = float(t_smooth)
+            else:
+                # reject update → keep previous (stable)
+                t_final = float(prev)
 
-            # Finalize exactly once, then write the box once
-            accepted = _accept(t_cand)
-            t_final = float(min(self.thr_max, max(self.thr_min, t_cand))) if accepted else float(t_seed)
-
+            # E) optional decision-health rate matching (still on PROBS)
             if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
                 rate_tol = self._resolve_rate_tolerance()
-                pr_now = _pos_rate(scores, t_final)
+                pr_now = _pos_rate(probs, t_final)
                 if abs(pr_now - float(base_rate)) > rate_tol:
-                    t_dm = _rate_match_threshold(scores, float(base_rate))
+                    t_dm = _rate_match_threshold(probs, float(base_rate))
                     t_final = _bounded_step(
                         float(t_final), float(t_dm),
                         max_delta=self._resolve_max_delta(),
                         lo=float(self.thr_min), hi=float(self.thr_max)
                     )
-                delta = abs(pr_now - float(base_rate))
-                if delta > float(rate_tol):
-                    # Project to rate-matched threshold, then bound by max-delta and global bounds.
-                    t_dm = _rate_match_threshold(scores, float(base_rate))
-                    max_delta = float(getattr(getattr(self.calibrator, "cfg", None), "cal_max_delta", 0.10))
-                    t_final = _bounded_step(
-                        float(t_final), float(t_dm),
-                        max_delta=max_delta, lo=float(self.thr_min), hi=float(self.thr_max)
-                    )
 
-            # remember accepted threshold and publish it once
+            # F) publish once and run the standard engine to emit metrics
             self.last_threshold = float(t_final)
-            # Wire the accepted threshold to the metric transforms
             self._thr_box.value = self._clamp_thr01(self.last_threshold, default=0.5, ctx="thr_box")
-            # Inject threshold into the evaluator used for metrics
             self._ensure_std_engine()
 
-            # Allow the step to know device & pinning
             pin = bool(getattr(val_loader, "pin_memory", False))
             setattr(self._std_engine.state, "device", device)
             setattr(self._std_engine.state, "non_blocking", pin)
-            # Run once to populate metrics
             self._std_engine.run(val_loader)
             raw = dict(self._std_engine.state.metrics or {})
-            # Ingest metrics (scalars, vectors, confmat)
             _ingest_cls_metric_map(cls_metrics, raw)
-            # record the threshold we used this epoch (post-clamp)
             cls_metrics["threshold"] = float(self._thr_box.value)
             cls_metrics["cal_thr"] = float(self._thr_box.value)
 
-            # (optional) a concise status line for debugging / audits
             if base_rate is not None:
                 cls_metrics["base_rate"] = float(base_rate)
 
-            # Decision-health logging (gated)
             if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
                 rate_tol = self._resolve_rate_tolerance()
                 pos_rate = float(cls_metrics.get("pos_rate", 0.0))
@@ -547,27 +603,31 @@ class TwoPassEvaluator:
         self._has_seg = can_seg if self._has_seg is None else bool(self._has_seg)
 
     # internals
-    def _gather_scores_labels(self, model, val_loader, device) -> Tuple[np.ndarray, np.ndarray]:
-        all_scores, all_labels = [], []
+    def _gather_logits_labels(self, model, val_loader, device) -> Tuple[np.ndarray, np.ndarray]:
+        all_logits, all_labels = [], []
         for batch in val_loader:
             x = batch["image"].to(device, non_blocking=True)
             y = labels_to_1d_indices(batch.get("label", batch.get("y"))).cpu().numpy()
 
-            logits = self.classify_fn(model, x)
-            logits = extract_cls_logits_from_any(logits)
+            out = self.classify_fn(model, x)
+            logits = extract_cls_logits_from_any(out)
             if not torch.is_tensor(logits):
                 logits = torch.as_tensor(logits)
-            # unified: BCE(1-logit) or CE(2+ logits)
-            s = positive_score_from_logits(logits, positive_index=self.pos_idx).view(-1)
 
-            all_scores.append(s.detach().cpu().numpy())
+            # Keep raw logits; shape -> [B] or [B, C] ok
+            all_logits.append(logits.detach().cpu().numpy())
             all_labels.append(y)
 
-        scores = np.concatenate(all_scores).astype(np.float32) if all_scores else np.zeros(0, dtype=np.float32)
-        labels = np.concatenate(all_labels).astype(np.int64) if all_labels else np.zeros(0, dtype=np.int64)
-        if scores.size and not np.isfinite(scores).all():
-            scores = np.nan_to_num(scores, nan=0.5, posinf=1.0, neginf=0.0).astype(np.float32)
-        return scores, labels
+        if not all_logits:
+            return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.int64)
+
+        logits = np.concatenate(all_logits, axis=0)
+        labels = np.concatenate(all_labels).astype(np.int64)
+
+        # sanitize NaNs/Infs in logits (rare, but defensive)
+        if not np.isfinite(logits).all():
+            logits = np.nan_to_num(logits, nan=0.0, posinf=0.0, neginf=0.0).astype(np.float32)
+        return logits.astype(np.float32), labels
 
     # Ignite engine wiring
     def _ensure_std_engine(self) -> None:
@@ -638,7 +698,6 @@ class TwoPassEvaluator:
 
         self._std_engine = Engine(_step)
 
-        # attach metrics
         # Classification (AUC from raw logits; thresholded metrics via thr_box)
         if self.has_cls:
 
@@ -666,13 +725,18 @@ class TwoPassEvaluator:
                 warmup = int(self.health_warmup)
                 if self.enable_decision_health:
                     attach_decision_health(
-                        self._std_engine, self._trainer,
+                        trainer=self._trainer,
+                        evaluator=self._std_engine,
+                        val_loader=getattr(self, "val_loader", None),
                         num_classes=int(self.num_classes),
                         positive_index=int(self.pos_idx),
                         tol=float(self.health_tol),
                         need_k=int(self.health_need_k),
                         warmup=int(warmup),
                         metric_key="cls_confmat",
+                        inject_metrics=True,
+                        terminate=bool(self.cfg.get("decision_health_terminate", False)),
+                        min_samples=int(self.cfg.get("decision_health_min_samples", 200)),
                     )
                     # External watchdog is active; suppress internal duplicate logs
                     self._watchdog_active = True
@@ -690,7 +754,6 @@ class TwoPassEvaluator:
             JaccardIndex(cm=seg_cm).attach(self._std_engine, "iou")
 
 
-# Two-pass validation attach
 def _to_float(v: Any) -> Any:
     try:
         if hasattr(v, "item") and callable(v.item):
@@ -804,6 +867,7 @@ def make_two_pass_evaluator(
     loss_fn=None,
     enable_decision_health: bool = True,
     score_provider: PosProbCfg | None = None,
+    cfg: dict | None = None,
     **_
 ) -> TwoPassEvaluator:
     """
@@ -851,7 +915,214 @@ def make_two_pass_evaluator(
         health_need_k=int(getattr(getattr(calibrator, "cfg", None), "decision_health_need_k", 3)),
         enable_decision_health=bool(enable_decision_health),
         score_provider=score_provider,
+        cfg=cfg or {},
     )
 
 
 __all__ = ["attach_two_pass_validation", "make_two_pass_evaluator", "TwoPassEvaluator"]
+
+# # Classification
+# if self.has_cls:
+#     # Gather scores/labels for calibration
+#     scores, labels = self._gather_scores_labels(model, val_loader, device)
+
+#     # derive base rate if not provided
+#     if base_rate is None and labels.size > 0:
+#         base_rate = float((labels == 1).mean())
+
+#     # Candidate threshold from calibrator (or stick with seed)
+#     t_cand = t_seed
+#     if self.calibrator is not None:
+#         try:
+#             picked = self.calibrator.pick(epoch, scores, labels, base_rate)
+#             t_new = picked[0] if isinstance(picked, (tuple, list)) else picked
+#             t_cand = self._clamp_thr01(t_new, default=t_seed, ctx="calibrator_thr")
+#         except Exception:
+#             logger.warning("calibrator.pick failed; keeping seed threshold", exc_info=True)
+
+#     # Guardrails & acceptance: only adopt candidate if sane/stable
+#     def _accept(t_try: float) -> bool:
+#         # warmup & data presence
+#         if epoch < int(self.thr_warmup_epochs) or scores.size == 0:
+#             return False
+#         # clamp to global bounds
+#         t_try = float(min(self.thr_max, max(self.thr_min, t_try)))
+#         # basic sanity on pos_rate envelope (absolute bounds)
+#         pr = _pos_rate(scores, t_try)
+#         if not (self.thr_posrate_min <= pr <= self.thr_posrate_max):
+#             return False
+#         # auc floor
+#         auc_val = _safe_auc(labels, scores)
+#         if not (isinstance(auc_val, float) and math.isfinite(auc_val) and auc_val >= self.cal_auc_floor):
+#             return False
+#         # optional count constraints
+#         if self.thr_min_tp > 0 or self.thr_min_tn > 0:
+#             pred = (scores >= t_try).astype(np.int64)
+#             tp = int(((labels == 1) & (pred == 1)).sum())
+#             tn = int(((labels == 0) & (pred == 0)).sum())
+#             if tp < self.thr_min_tp or tn < self.thr_min_tn:
+#                 return False
+#         # max jump (delta) vs last accepted
+#         max_delta = self._resolve_max_delta()
+#         if self.last_threshold is not None and abs(t_try - float(self.last_threshold)) > max_delta:
+#             return False
+
+#         return True
+
+#     # Finalize exactly once, then write the box once
+#     accepted = _accept(t_cand)
+#     t_final = float(min(self.thr_max, max(self.thr_min, t_cand))) if accepted else float(t_seed)
+
+#     if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
+#         rate_tol = self._resolve_rate_tolerance()
+#         pr_now = _pos_rate(scores, t_final)
+#         if abs(pr_now - float(base_rate)) > rate_tol:
+#             t_dm = _rate_match_threshold(scores, float(base_rate))
+#             t_final = _bounded_step(
+#                 float(t_final), float(t_dm),
+#                 max_delta=self._resolve_max_delta(),
+#                 lo=float(self.thr_min), hi=float(self.thr_max)
+#             )
+#         delta = abs(pr_now - float(base_rate))
+#         if delta > float(rate_tol):
+#             # Project to rate-matched threshold, then bound by max-delta and global bounds.
+#             t_dm = _rate_match_threshold(scores, float(base_rate))
+#             max_delta = float(getattr(getattr(self.calibrator, "cfg", None), "cal_max_delta", 0.10))
+#             t_final = _bounded_step(
+#                 float(t_final), float(t_dm),
+#                 max_delta=max_delta, lo=float(self.thr_min), hi=float(self.thr_max)
+#             )
+
+#     # remember accepted threshold and publish it once
+#     self.last_threshold = float(t_final)
+#     # Wire the accepted threshold to the metric transforms
+#     self._thr_box.value = self._clamp_thr01(self.last_threshold, default=0.5, ctx="thr_box")
+#     # Inject threshold into the evaluator used for metrics
+#     self._ensure_std_engine()
+
+#     # Allow the step to know device & pinning
+#     pin = bool(getattr(val_loader, "pin_memory", False))
+#     setattr(self._std_engine.state, "device", device)
+#     setattr(self._std_engine.state, "non_blocking", pin)
+#     # Run once to populate metrics
+#     self._std_engine.run(val_loader)
+#     raw = dict(self._std_engine.state.metrics or {})
+#     # Ingest metrics (scalars, vectors, confmat)
+#     _ingest_cls_metric_map(cls_metrics, raw)
+#     # record the threshold we used this epoch (post-clamp)
+#     cls_metrics["threshold"] = float(self._thr_box.value)
+#     cls_metrics["cal_thr"] = float(self._thr_box.value)
+
+#     # (optional) a concise status line for debugging / audits
+#     if base_rate is not None:
+#         cls_metrics["base_rate"] = float(base_rate)
+
+#     # Decision-health logging (gated)
+#     if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
+#         rate_tol = self._resolve_rate_tolerance()
+#         pos_rate = float(cls_metrics.get("pos_rate", 0.0))
+#         delta = abs(pos_rate - base_rate)
+#         self.bad_count = self.bad_count + 1 if (delta > rate_tol) else 0
+#         if not getattr(self, "_watchdog_active", False):
+#             logger.info("[decision health] pos=%.4f base=%.4f Δ=%.4f tol=%.4f bad_now=%d",
+#                         pos_rate, base_rate, delta, rate_tol, self.bad_count)
+
+# # low-spread guard
+# # If scores are almost constant, project into the pos-rate envelope and return quickly.
+# if probs.size:
+#     std = float(np.std(probs))
+#     q10 = float(np.quantile(probs, 0.10))
+#     q90 = float(np.quantile(probs, 0.90))
+#     iqr = q90 - q10
+#     pos_rate_seed = float((probs >= t_seed).mean())
+#     # defaults chosen to be gentle; you can read from calibrator.cfg if present
+#     cal_min_std = float(getattr(getattr(self.calibrator, "cfg", None), "cal_min_std", 1e-4))
+#     cal_min_iqr = float(getattr(getattr(self.calibrator, "cfg", None), "cal_min_iqr", 1e-3))
+#     if std < cal_min_std and iqr < cal_min_iqr:
+#         if pos_rate_seed < self.thr_posrate_min or pos_rate_seed > self.thr_posrate_max:
+#             target = self.thr_posrate_min if pos_rate_seed < self.thr_posrate_min else self.thr_posrate_max
+#             t_dm = _rate_match_threshold(probs, float(target))
+#             t_final = _bounded_step(
+#                 float(t_seed), float(t_dm),
+#                 max_delta=self._resolve_max_delta(),
+#                 lo=float(self.thr_min), hi=float(self.thr_max)
+#             )
+#             # publish and continue to metrics emit
+#             self.last_threshold = float(t_final)
+#             self._thr_box.value = self._clamp_thr01(self.last_threshold, default=0.5, ctx="thr_box")
+#             self._ensure_std_engine()
+#             pin = bool(getattr(val_loader, "pin_memory", False))
+#             setattr(self._std_engine.state, "device", device)
+#             setattr(self._std_engine.state, "non_blocking", pin)
+#             self._std_engine.run(val_loader)
+#             raw = dict(self._std_engine.state.metrics or {})
+#             _ingest_cls_metric_map(cls_metrics, raw)
+#             cls_metrics["threshold"] = float(self._thr_box.value)
+#             cls_metrics["cal_thr"] = float(self._thr_box.value)
+#             if base_rate is not None:
+#                 cls_metrics["base_rate"] = float(base_rate)
+#             # (decision health logging unchanged below will still run)
+#             # proceed to the segmentation block / combined metric as usual
+#         else:
+#             # already within envelope; keep seed
+#             self.last_threshold = float(t_seed)
+#             self._thr_box.value = float(t_seed)
+#             self._ensure_std_engine()
+#             pin = bool(getattr(val_loader, "pin_memory", False))
+#             setattr(self._std_engine.state, "device", device)
+#             setattr(self._std_engine.state, "non_blocking", pin)
+#             self._std_engine.run(val_loader)
+#             raw = dict(self._std_engine.state.metrics or {})
+#             _ingest_cls_metric_map(cls_metrics, raw)
+#             cls_metrics["threshold"] = float(self._thr_box.value)
+#             cls_metrics["cal_thr"] = float(self._thr_box.value)
+#             if base_rate is not None:
+#                 cls_metrics["base_rate"] = float(base_rate)
+#             # proceed as usual
+
+# def _gather_scores_labels(self, model, val_loader, device) -> Tuple[np.ndarray, np.ndarray]:
+#     all_scores, all_labels = [], []
+#     for batch in val_loader:
+#         x = batch["image"].to(device, non_blocking=True)
+#         y = labels_to_1d_indices(batch.get("label", batch.get("y"))).cpu().numpy()
+
+#         logits = self.classify_fn(model, x)
+#         logits = extract_cls_logits_from_any(logits)
+#         if not torch.is_tensor(logits):
+#             logits = torch.as_tensor(logits)
+#         # unified: BCE(1-logit) or CE(2+ logits)
+#         s = positive_score_from_logits(logits, positive_index=self.pos_idx).view(-1)
+
+#         all_scores.append(s.detach().cpu().numpy())
+#         all_labels.append(y)
+
+#     scores = np.concatenate(all_scores).astype(np.float32) if all_scores else np.zeros(0, dtype=np.float32)
+#     labels = np.concatenate(all_labels).astype(np.int64) if all_labels else np.zeros(0, dtype=np.int64)
+#     if scores.size and not np.isfinite(scores).all():
+#         scores = np.nan_to_num(scores, nan=0.5, posinf=1.0, neginf=0.0).astype(np.float32)
+#     return scores, labels
+
+# # D) Guardrails & acceptance — reuse existing checks, but with 'probs'
+# def _accept(t_try: float) -> bool:
+#     if epoch < int(self.thr_warmup_epochs) or probs.size == 0:
+#         return False
+#     t_try = float(min(self.thr_max, max(self.thr_min, t_try)))
+#     pr = _pos_rate(probs, t_try)
+#     if not (self.thr_posrate_min <= pr <= self.thr_posrate_max):
+#         return False
+#     auc_val = _safe_auc(labels, probs)
+#     if not (isinstance(auc_val, float) and math.isfinite(auc_val) and auc_val >= self.cal_auc_floor):
+#         return False
+#     if self.thr_min_tp > 0 or self.thr_min_tn > 0:
+#         pred = (probs >= t_try).astype(np.int64)
+#         tp = int(((labels == 1) & (pred == 1)).sum())
+#         tn = int(((labels == 0) & (pred == 0)).sum())
+#         if tp < self.thr_min_tp or tn < self.thr_min_tn:
+#             return False
+#     max_delta = self._resolve_max_delta()
+#     if self.last_threshold is not None and abs(t_try - float(self.last_threshold)) > max_delta:
+#         return False
+#     return True
+
+# accepted = _accept(t_cand)
+# t_final = float(min(self.thr_max, max(self.thr_min, t_cand))) if accepted else float(t_seed)

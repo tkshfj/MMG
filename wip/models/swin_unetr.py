@@ -1,9 +1,7 @@
 # swin_unetr.py
 import logging
 from typing import Any, Sequence, Tuple
-
 from models.model_base import BaseModel
-# from metrics_utils import seg_output_transform
 from monai.networks.nets import SwinUNETR
 
 logger = logging.getLogger(__name__)

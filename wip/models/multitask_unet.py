@@ -4,11 +4,12 @@ import logging
 import torch
 import torch.nn as nn
 from monai.networks.nets import UNet
+from models.model_base import BaseModel
 
 logger = logging.getLogger(__name__)
 
 
-class MultitaskUNetModel(nn.Module):
+class MultitaskUNetModel(nn.Module, BaseModel):
     """
     MONAI U-Net for segmentation with an added classification head taken from the encoder bottleneck.
     Follows the SimpleCNNModel contract:
@@ -56,8 +57,13 @@ class MultitaskUNetModel(nn.Module):
         self._register_bottleneck_hook(features[-1])
 
         # Keep config snapshot for optional downstream routines (e.g., bias init)
-        self._cfg = dict(cfg)
-        self._cfg.update({k: v for k, v in kwargs.items() if k not in self._cfg})
+        # self._cfg = dict(cfg)
+        # self._cfg.update({k: v for k, v in kwargs.items() if k not in self._cfg})
+        self.config = dict(cfg) if cfg is not None else {}
+        self.config.update({k: v for k, v in kwargs.items() if k not in self.config})
+        # self.config = dict(cfg) if cfg is not None else {}
+        # for k, v in (kwargs or {}).items():
+        #     self.config.setdefault(k, v)
 
     # encoder bottleneck capture
     def _register_bottleneck_hook(self, bottleneck_channels: int) -> None:

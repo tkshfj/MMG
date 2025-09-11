@@ -3,11 +3,12 @@ import logging
 from typing import Any, Dict, Mapping, Optional
 import torch
 import torch.nn as nn
+from .model_base import BaseModel
 
 logger = logging.getLogger(__name__)
 
 
-class SimpleCNNModel(nn.Module):
+class SimpleCNNModel(nn.Module, BaseModel):
     def __init__(self, cfg: Optional[Mapping[str, Any]] = None, **kwargs: Any):
         """
         Accepts either a config dict via `cfg` or plain kwargs.
@@ -49,9 +50,9 @@ class SimpleCNNModel(nn.Module):
         self.dropout = nn.Dropout(dropout)
         self.cls_head = nn.Linear(64, out_dim)
 
-        # Keep a note for bias-init routines, if called later
-        self._cfg = dict(cfg) if cfg is not None else {}
-        self._cfg.update({k: v for k, v in kwargs.items() if k not in self._cfg})
+        self.config = dict(cfg) if cfg is not None else {}
+        for k, v in (kwargs or {}).items():
+            self.config.setdefault(k, v)
 
     def param_groups(self):
         # No real backbone/head split here, but keep the interface

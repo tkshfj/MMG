@@ -82,7 +82,9 @@ class FocalLoss(nn.Module):
 class BaseModel(ModelRegistryProtocol):
     # config helpers
     def _cfg(self, config: Any | None = None) -> Any:
-        return self.config if config is None else config
+        # return self.config if config is None else config
+        # defensive: if someone created an attribute `_cfg`, don't call it
+        return getattr(self, "config", None) if config is None else config
 
     @staticmethod
     def _cfg_get(cfg: Any, key: str, default: Any = None) -> Any:
@@ -116,6 +118,28 @@ class BaseModel(ModelRegistryProtocol):
 
     def get_num_classes(self, config=None) -> int:
         return int(self._get("num_classes", 2, config))
+
+    # Many registries expect these; provide safe defaults so subclasses are not abstract.
+    @classmethod
+    def build_model(cls, cfg=None, **kwargs):
+        """
+        Default class-level builder: instantiate with cfg/kwargs.
+        Registry code already knows how to pass cfg/kwargs, so this is a safe no-op default.
+        """
+        try:
+            return cls(cfg, **kwargs)  # e.g., SimpleCNNModel(cfg, **kwargs)
+        except TypeError:
+            try:
+                return cls(**(kwargs or {}))
+            except TypeError:
+                return cls()
+
+    def get_handler_kwargs(self, *args, **kwargs):
+        """
+        Default handler kwarg provider for event/logging hooks.
+        Subclasses may override to pass model-specific arguments to handlers.
+        """
+        return {}
 
     def _resolve_loss_for(self, task: str, cfg: dict):
         counts = getattr(self, "class_counts", None) or self._cfg_get(cfg, "class_counts", None)
@@ -451,19 +475,21 @@ class BaseModel(ModelRegistryProtocol):
         two_to_one = bool(self._cfg_get(cfg, "binary_bce_from_two_logits", True))
 
         # Resolve class_counts from param, self, or cfg
-        counts = (
-            class_counts or self._get("class_counts", None) or self._cfg_get(cfg, "class_counts", None)
-        )
+        counts = (class_counts or self._get("class_counts", None) or self._cfg_get(cfg, "class_counts", None))
 
         # Prepare imbalance handling
         class_w = None  # for CE/focal
         pos_w = None  # for BCE
+
         if isinstance(counts, (list, tuple)):
             cnt = torch.tensor(counts, dtype=torch.float)
             if use_single:
-                pos = cnt[pos_idx]
-                neg = cnt.sum() - pos
-                pos_w = (neg / (pos.clamp_min(1e-8))).clamp_max(1e6)  # scalar
+                # pos = cnt[pos_idx]
+                # neg = cnt.sum() - pos
+                # pos_w = (neg / (pos.clamp_min(1e-8))).clamp_max(1e6)  # scalar
+                pos = cnt[pos_idx].clamp_min(1e-8)
+                neg = (cnt.sum() - pos).clamp_min(1e-8)
+                pos_w = (neg / pos).clamp_max(1e6)
             else:
                 inv = 1.0 / cnt.clamp_min(1e-8)
                 class_w = (inv / inv.mean()).float()  # length C
@@ -479,7 +505,7 @@ class BaseModel(ModelRegistryProtocol):
         if ig is not None:
             ce_kwargs["ignore_index"] = int(ig)
         # Created here, tensors are moved to logits' device in-call
-        bce_pos_weight = pos_w
+        # bce_pos_weight = pos_w
         focal_gamma = float(self._cfg_get(cfg, "focal_gamma", 2.0))
 
         # classification loss
@@ -496,10 +522,12 @@ class BaseModel(ModelRegistryProtocol):
                     logits = logits.squeeze(-1)
                 # Map indices to binary by positive_index
                 y_bin = (y_idx == pos_idx).float().view_as(logits)  # y_idx.float().view_as(logits)
+                pw = (None if pos_w is None else pos_w.to(device=logits.device, dtype=logits.dtype))
                 return F.binary_cross_entropy_with_logits(
                     logits.float(),
                     y_bin,
-                    pos_weight=(None if bce_pos_weight is None else bce_pos_weight.to(logits))
+                    # pos_weight=(None if bce_pos_weight is None else bce_pos_weight.to(logits))
+                    pos_weight=pw
                 )
 
             # Multi-class CE or focal

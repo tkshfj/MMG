@@ -1,37 +1,57 @@
 # config.yaml
 experiment:
+  name: default
   architecture: multitask_unet
-  task: multitask
+  task: multitask            # classification | segmentation | multitask
   run_cap: 20
+  seed: 42
 
 execution:
+  device: auto               # auto | cuda | cpu
   epochs: 40
   num_workers: 8
+  batch_size: 32
   debug: false
   debug_transforms: false
-  batch_size: 32
+  deterministic: false
+  amp: true                  # automatic mixed precision
 
 data:
   in_channels: 1
-  input_shape: [256, 256]
+  input_shape: [256, 256]    # [H, W] or [D, H, W] for 3D
   num_classes: 2
-
-metrics:
-  multi_weight: 0.65   # for val_multi
-
-optim:
-  optimizer: adamw
-  lr: 0.0002
-  weight_decay: 0.00005
+  seg_num_classes: 2
+  # sampling policy
+  sampling: auto             # none | weighted | auto
+  sampler_imbalance_threshold: 1.5
+  # label normalization / mapping
+  invert_labels: false
+  label_map: null
 
 regularization:
   dropout_rate: 0.20
+  weight_decay: 0.00005
+  label_smoothing: 0.0
+
+optim:
+  optimizer: adamw           # adamw | adam | sgd
+  lr: 0.0002
+  weight_decay: ${regularization.weight_decay}
+  # weight_decay: 0.00005
+  # split/layer-wise lr if supported by the model registry
+  # param_groups: single       # single | split
+  param_groups: split
+  head_lr_scale: 1.0
+  head_wd_scale: 1.0
+  head_lr_boost: 1.5
+  head_lr_boost_epochs: 3
+  gradient_clip_norm: null   # e.g., 1.0 to enable
 
 scheduler:
-  lr_strategy: cosine   # none|cosine|onecycle|plateau|warmcos
+  strategy: warmcos          # none | cosine | onecycle | plateau | warmcos
 
   # cosine
-  T_max: 40
+  T_max: ${execution.epochs}
   eta_min: 0.0
 
   # onecycle
@@ -41,15 +61,84 @@ scheduler:
   final_div_factor: 10000.0
 
   # plateau
-  monitor: loss
-  monitor_mode: min
+  plateau_metric: val/loss
+  plateau_mode: min          # min | max
   patience: 3
   factor: 0.5
+  threshold: 0.0001
 
-  # warmup + cosine
+  # warmup (used by warmcos)
   warmup_epochs: 3
   warmup_start_factor: 0.1
 
 loss:
-  alpha: 1.0
-  beta: 1.0
+  # multitask weights
+  alpha: 1.0                 # classification weight
+  beta: 1.0                  # segmentation weight
+  # classification loss selection
+  cls_loss: auto             # auto | ce | focal | bce
+  positive_index: 1
+  binary_single_logit: true
+  binary_bce_from_two_logits: true
+  focal_gamma: 2.0
+  # class balancing for CE/focal
+  class_balance: inverse     # inverse | effective | none
+  cb_beta: 0.999
+  # explicit overrides (optional)
+  class_weights: null        # e.g., [1.0, 3.2]
+  class_counts: null         # filled at runtime from train split
+  pos_weight: null           # scalar for BCE; else derived from counts/weights
+
+metrics:
+  # default threshold decision for classification metrics
+  cls_decision: threshold    # threshold | argmax
+  cls_threshold: 0.5
+  positive_index: ${loss.positive_index}
+  # composite/aggregate weights
+  multi_weight: 0.65         # for val_multi aggregation if used
+  log_confusion_matrix: true
+  log_auc: true
+
+calibration:
+  enabled: true
+  two_pass_val: true
+  method: f1                 # f1 | youden | pr | auc (selection logic in code)
+  log_calibrated: true
+
+  # warmups (delay until scores separate)
+  cal_warmup_epochs: 3
+  thr_warmup_epochs: 5
+
+  # movement/robustness guards
+  cal_max_delta: 0.02        # max threshold change per epoch
+  cal_min_std: 0.001         # min std of logits to attempt update
+  cal_min_iqr: 0.002         # min IQR of logits to attempt update
+
+  # operating constraints
+  thr_min_tn: 5
+  thr_min_tp: 5
+  thr_posrate_min: 0.05
+  thr_posrate_max: 0.95
+
+  # prior/initialization options
+  init_head_bias_from_prior: true
+  init_threshold_from_prior: false
+  cal_init_threshold: 0.4. # used if init from prior is off
+  cal_auc_floor: 0.5
+  cal_bootstraps: 25
+  cal_ema_beta: 0.3
+  thr_hysteresis: 0.02
+  cal_fallback: keep_last  # keep_last | clamp
+
+logging:
+  console_epoch_log: true
+  console_iter_log: false
+  enable_decision_health: true
+  health_warmup: 5  # match thr_warmup_epochs for stability
+  save_dir: outputs
+  wandb:
+    enabled: true
+    entity: null
+    project: monai_wip
+    tags: []
+    notes: ""

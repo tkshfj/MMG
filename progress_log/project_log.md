@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-09-11
+- Stabilize two-pass evaluation: add BaseModel loss API, unify logits-to-probs mapping, enforce low-spread clamp with min TP/TN, and update CNN/ViT/MTL sweeps
+
 # 2025-09-10
 - Fix: Unify logit-to-prob mapping across OT & PosProb; use model.param_groups(); harden ViT head/backbone split & bias init
 - Refactor Ignite OTs into factories, fix label parsing, and align two-pass evaluator and metric wiring with PosProbCfg to resolve dtype and transform signature errors.

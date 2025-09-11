@@ -15,12 +15,13 @@ import time
 from typing import Tuple
 
 import torch
+import torch.nn as nn
 from monai.utils import set_determinism
 from ignite.engine import Events
 
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
-from model_registry import build_model, make_default_loss
+from model_registry import build_model  # make_default_loss
 from engine_utils import (
     build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
     get_label_indices_from_batch, build_evaluator, attach_best_checkpoint, attach_val_stack,
@@ -234,6 +235,17 @@ def run(
     # build torch.nn.Module via the registry adapter
     model = build_model(cfg).to(device=device, dtype=torch.float32)
 
+    def apply_dropout_rate(module: nn.Module, p: float):
+        if not (0.0 <= p <= 1.0):
+            return
+        for m in module.modules():
+            if isinstance(m, (nn.Dropout, nn.Dropout2d, nn.Dropout3d, nn.AlphaDropout)):
+                m.p = float(p)
+
+    dropout_override = cfg.get("dropout_rate", None)
+    if dropout_override is not None:
+        apply_dropout_rate(model, float(dropout_override))
+
     # seed head bias so scores aren’t collapsed at start
     pos_idx = int(cfg.get("positive_index", 1))
     cc = cfg.get("class_counts", [1, 1])
@@ -278,7 +290,8 @@ def run(
     )
 
     # loss (generic, uses class_counts for weights/pos_weight)
-    loss_fn = make_default_loss(cfg, class_counts=cfg.get("class_counts"))
+    # loss_fn = make_default_loss(cfg, class_counts=cfg.get("class_counts"))
+    loss_fn = model.get_loss_fn(task=cfg.get("task"), cfg=cfg, class_counts=cfg.get("class_counts"))
 
     # Single source of truth for scores
     ppcfg = PosProbCfg(
@@ -399,6 +412,7 @@ def run(
             multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
             enable_decision_health=health_on,
             # score_provider=ppcfg,
+            cfg=cfg,
         )
         # give std evaluator the same probability mapping and threshold
         # attach_classification_metrics(
@@ -675,6 +689,7 @@ if __name__ == "__main__":
             num_classes=int(cfg.get("num_classes", 2)),
             sampling="weighted",
             seed=42,
+            cfg=cfg,
         )
 
         if cfg.get("print_dataset_sizes", True):

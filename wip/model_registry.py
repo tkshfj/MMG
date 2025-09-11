@@ -6,7 +6,7 @@ import math
 import inspect
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
+# import torch.nn.functional as F
 
 # Import concrete model classes
 from models.simple_cnn import SimpleCNNModel
@@ -106,74 +106,92 @@ def _class_weights_from_counts(counts, num_classes: int):
 
 def make_default_loss(cfg: dict, class_counts: list[int] | None):
     task = str(cfg.get("task", "multitask")).lower()
-    C_cls = int(cfg.get("num_classes", 2))
-    K_seg = int(cfg.get("seg_num_classes", cfg.get("num_classes", 2)))  # noqa: F841
-    single_logit = bool(cfg.get("binary_single_logit", True)) and C_cls == 2
-
-    alpha = float(cfg.get("alpha", 1.0))
-    beta = float(cfg.get("beta", 1.0))
 
     def _loss_fn(outputs, targets):
-        total = 0.0
-        out: Dict[str, torch.Tensor] = {}
-        loss_device = None
-
-        # classification
-        if task in ("classification", "multitask") and "cls_logits" in outputs:
-            logits = outputs["cls_logits"]      # [B, 1] or [B, C]
-            loss_device = logits.device
-            y = targets.get("label", targets.get("y"))
-            if y is None:
-                raise ValueError("Targets must include 'label' for classification.")
-            y = torch.as_tensor(y, device=logits.device)
-
-            if single_logit:
-                yf = y.float().view(-1, 1) if y.ndim == 1 else y.float()
-                # pos_weight = neg/pos if available
-                pw = None
-                if class_counts and len(class_counts) == 2 and class_counts[1] > 0:
-                    neg, pos = float(class_counts[0]), float(class_counts[1])
-                    pw = torch.tensor([neg / max(pos, 1e-6)], device=logits.device, dtype=logits.dtype)
-                cls_loss = F.binary_cross_entropy_with_logits(logits, yf, pos_weight=pw)
-            else:
-                if y.ndim >= 2 and y.shape[-1] > 1:
-                    y = y.argmax(dim=-1)
-                w = None
-                if class_counts and len(class_counts) == C_cls:
-                    w = torch.tensor(class_counts, dtype=logits.dtype, device=logits.device)
-                    w = w.clamp_min(1e-6)
-                    w = w.sum() / w
-                cls_loss = F.cross_entropy(logits, y.long().view(-1), weight=w)
-
-            out["cls_loss"] = cls_loss
-            total = total + alpha * cls_loss
-
-        # segmentation
-        if task in ("segmentation", "multitask") and "seg_logits" in outputs:
-            seg = outputs["seg_logits"]          # [B,K,H,W] or [B,K,D,H,W]
-            loss_device = seg.device if loss_device is None else loss_device
-            mask = targets.get("mask")
-            if mask is None:
-                lab = targets.get("label", {})
-                if isinstance(lab, dict):
-                    mask = lab.get("mask")
-            if mask is None:
-                raise ValueError("Targets must include 'mask' for segmentation.")
-            mask = torch.as_tensor(mask, device=seg.device)
-            if mask.ndim in (4, 5) and mask.shape[1] > 1:
-                mask = mask.argmax(dim=1)
-            seg_loss = F.cross_entropy(seg, mask.long())
-            out["seg_loss"] = seg_loss
-            total = total + beta * seg_loss
-
-        if isinstance(total, torch.Tensor):
-            out["loss"] = total
+        # Delegate to the model's own loss function to keep behavior consistent
+        # Expect caller to pass `model` via cfg or stash it globally; or return a closure later.
+        model = cfg.get("_active_model")
+        if model is None:
+            # Fallback: build a temporary model only to fetch the callable (not ideal, but safe)
+            temp_model = build_model({**cfg, "skip_model_contract_check": True})
+            crit = temp_model.get_loss_fn(task=task, cfg=cfg, class_counts=class_counts)
         else:
-            dev = loss_device if loss_device is not None else "cpu"
-            out["loss"] = torch.tensor(total, device=dev)
-        return out
-
+            crit = model.get_loss_fn(task=task, cfg=cfg, class_counts=class_counts)
+        # `crit` expects (pred_dict, target); here we already have dict-like `outputs/targets`
+        return {"loss": crit(outputs, targets)}
     return _loss_fn
+
+
+# def make_default_loss(cfg: dict, class_counts: list[int] | None):
+#     task = str(cfg.get("task", "multitask")).lower()
+#     C_cls = int(cfg.get("num_classes", 2))
+#     K_seg = int(cfg.get("seg_num_classes", cfg.get("num_classes", 2)))  # noqa: F841
+#     single_logit = bool(cfg.get("binary_single_logit", True)) and C_cls == 2
+
+#     alpha = float(cfg.get("alpha", 1.0))
+#     beta = float(cfg.get("beta", 1.0))
+
+#     def _loss_fn(outputs, targets):
+#         total = 0.0
+#         out: Dict[str, torch.Tensor] = {}
+#         loss_device = None
+
+#         # classification
+#         if task in ("classification", "multitask") and "cls_logits" in outputs:
+#             logits = outputs["cls_logits"]      # [B, 1] or [B, C]
+#             loss_device = logits.device
+#             y = targets.get("label", targets.get("y"))
+#             if y is None:
+#                 raise ValueError("Targets must include 'label' for classification.")
+#             y = torch.as_tensor(y, device=logits.device)
+
+#             if single_logit:
+#                 yf = y.float().view(-1, 1) if y.ndim == 1 else y.float()
+#                 # pos_weight = neg/pos if available
+#                 pw = None
+#                 if class_counts and len(class_counts) == 2 and class_counts[1] > 0:
+#                     neg, pos = float(class_counts[0]), float(class_counts[1])
+#                     pw = torch.tensor([neg / max(pos, 1e-6)], device=logits.device, dtype=logits.dtype)
+#                 cls_loss = F.binary_cross_entropy_with_logits(logits, yf, pos_weight=pw)
+#             else:
+#                 if y.ndim >= 2 and y.shape[-1] > 1:
+#                     y = y.argmax(dim=-1)
+#                 w = None
+#                 if class_counts and len(class_counts) == C_cls:
+#                     w = torch.tensor(class_counts, dtype=logits.dtype, device=logits.device)
+#                     w = w.clamp_min(1e-6)
+#                     w = w.sum() / w
+#                 cls_loss = F.cross_entropy(logits, y.long().view(-1), weight=w)
+
+#             out["cls_loss"] = cls_loss
+#             total = total + alpha * cls_loss
+
+#         # segmentation
+#         if task in ("segmentation", "multitask") and "seg_logits" in outputs:
+#             seg = outputs["seg_logits"]          # [B,K,H,W] or [B,K,D,H,W]
+#             loss_device = seg.device if loss_device is None else loss_device
+#             mask = targets.get("mask")
+#             if mask is None:
+#                 lab = targets.get("label", {})
+#                 if isinstance(lab, dict):
+#                     mask = lab.get("mask")
+#             if mask is None:
+#                 raise ValueError("Targets must include 'mask' for segmentation.")
+#             mask = torch.as_tensor(mask, device=seg.device)
+#             if mask.ndim in (4, 5) and mask.shape[1] > 1:
+#                 mask = mask.argmax(dim=1)
+#             seg_loss = F.cross_entropy(seg, mask.long())
+#             out["seg_loss"] = seg_loss
+#             total = total + beta * seg_loss
+
+#         if isinstance(total, torch.Tensor):
+#             out["loss"] = total
+#         else:
+#             dev = loss_device if loss_device is not None else "cpu"
+#             out["loss"] = torch.tensor(total, device=dev)
+#         return out
+
+#     return _loss_fn
 
 
 # Generic builder adapter
@@ -286,6 +304,11 @@ def build_model(cfg: dict) -> nn.Module:
         raise KeyError(f"Unknown architecture '{name}'. Available: {list(MODEL_REGISTRY.keys())}")
 
     model = MODEL_REGISTRY[name](cfg)
+    # Make the active model available to loss builders
+    try:
+        cfg["_active_model"] = model
+    except Exception:
+        pass
 
     head_keys = set(cfg.get("head_keys", ["head", "classifier", "mlp_head", "fc", "cls"]))
 

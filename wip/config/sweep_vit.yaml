@@ -37,17 +37,18 @@ parameters:
   cal_init_threshold:  { values: [0.40, 0.50, 0.60] }
   cal_ema_beta:        { values: [0.10, 0.20, 0.30] }
   cal_max_delta:       { values: [0.05, 0.10, 0.20] }
-  cal_rate_tolerance:  { values: [0.08, 0.10, 0.12, 0.15] }
+  # cal_rate_tolerance:  { values: [0.08, 0.10, 0.12, 0.15] }
   cal_auc_floor:       { values: [0.50, 0.52, 0.55] }
 
   # Guardrails (authoritative threshold acceptance)
-  thr_warmup_epochs: { values: [1, 2, 3] }   # distinct from cal_warmup if needed
+  thr_warmup_epochs: { value: 5 }  # { values: [1, 2, 3] }   # distinct from cal_warmup if needed
   thr_min:           { value: 0.05 }
   thr_max:           { value: 0.95 }
   thr_posrate_min:   { value: 0.05 }         # reject all-neg
   thr_posrate_max:   { value: 0.95 }         # reject all-pos
   thr_min_tp:        { values: [0, 5, 10] }
   thr_min_tn:        { values: [0, 5] }
+  thr_hysteresis:    { values: [0.01, 0.02, 0.03] }
 
   # Decision-health (optional; keeps pos_rate near base rate)
   enable_decision_health: { value: true }  # { values: [false, true] }

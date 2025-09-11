@@ -112,16 +112,22 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
     # if str(cfg.get("param_groups", "single")).lower() == "split" and hasattr(parameters, "parameters"):
 
     # handle split param groups here if a model was passed in and we can identify head vs backbone
-    if str(cfg.get("param_groups", "single")).lower() == "split" and hasattr(parameters, "parameters"):
+    # if str(cfg.get("param_groups", "single")).lower() == "split" and hasattr(parameters, "parameters"):
+    if str(cfg.get("param_groups", "single")).lower() in ("split", "auto") and hasattr(parameters, "parameters"):
         base_lr = float(cfg.get("lr", 1e-3))
         # New: scale head LR down, and optionally raise WD on head
-        head_lr_scale = float(cfg.get("head_lr_scale", 0.5))      # < 1.0 → lower LR on head
-        head_wd_scale = float(cfg.get("head_wd_scale", 1.5))      # > 1.0 → slightly higher WD on head
-        # Guardrails: we lower LR on head (≤1.0) and can raise WD (≥1.0)
-        if not (0.0 < head_lr_scale <= 1.0):
-            raise ValueError(f"head_lr_scale must be in (0,1], got {head_lr_scale}")
-        if head_wd_scale < 1.0:
-            raise ValueError(f"head_wd_scale must be ≥ 1.0, got {head_wd_scale}")
+        # head_lr_scale = float(cfg.get("head_lr_scale", 0.5))      # < 1.0 → lower LR on head
+        # head_wd_scale = float(cfg.get("head_wd_scale", 1.5))      # > 1.0 → slightly higher WD on head
+        # # Guardrails: we lower LR on head (≤1.0) and can raise WD (≥1.0)
+        # if not (0.0 < head_lr_scale <= 1.0):
+        #     raise ValueError(f"head_lr_scale must be in (0,1], got {head_lr_scale}")
+        # if head_wd_scale < 1.0:
+        #     raise ValueError(f"head_wd_scale must be ≥ 1.0, got {head_wd_scale}")
+        # Allow boosting (>1) or down-scaling (<1) of head LR; clamp to a safe range
+        head_lr_scale = float(cfg.get("head_lr_scale", 1.0))
+        head_lr_scale = float(min(max(head_lr_scale, 0.05), 10.0))  # [0.05, 10]
+        head_wd_scale = float(cfg.get("head_wd_scale", 1.0))
+        head_wd_scale = float(max(head_wd_scale, 0.0))              # allow 0..∞ (0 disables WD on head)
 
         # 0) Prefer model.param_groups() if available (exact control from the model)
         model_groups = _consume_model_param_groups(parameters)
@@ -187,7 +193,8 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
                     print(f"[optim] group {i}: {len(g['params'])} tensors, {n} params, "
                           f"lr={g.get('lr')}, wd={g.get('weight_decay')}")
             return optimizer
-        elif str(cfg.get("param_groups", "single")).lower() == "split" and verbose:
+        # elif str(cfg.get("param_groups", "single")).lower() == "split" and verbose:
+        elif str(cfg.get("param_groups", "single")).lower() in ("split", "auto") and verbose:
             print("[optim] split requested but could not identify both head and backbone; falling back to single group.")
 
     param_groups = _extract_param_groups(parameters)

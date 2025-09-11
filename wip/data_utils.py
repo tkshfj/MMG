@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import os
 import ast
+import numpy as np
 import pandas as pd
 from typing import Optional, Sequence
 import torch
@@ -252,6 +253,7 @@ def build_dataloaders(
     seed: int = 42,
     invert_labels: bool = False,
     label_map: dict | None = None,
+    cfg: dict | None = None,
 ):
     df = pd.read_csv(metadata_csv)
 
@@ -307,26 +309,114 @@ def build_dataloaders(
     if multiprocessing_context is not None and num_workers and num_workers > 0:
         common_kwargs["multiprocessing_context"] = multiprocessing_context
 
-    g = torch.Generator().manual_seed(int(seed))
+    g = torch.Generator()
+    g.manual_seed(int(seed))
 
-    # weighted sampler
+    # derive train label stats (used by sampler & for logging)
+    train_labels = [int(it["label"]) for it in train_items if "label" in it]
+    has_labels = (len(train_labels) == len(train_items)) and (len(train_labels) > 0)
+
+    class_counts_train = None
+    if has_labels:
+        class_counts_train = np.bincount(np.asarray(train_labels), minlength=int(max(2, num_classes)))
+        # basic imbalance ratio (ignore zero-count classes except to flag)
+        nonzero = class_counts_train[class_counts_train > 0]
+        imbalance_ratio = (nonzero.max() / nonzero.min()) if len(nonzero) >= 2 else float("inf")
+    else:
+        imbalance_ratio = 1.0  # no labels → treat as balanced for control flow
+
+    # persist TRAIN counts for loss weighting (BCE pos_weight)
+    if has_labels and class_counts_train is not None and cfg is not None:
+        # keep raw order as [count_class0, count_class1, ...]
+        cfg["class_counts"] = tuple(int(c) for c in class_counts_train.tolist())
+
+    # choose sampler strategy
+    # sampling: "none" | "weighted" | "auto"
+    sampling_mode = (sampling or "none").lower().strip()
+    auto_threshold = float(os.environ.get("SAMPLER_IMBALANCE_THRESHOLD", 1.5))
+
+    use_weighted = False
+    if sampling_mode == "weighted":
+        use_weighted = True
+    elif sampling_mode == "auto":
+        use_weighted = has_labels and (imbalance_ratio >= auto_threshold)
+    else:
+        use_weighted = False
+
+    # construct train_sampler if requested and feasible
     train_sampler = None
-    if sampling.lower() == "weighted" and task in ("classification", "multitask"):
-        # y_train = torch.as_tensor([it["label"] for it in train_items], dtype=torch.long)
-        lbls = [it["label"] for it in train_items if "label" in it]
-        if not lbls:
-            logger.warning("sampling='weighted' requested but no labels found in train_items; using shuffle.")
-        else:
-            y_train = torch.as_tensor(lbls, dtype=torch.long)
-            if int(num_classes) == 2:
-                n_pos = int((y_train == 1).sum())
-                n_neg = int((y_train == 0).sum())
-                default_pos_w = (n_neg / max(n_pos, 1)) if n_pos > 0 else 1.0
-                pw = float(default_pos_w if pos_weight is None else pos_weight)
-                train_sampler = make_weighted_sampler_binary(y_train, pos_weight=pw, neg_weight=float(neg_weight))
+    if use_weighted and has_labels:
+        y = np.asarray(train_labels, dtype=np.int64)
+
+        if int(num_classes) == 2:
+            # Binary weights:
+            n_neg = float((y == 0).sum())
+            n_pos = float((y == 1).sum())
+
+            if n_pos == 0 or n_neg == 0:
+                logging.warning("Weighted sampling requested but one class has zero samples; falling back to shuffle.")
             else:
-                cw = torch.as_tensor(class_weights, dtype=torch.float) if class_weights is not None else None
-                train_sampler = make_weighted_sampler_multiclass(y_train, class_weights=cw, num_classes=int(num_classes))
+                # If explicit pos/neg weights passed, use them; else inverse frequency
+                pw = float(pos_weight) if (pos_weight is not None and pos_weight > 0) else (n_neg / n_pos)
+                nw = float(neg_weight) if (neg_weight is not None and neg_weight > 0) else 1.0
+
+                w = np.where(y == 1, pw, nw).astype(np.float64)
+                # Optional stabilization: cap and normalize to mean≈1 to avoid extreme variance
+                cap = float(os.environ.get("SAMPLER_WEIGHT_CAP", 20.0))
+                w = np.clip(w, 1e-6, cap)
+                w = w * (w.size / w.sum())
+
+                train_sampler = WeightedRandomSampler(
+                    weights=torch.as_tensor(w, dtype=torch.double),
+                    num_samples=len(w),
+                    replacement=True,
+                    generator=g
+                )
+        else:
+            # Multiclass: use provided class_weights or inverse frequency
+            if class_weights is not None:
+                cw = np.asarray(class_weights, dtype=np.float64)
+                if cw.size != int(num_classes):
+                    logging.warning("class_weights size != num_classes; ignoring custom weights; using inverse frequency.")
+                    cw = None
+            else:
+                cw = None
+
+            if cw is None:
+                counts = class_counts_train.astype(np.float64)
+                counts[counts <= 0] = 1.0
+                cw = 1.0 / counts  # inverse frequency
+
+            w = cw[y]
+            cap = float(os.environ.get("SAMPLER_WEIGHT_CAP", 20.0))
+            w = np.clip(w, 1e-6, cap)
+            w = w * (w.size / w.sum())
+
+            train_sampler = WeightedRandomSampler(
+                weights=torch.as_tensor(w, dtype=torch.double),
+                num_samples=len(w),
+                replacement=True,
+                generator=g
+            )
+
+    # # weighted sampler
+    # train_sampler = None
+    # if sampling.lower() == "weighted" and task in ("classification", "multitask"):
+    #     # y_train = torch.as_tensor([it["label"] for it in train_items], dtype=torch.long)
+    #     lbls = [it["label"] for it in train_items if "label" in it]
+    #     if not lbls:
+    #         logger.warning("sampling='weighted' requested but no labels found in train_items; using shuffle.")
+    #     else:
+    #         y_train = torch.as_tensor(lbls, dtype=torch.long)
+    #         if int(num_classes) == 2:
+    #             n_pos = int((y_train == 1).sum())
+    #             n_neg = int((y_train == 0).sum())
+    #             default_pos_w = (n_neg / max(n_pos, 1)) if n_pos > 0 else 1.0
+    #             pw = float(default_pos_w if pos_weight is None else pos_weight)
+    #             train_sampler = make_weighted_sampler_binary(y_train, pos_weight=pw, neg_weight=float(neg_weight))
+    #         else:
+    #             cw = torch.as_tensor(class_weights, dtype=torch.float) if class_weights is not None else None
+    #             train_sampler = make_weighted_sampler_multiclass(y_train, class_weights=cw, num_classes=int(num_classes))
 
     # construct loaders (default collate is fine now)
     def _make_loader(ds, *, shuffle: bool, drop_last: bool = False, sampler=None):
@@ -345,6 +435,14 @@ def build_dataloaders(
     train_loader = _make_loader(train_ds, shuffle=True, drop_last=True, sampler=train_sampler)
     val_loader = _make_loader(val_ds, shuffle=False)
     test_loader = _make_loader(test_ds, shuffle=False)
+
+    # log what happened
+    if has_labels:
+        counts_str = ", ".join(f"c{i}={int(c)}" for i, c in enumerate(class_counts_train))
+        logging.info(f"[sampler] sampling={sampling_mode} imbalance_ratio={imbalance_ratio:.2f} counts=[{counts_str}] "
+                     f"→ {'WeightedRandomSampler' if train_sampler is not None else 'shuffle'}")
+    else:
+        logging.info("[sampler] no labels detected in train_items; using shuffle.")
 
     if debug:
         batch = next(iter(val_loader))
