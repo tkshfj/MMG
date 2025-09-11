@@ -180,6 +180,12 @@ class TwoPassEvaluator:
         # smoothing & hysteresis knobs (gentle defaults)
         self.cal_ema_beta = float(getattr(_ccfg, "cal_ema_beta", 0.30))
         self.thr_hysteresis = float(getattr(_ccfg, "thr_hysteresis", 0.02))
+        # larger, temporary step while still in warmup (defaults to 2× regular)
+        self.health_warmup_max_delta = float(getattr(_ccfg, "health_warmup_max_delta", 2.0 * float(getattr(_ccfg, "cal_max_delta", 0.10))))
+        # proportional gain w.r.t. rate error (0..1), caps how much of max_delta we use
+        self.health_rate_gain = float(getattr(_ccfg, "health_rate_gain", 0.75))
+        # allow multiple corrective nudges in one validate() during warmup
+        self.health_iters_warmup = int(getattr(_ccfg, "health_iters_warmup", 2))
 
     # central threshold sanitizer
     def _clamp_thr01(self, value, *, default: float = 0.5, ctx: str = "thr") -> float:
@@ -233,11 +239,11 @@ class TwoPassEvaluator:
         iqr = q90 - q10
         pos_rate_seed = float((probs >= float(t_seed)).mean())
 
-        cfg = getattr(self.calibrator, "cfg", None)
-        cal_min_std = float(getattr(cfg, "cal_min_std", 1e-4))
-        cal_min_iqr = float(getattr(cfg, "cal_min_iqr", 1e-3))
+        _ccfg = getattr(self.calibrator, "cfg", None)
+        self.cal_min_std = float(getattr(_ccfg, "cal_min_std", 5e-3))   # was 1e-4
+        self.cal_min_iqr = float(getattr(_ccfg, "cal_min_iqr", 1e-2))   # was 1e-3
 
-        if std >= cal_min_std or iqr >= cal_min_iqr:
+        if std >= self.cal_min_std or iqr >= self.cal_min_iqr:
             # Not low-spread → leave seed as-is
             return float(t_seed)
 
@@ -258,6 +264,34 @@ class TwoPassEvaluator:
 
         # Low-spread but already inside corridor → keep seed
         return float(t_seed)
+
+    def _apply_decision_health(self, *, probs: np.ndarray, base_rate: float, t_curr: float, epoch: int) -> float:
+        """Rate-match the current threshold with optional warmup boosts."""
+        if probs.size == 0:
+            return float(t_curr)
+
+        tol = self._resolve_rate_tolerance()
+        t_out = float(t_curr)
+
+        # choose step budget for this call
+        step_budget = self._resolve_max_delta()
+        iters = 1
+        if epoch < int(self.thr_warmup_epochs):
+            step_budget = float(self.health_warmup_max_delta)
+            iters = max(1, int(self.health_iters_warmup))
+
+        for _ in range(iters):
+            pr_now = _pos_rate(probs, t_out)
+            err = float(base_rate) - pr_now
+            if abs(err) <= float(tol):
+                break
+            # target threshold from quantile projection
+            t_dm = _rate_match_threshold(probs, float(base_rate))
+            # scale step by error magnitude and gain (so tiny errors nudge less)
+            frac = min(1.0, max(0.0, self.health_rate_gain * abs(err)))
+            max_step = float(step_budget) * frac
+            t_out = _bounded_step(float(t_out), float(t_dm), max_delta=max_step, lo=self.thr_min, hi=self.thr_max)
+        return float(t_out)
 
     # Public guards
     @property
@@ -479,8 +513,18 @@ class TwoPassEvaluator:
                     pred = (probs >= t_try).astype(np.int64)
                     tp = int(((labels == 1) & (pred == 1)).sum())
                     tn = int(((labels == 0) & (pred == 0)).sum())
-                    if tp < self.thr_min_tp or tn < self.thr_min_tn:
-                        return False
+                    # if tp < self.thr_min_tp or tn < self.thr_min_tn:
+                    #     return False
+                    if tp < self.thr_min_tp:
+                        # lower threshold to admit more positives
+                        t_needed = np.quantile(probs[labels == 1], 1.0 - (self.thr_min_tp / max(1, (labels == 1).sum())))
+                        t_try = min(t_try, float(t_needed))
+                    if tn < self.thr_min_tn:
+                        # raise threshold to admit more negatives
+                        t_needed = np.quantile(probs[labels == 0], 1.0 - (self.thr_min_tn / max(1, (labels == 0).sum())))
+                        t_try = max(t_try, float(t_needed))
+                    # then bound by max-delta, thr_min/max
+                    t_try = _bounded_step(float(self.last_threshold or t_seed), t_try, max_delta=self._resolve_max_delta(), lo=self.thr_min, hi=self.thr_max)
                 # movement guard vs last accepted
                 max_delta = self._resolve_max_delta()
                 if self.last_threshold is not None and abs(t_try - float(self.last_threshold)) > max_delta:
@@ -492,17 +536,33 @@ class TwoPassEvaluator:
                 # reject update → keep previous (stable)
                 t_final = float(prev)
 
-            # E) optional decision-health rate matching (still on PROBS)
+            # E) decision-health (stronger during warmup)
             if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
-                rate_tol = self._resolve_rate_tolerance()
-                pr_now = _pos_rate(probs, t_final)
-                if abs(pr_now - float(base_rate)) > rate_tol:
-                    t_dm = _rate_match_threshold(probs, float(base_rate))
-                    t_final = _bounded_step(
-                        float(t_final), float(t_dm),
-                        max_delta=self._resolve_max_delta(),
-                        lo=float(self.thr_min), hi=float(self.thr_max)
-                    )
+                t_final = self._apply_decision_health(probs=probs, base_rate=float(base_rate), t_curr=float(t_final), epoch=int(epoch))
+
+                if not getattr(self, "_watchdog_active", False):
+                    pr_now = _pos_rate(probs, t_final)
+                    logger.info("[decision health] epoch=%d thr=%.4f pos=%.4f base=%.4f tol=%.4f step_max=%.3f iters=%d",
+                                int(epoch), t_final, pr_now, float(base_rate), self._resolve_rate_tolerance(),
+                                self.health_warmup_max_delta if epoch < self.thr_warmup_epochs else self._resolve_max_delta(),
+                                self.health_iters_warmup if epoch < self.thr_warmup_epochs else 1)
+
+            # # E) optional decision-health rate matching (still on PROBS)
+            # if self.enable_decision_health and base_rate is not None and epoch >= int(self.health_warmup):
+            #     rate_tol = self._resolve_rate_tolerance()
+            #     pr_now = _pos_rate(probs, t_final)
+            #     if abs(pr_now - float(base_rate)) > rate_tol:
+            #         t_dm = _rate_match_threshold(probs, float(base_rate))
+            #         t_final = _bounded_step(
+            #             float(t_final), float(t_dm),
+            #             max_delta=self._resolve_max_delta(),
+            #             lo=float(self.thr_min), hi=float(self.thr_max)
+            #         )
+
+            # after computing t_final (after health correction), before publishing:
+            if self.last_threshold is not None:
+                if abs(t_final - float(self.last_threshold)) < self.thr_hysteresis:
+                    t_final = float(self.last_threshold)
 
             # F) publish once and run the standard engine to emit metrics
             self.last_threshold = float(t_final)
