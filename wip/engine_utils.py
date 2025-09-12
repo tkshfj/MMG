@@ -10,10 +10,10 @@ from enum import Enum
 from types import SimpleNamespace
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union, Mapping
 from ignite.handlers import EarlyStopping, Checkpoint, DiskSaver
-from monai.engines import SupervisedTrainer
 from ignite.engine import Events, Engine
 from utils.safe import to_float_scalar, is_finite_float, to_tensor
 from posprob import PosProbCfg
+from optim_factory import grad_norms_by_group  # zero_grad_if_nan
 from metrics_utils import (
     extract_cls_logits_from_any,
     extract_seg_logits_from_any,
@@ -242,6 +242,16 @@ def _pick_logits_from_output(out: Any) -> Optional[torch.Tensor]:
     return None
 
 
+# def ppcfg_from_logits(logits, positive_index=1):
+#     if logits.ndim == 1 or (logits.ndim >= 2 and logits.shape[-1] == 1):
+#         scheme = "bce1"
+#     elif logits.ndim >= 2 and logits.shape[-1] >= 2:
+#         scheme = "ce"
+#     else:
+#         scheme = "bce1"
+#     return PosProbCfg(positive_index=int(positive_index), scheme=scheme)
+
+
 def decision_from_logits(
     logits: torch.Tensor,
     threshold: float,
@@ -255,9 +265,17 @@ def decision_from_logits(
     """
     if to_pos_prob is None:
         # Fallback: construct a minimal PosProbCfg (kept for backward compat)
-        pp = PosProbCfg(
-            binary_single_logit=(logits.ndim in (1, 2) and (logits.ndim == 1 or logits.shape[-1] == 1)),
-            positive_index=int(positive_index))
+        # pp = PosProbCfg(
+        #     binary_single_logit=(logits.ndim in (1, 2) and (logits.ndim == 1 or logits.shape[-1] == 1)),
+        #     positive_index=int(positive_index))
+        # ppcfg = ppcfg_from_logits(logits, positive_index)
+        if logits.ndim == 1 or (logits.ndim >= 2 and logits.shape[-1] == 1):
+            scheme = "bce1"          # single-logit BCEWithLogits
+        elif logits.ndim >= 2 and logits.shape[-1] >= 2:
+            scheme = "ce"             # multi-logit CrossEntropy-style
+        else:
+            scheme = "bce1"           # safe fallback
+        pp = PosProbCfg(positive_index=int(positive_index), scheme=scheme)
         probs = pp.logits_to_pos_prob(logits)
     else:
         probs = to_pos_prob(logits)
@@ -273,12 +291,19 @@ def build_trainer(
     loss_function,
     prepare_batch,
     train_metrics: Optional[Dict[str, Any]] = None,
-) -> SupervisedTrainer:
+) -> Engine:
     assert callable(loss_function), "loss_function must be callable"
     assert callable(prepare_batch), "prepare_batch must be callable"
 
+    # Defaults; caller may override after construction via trainer.state.*
+    _grad_dbg_steps_default = 100
+    _grad_dbg_every_default = 10
+    _logit_dbg_steps_default = 20
+    _skip_warn_every_default = 20
+
     def _iteration_update(engine: Engine, batch):
         network.train()
+
         dev = getattr(engine.state, "device", device)
         nb = getattr(engine.state, "non_blocking", bool(getattr(train_data_loader, "pin_memory", False)))
 
@@ -287,19 +312,82 @@ def build_trainer(
         optimizer.zero_grad(set_to_none=True)
         preds = network(x)
 
-        # Normalize any loss return shape to a tensor dict with a 'loss' key
+        # early logits-spread probe to catch constant scores
+        try:
+            it = int(getattr(engine.state, "iteration", 0) or 0)
+            dbg_logit_until = int(getattr(engine.state, "logit_debug_steps", _logit_dbg_steps_default))
+            if it <= dbg_logit_until:
+                from metrics_utils import extract_cls_logits_from_any
+                logits = extract_cls_logits_from_any(preds)
+                if torch.is_tensor(logits):
+                    logits = logits.detach().float().view(-1)
+                    if logits.numel() > 0:
+                        lmin, lmed, lmax = logits.min().item(), logits.median().item(), logits.max().item()
+                        lstd = logits.std(unbiased=False).item()
+                        # stash to output for logging
+                        engine.state._last_logit_probe = (lmin, lmed, lmax, lstd)
+        except Exception:
+            pass
+
+        # Normalize any loss return to a dict with a 'loss' tensor
         loss_out = loss_function(preds, targets)
-        loss_map = coerce_loss_dict(loss_out)  # tensors only, ensures 'loss' exists
+        loss_map = coerce_loss_dict(loss_out)
         total = loss_map["loss"]
         if not torch.is_tensor(total):
             raise TypeError("'loss' must be a torch.Tensor.")
 
         total.backward()
-        optimizer.step()
 
-        # Convert to plain floats for StatsHandler/W&B/etc.
+        # Gradient diagnostics (first N steps, every K iters)
+        it = int(getattr(engine.state, "iteration", 0) or 0)
+        dbg_until = int(getattr(engine.state, "grad_debug_steps", _grad_dbg_steps_default))
+        dbg_every = int(getattr(engine.state, "grad_debug_every", _grad_dbg_every_default))
+
         out: Dict[str, float] = {}
-        # be strict for the primary loss (catch reduction errors)
+
+        if it <= dbg_until and it % max(1, dbg_every) == 0:
+            try:
+                norms = grad_norms_by_group(optimizer)
+                out["grad/gnorm_total"] = float(norms.get("total", 0.0))
+                gi = 0
+                for k, v in norms.items():
+                    if k.startswith("g"):
+                        out[f"grad/gnorm_g{gi}"] = float(v)
+                        gi += 1
+            except Exception:
+                pass
+
+        # Safe NaN/Inf guard: ignore None grads; zero only non-finite grads
+        bad = False
+        try:
+            for group in optimizer.param_groups:
+                for p in group.get("params", ()):
+                    g = p.grad
+                    if g is None:
+                        continue  # do NOT treat missing grads as bad
+                    if not torch.isfinite(g).all():
+                        g.detach().zero_()
+                        bad = True
+        except Exception:
+            # If anything goes wrong, be conservative: attempt a step
+            bad = False
+
+        did_step = not bad
+        if did_step:
+            optimizer.step()
+            engine.state._skipped_steps = 0
+        else:
+            # count consecutive skips and warn occasionally
+            skips = int(getattr(engine.state, "_skipped_steps", 0) or 0) + 1
+            engine.state._skipped_steps = skips
+            warn_every = int(getattr(engine.state, "skip_warn_every", _skip_warn_every_default))
+            if skips % max(1, warn_every) == 0:
+                logger.warning("[trainer] skipped %d optimizer.step() due to non-finite grads.", skips)
+
+        optimizer.zero_grad(set_to_none=True)
+
+        # Scalars for loggers/StatsHandler/etc.
+        from utils.safe import to_float_scalar  # already imported at top file
         main_loss_f = to_float_scalar(total, strict=True)
         if main_loss_f is None:
             main_loss_f = to_float_scalar(total, strict=False)
@@ -312,39 +400,49 @@ def build_trainer(
             if f is not None:
                 out[k] = f
 
-        # optional: log LR (scheduler-aware; no deprecated get_lr())
+        # Expose current LR (scheduler-aware)
         sched = getattr(engine.state, "_scheduler", None)
         lr_val = read_current_lr(optimizer, sched)
         if lr_val is not None:
-            out["lr"] = lr_val
+            out["lr"] = float(lr_val)
 
-        return out  # engine.state.output becomes this dict
+        # Expose whether we actually stepped + (optional) logits probe
+        out["opt/did_step"] = 1.0 if did_step else 0.0
+        probe = getattr(engine.state, "_last_logit_probe", None)
+        if probe is not None:
+            lmin, lmed, lmax, lstd = probe
+            out["logits/min"] = float(lmin)
+            out["logits/med"] = float(lmed)
+            out["logits/max"] = float(lmax)
+            out["logits/std"] = float(lstd)
 
-    trainer = SupervisedTrainer(
-        device=device,
-        max_epochs=max_epochs,
-        train_data_loader=train_data_loader,
-        network=network,
-        optimizer=optimizer,
-        loss_function=loss_function,
-        prepare_batch=prepare_batch,
-        iteration_update=_iteration_update,
-    )
+        return out
 
-    # attach device/non_blocking on state AFTER the trainer exists
+    trainer = Engine(_iteration_update)
+
+    # mirror SupervisedTrainer’s state
+    trainer.state.max_epochs = int(max_epochs)
+    trainer.state.epoch = 0
+
+    # stash device + pin_memory hint on state
     _attach_device_state(trainer, device, getattr(train_data_loader, "pin_memory", False))
 
+    # unified scorer on trainer.state (parity with evaluator)
     if not hasattr(trainer.state, "ppcfg"):
-        trainer.state.ppcfg = PosProbCfg()  # or accept ppcfg param like evaluator
+        trainer.state.ppcfg = PosProbCfg.from_cfg(getattr(trainer.state, "cfg", {}))
         trainer.state.to_pos_prob = trainer.state.ppcfg.logits_to_pos_prob
 
-    # attach training metrics (names MUST be bare, e.g., "auc", "accuracy")
-    if train_metrics:
-        # idempotency guard (avoid double-attach if rebuild/reuse)
-        if not getattr(trainer.state, "_train_metrics_attached", False):
-            for name, metric in train_metrics.items():
-                metric.attach(trainer, name)
-            setattr(trainer.state, "_train_metrics_attached", True)
+    # attach training metrics (bare names)
+    if train_metrics and not getattr(trainer.state, "_train_metrics_attached", False):
+        for name, metric in train_metrics.items():
+            metric.attach(trainer, name)
+        setattr(trainer.state, "_train_metrics_attached", True)
+
+    # tweakables (can be overridden by caller after build)
+    # trainer.state.grad_debug_steps = 200
+    # trainer.state.grad_debug_every = 5
+    # trainer.state.logit_debug_steps = 20
+    # trainer.state.skip_warn_every = 20
 
     return trainer
 
@@ -367,7 +465,9 @@ def build_evaluator(
 
     # single source-of-truth scorer
     if ppcfg is None:
-        ppcfg = PosProbCfg()  # defaults: positive_index=1, binary_single_logit=True, mode="auto"
+        # ppcfg = PosProbCfg.from_cfg(cfg)
+        ppcfg = PosProbCfg(positive_index=1, scheme="bce1")
+        # ppcfg = PosProbCfg()  # defaults: positive_index=1, binary_single_logit=True, mode="auto"
 
     def _eval_step(engine: Engine, batch: Mapping[str, Any]) -> Dict[str, Any]:
         dev = getattr(engine.state, "device", device)
@@ -464,7 +564,9 @@ def attach_engine_metrics(
 
     # single PosProbCfg for both trainer/evaluator metrics
     if ppcfg is None:
-        ppcfg = PosProbCfg(positive_index=int(positive_index))
+        # ppcfg = PosProbCfg.from_cfg(cfg)
+        # ppcfg.positive_index = int(positive_index)
+        ppcfg = PosProbCfg(positive_index=int(positive_index), scheme="bce1")
 
     # training metrics (keep light; classification-only by default)
     train_metrics = make_metrics(
@@ -1123,7 +1225,8 @@ def attach_val_threshold_search(
         # prev = float(getattr(evaluator.state, "threshold", 0.5))
         prev = float(engine.state.threshold) if hasattr(engine.state, "threshold") else float(getattr(engine.state, "cls_threshold", 0.5))
         # Write it back once so future epochs never fall back to cfg
-        engine.state.threshold = prev
+        if not hasattr(engine.state, "threshold"):
+            engine.state.threshold = prev
         # Single source of truth scorer
         to_pos_prob = getattr(engine.state, "to_pos_prob", None)
         if to_pos_prob is None:
@@ -1255,8 +1358,6 @@ def attach_pos_score_debug_once(
         if to_pos_prob is None:
             return
         try:
-            # s = positive_score_from_logits(logits, positive_index=int(positive_index))
-            # s = s.detach().reshape(-1).cpu()
             s = to_pos_prob(logits).detach().reshape(-1).cpu()
             buf["scores"].append(s)
         except Exception:
@@ -1304,6 +1405,19 @@ def attach_pos_score_debug_once(
             evaluator.remove_event_handler(_summarize, Events.COMPLETED)
         except Exception:
             pass
+
+    @evaluator.on(Events.ITERATION_COMPLETED)
+    def _log_logits_stats(engine):
+        out = engine.state.output
+        logits = _pick_logits_from_output(out)
+        if logits is None:
+            return
+        t = logits.detach().view(-1)
+        # print once early; or write to metrics as needed
+        if getattr(engine.state, "_logged_logits_once", False):
+            return
+        print(f"[debug] logits mean={t.mean().item():.4f} std={t.std().item():.4f} min={t.min().item():.4f} max={t.max().item():.4f}")
+        engine.state._logged_logits_once = True
 
 
 def attach_val_stack(
@@ -1525,86 +1639,3 @@ __all__ = [
     "make_warmup_safe_score_fn",
     "maybe_update_best",
 ]
-
-# @evaluator.on(Events.EPOCH_COMPLETED)
-# def _choose_threshold(engine: Engine):
-#     if not buf["scores"]:
-#         return
-#     probs = torch.cat(buf["scores"], dim=0).clamp(0.0, 1.0)
-#     y_true = torch.cat(buf["targets"], dim=0).long()
-
-#     thr, stats = _best_threshold_from_probs(probs, y_true, mode=mode)
-#     y_hat = (probs >= thr).long()
-#     pos_rate = float(y_hat.float().mean().item())
-
-#     # Basic sanity summaries
-#     m = engine.state.metrics
-#     m["score_mean"] = float(probs.mean().item())
-#     m["score_std"] = float(probs.std(unbiased=False).item())
-#     m["gt_pos_rate"] = float((y_true == 1).float().mean().item())
-
-#     # Compute decisions at proposed thr
-#     y_hat = (probs >= thr).long()
-#     pos_rate = float(y_hat.float().mean().item())
-
-#     # Degenerate guard: if all-positive or all-negative decisions, keep last good threshold
-#     if pos_rate in (0.0, 1.0):
-#         thr = float(state["last_good_thr"])
-#         y_hat = (probs >= thr).long()
-#         pos_rate = float(y_hat.float().mean().item())
-#     else:
-#         state["last_good_thr"] = float(thr)
-
-#     # recompute confusion matrix at chosen thr for consistency
-#     tp = int(((y_hat == 1) & (y_true == 1)).sum())
-#     tn = int(((y_hat == 0) & (y_true == 0)).sum())
-#     fp = int(((y_hat == 1) & (y_true == 0)).sum())
-#     fn = int(((y_hat == 0) & (y_true == 1)).sum())
-
-#     prec = tp / max(tp + fp, 1)
-#     rec1 = tp / max(tp + fn, 1)
-#     rec0 = tn / max(tn + fp, 1)
-#     bal_acc = 0.5 * (rec0 + rec1)
-#     f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
-
-#     # m["threshold"] = float(thr)
-#     # m["cls_confmat"] = [[tn, fp], [fn, tp]]
-#     # m["cls_confmat_00"] = float(tn)
-#     # m["cls_confmat_01"] = float(fp)
-#     # m["cls_confmat_10"] = float(fn)
-#     # m["cls_confmat_11"] = float(tp)
-#     # m["prec"] = float(prec)
-#     # m["recall"] = float(rec1)
-#     # m["recall_0"] = float(rec0)
-#     # m["recall_1"] = float(rec1)
-#     # m["bal_acc"] = float(bal_acc)
-#     # m["f1"] = float(f1)
-#     # m["pos_rate"] = float(pos_rate)
-
-#     m["search_threshold"] = float(thr)
-#     m["search_confmat"] = [[tn, fp], [fn, tp]]
-#     m["search_confmat_00"] = float(tn)
-#     m["search_confmat_01"] = float(fp)
-#     m["search_confmat_10"] = float(fn)
-#     m["search_confmat_11"] = float(tp)
-#     m["search_prec"] = float(prec)
-#     m["search_recall"] = float(rec1)
-#     m["search_recall_0"] = float(rec0)
-#     m["search_recall_1"] = float(rec1)
-#     m["search_bal_acc"] = float(bal_acc)
-#     m["search_f1"] = float(f1)
-#     m["search_pos_rate"] = float(pos_rate)
-
-#     if logger is not None:
-#         try:
-#             logger("val/threshold", float(thr))
-#         except Exception:
-#             pass
-
-#     evaluator.state.threshold = float(thr)  # single SoT for val metrics
-#     # mirror to trainer so train-time decisions/loggers see it next epoch
-#     try:
-#         if hasattr(evaluator, "trainer"):
-#             evaluator.trainer.state.threshold = float(thr)
-#     except Exception:
-#         pass

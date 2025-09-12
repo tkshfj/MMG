@@ -1,119 +1,149 @@
 # posprob.py
 from __future__ import annotations
 from dataclasses import dataclass
-from typing import Any, Optional, Literal, Tuple
+from typing import Any, Literal, Tuple
 import torch
+
+# Prefer pulling raw logits under the 'logits' key; fall back sanely.
+# We keep the import optional to avoid circulars.
 try:
-    # avoid circular import at module import time
-    from metrics_utils import extract_cls_logits_from_any  # noqa: F401
+    from metrics_utils import extract_cls_logits_from_any as _extract_logits  # noqa: F401
 except Exception:
-    extract_cls_logits_from_any = None  # type: ignore[misc]
+    _extract_logits = None  # type: ignore
 
 
 def _as_tensor(x: Any) -> torch.Tensor:
     return x if isinstance(x, torch.Tensor) else torch.as_tensor(x)
 
 
-def positive_score_from_logits(
+# Single pure function: logits -> P(pos)
+def logits_to_pos_prob(
     logits: Any,
     *,
+    scheme: Literal["bce1", "bce2", "ce"] = "bce1",
     positive_index: int = 1,
-    binary_single_logit: Optional[bool] = None,
-    binary_bce_from_two_logits: Optional[bool] = None,
-    mode: Literal["auto", "bce_single", "bce_two_logit", "ce_softmax"] = "auto",
 ) -> torch.Tensor:
     """
-    Map raw logits -> P(positive) in shape [B] or [...], no thresholding here.
-    Supports:
-      - BCE single-logit:    logits [...], sigmoid(logit)
-      - BCE two-logit:       logits [...,2], sigmoid(logit[:, pos_idx])
-      - CE multi-class:      logits [...,C], softmax(...)[..., pos_idx]
+    Map raw logits to positive-class probability (no thresholding).
+
+    scheme:
+      - "bce1": single-logit BCE (shape [...], sigmoid)
+      - "bce2": two-logit BCE style (shape [...,2], sigmoid on pos logit)
+      - "ce":   CrossEntropy style (shape [...,C], softmax then pick pos idx)
     """
     t = _as_tensor(logits)
-    last_dim = (t.ndim > 0 and t.shape[-1]) or 1
+    last = (t.ndim > 0 and t.shape[-1]) or 1
 
-    if mode == "auto":
-        # Prefer explicit hints; else infer from shape
-        if binary_single_logit is True or (t.ndim == 1 or last_dim == 1):
-            mode = "bce_single"
-        elif binary_bce_from_two_logits:
-            mode = "bce_two_logit"
-        else:
-            mode = "ce_softmax" if last_dim >= 2 else "bce_single"
+    if scheme == "bce1":
+        # Allow [B] or [B,1] or [...,1]
+        return torch.sigmoid(t).reshape(t.shape[:-1]) if (t.ndim > 1 and last == 1) else torch.sigmoid(t)
 
-    if mode == "bce_single":
-        return torch.sigmoid(t).reshape(t.shape[:-1]) if (t.ndim > 1 and last_dim == 1) else torch.sigmoid(t)
-
-    if mode == "bce_two_logit":
-        if last_dim < 2:
-            raise ValueError(f"bce_two_logit requires last dim >=2, got {tuple(t.shape)}")
+    if scheme == "bce2":
+        if last < 2:
+            raise ValueError(f"'bce2' expects last dim >= 2, got {tuple(t.shape)}")
         return torch.sigmoid(t[..., int(positive_index)])
 
-    if mode == "ce_softmax":
-        if last_dim < 2:
-            raise ValueError(f"ce_softmax requires last dim >=2, got {tuple(t.shape)}")
-        probs = torch.softmax(t, dim=-1)
-        return probs[..., int(positive_index)]
+    if scheme == "ce":
+        if last < 2:
+            raise ValueError(f"'ce' expects last dim >= 2, got {tuple(t.shape)}")
+        return torch.softmax(t, dim=-1)[..., int(positive_index)]
 
-    raise ValueError(f"Unknown mode='{mode}'")
+    raise ValueError(f"Unknown scheme='{scheme}'")
 
 
 @dataclass
 class PosProbCfg:
+    """
+    One source of truth:
+      - Decide the scheme once (from cfg or head_logits/loss)
+      - Always pick logits (not probs) from model outputs
+      - Convert with logits_to_pos_prob exactly once
+    """
     positive_index: int = 1
-    binary_single_logit: bool = True
-    binary_bce_from_two_logits: bool = False
-    mode: Literal["auto", "bce_single", "bce_two_logit", "ce_softmax"] = "auto"
+    scheme: Literal["bce1", "bce2", "ce"] = "bce1"
 
-    def pick_logits(self, output: Any) -> torch.Tensor:
-        # Accept dicts or raw tensors; cover all common keys from our evaluator
-        if torch.is_tensor(output):
-            return output
+    # Construction helpers
+    @staticmethod
+    def from_cfg(cfg: dict) -> "PosProbCfg":
+        """
+        Derive the scheme from config:
+          head_logits = 1  => 'bce1' (single-logit BCEWithLogits)
+          head_logits >= 2 => 'ce'   (CrossEntropy)
+        If a legacy toggle exists (binary_bce_from_two_logits=True), map to 'bce2'.
+        """
+        head_logits = int(cfg.get("head_logits", 1))
+        loss_name = str(cfg.get("cls_loss", "bce")).lower()
+        legacy_two = bool(cfg.get("binary_bce_from_two_logits", False))
+
+        if head_logits <= 1:
+            scheme = "bce2" if legacy_two else "bce1"
+        else:
+            # 2+ logits: prefer CE; warn if BCE was requested (incompatible in this repo)
+            scheme = "ce"
+            if "bce" in loss_name:
+                # We do not raise here to keep sweeps alive; the model/loss factory should guard.
+                print("[WARN] head_logits>=2 but cls_loss looks like BCE; proceeding with CE mapping in PosProbCfg.")
+
+        pos_idx = int(cfg.get("positive_index", 1))
+        return PosProbCfg(positive_index=pos_idx, scheme=scheme)
+
+    # IO helpers
+    @staticmethod
+    def _pick_logits(output: Any) -> torch.Tensor:
+        # Prefer the dedicated key via extractor
+        if _extract_logits is not None:
+            try:
+                t = _extract_logits(output)
+                if torch.is_tensor(t):
+                    return t
+            except Exception:
+                pass
+        # Otherwise, prefer explicit 'logits' before any ambiguous keys
         if isinstance(output, dict):
-            # Prefer a robust nested-extractor if available
-            if extract_cls_logits_from_any is not None:
-                try:
-                    t = extract_cls_logits_from_any(output)
-                    if torch.is_tensor(t):
-                        return t
-                except Exception:
-                    pass
-            # Fallback: common keys we emit
-            for k in ("y_pred", "logits", "cls_out", "cls_logits", "class_logits"):
+            for k in ("logits", "cls_logits", "class_logits", "y_pred", "cls_out"):
                 v = output.get(k, None)
                 if torch.is_tensor(v):
                     return v
-        # Last resort: coerce
+        # Last resort: coerce whatever came back
         return _as_tensor(output)
 
-    def pick_labels(self, target: Any) -> torch.Tensor:
-        cur = target  # unwrap nested dicts
+    @staticmethod
+    def _pick_labels(target: Any) -> torch.Tensor:
+        cur = target
         while isinstance(cur, dict):
-            if "y" in cur and cur["y"] is not None:
-                cur = cur["y"]
-                continue
-            if "label" in cur and cur["label"] is not None:
-                cur = cur["label"]
-                continue
-            if "labels" in cur and cur["labels"] is not None:
-                cur = cur["labels"]
-                continue
-            break  # no usable keys
+            for k in ("y", "label", "labels"):
+                if k in cur and cur[k] is not None:
+                    cur = cur[k]
+                    break
+            else:
+                break
         return _as_tensor(cur).long().view(-1)
 
+    # public instance method expected by metrics_utils
+    def pick_logits(self, output: Any) -> torch.Tensor:
+        """Public wrapper so metrics/OTs can ask the cfg to extract raw logits."""
+        return self._pick_logits(output)
+
+    def pick_labels(self, target: Any) -> torch.Tensor:
+        """Public wrapper so callers can fetch integer class labels [B]."""
+        return self._pick_labels(target)
+
+    # Core API
     def logits_to_pos_prob(self, logits: Any) -> torch.Tensor:
-        return positive_score_from_logits(
-            logits,
-            positive_index=self.positive_index,
-            binary_single_logit=self.binary_single_logit,
-            binary_bce_from_two_logits=self.binary_bce_from_two_logits,
-            mode=self.mode,
-        )
+        return logits_to_pos_prob(logits, scheme=self.scheme, positive_index=self.positive_index)
 
-    # Callable interface for Ignite-friendly OTs
+    # Ignite-friendly callable (accepts the engine output dict/tensor)
     def __call__(self, output: Any) -> torch.Tensor:
-        return self.logits_to_pos_prob(self.pick_logits(output))
+        return self.logits_to_pos_prob(self._pick_logits(output))
 
-    # Convenience
+    # Convenience: pair (probs, labels)
     def probs_and_labels(self, output: Any, target: Any) -> Tuple[torch.Tensor, torch.Tensor]:
-        return self(output), self.pick_labels(target)
+        return self(output), self._pick_labels(target)
+
+    # Wiring shortcuts
+    def attach_to_engine_state(self, engine) -> None:
+        """
+        Stash on engine.state so every metric/OT uses the same mapping.
+        """
+        setattr(engine.state, "ppcfg", self)
+        setattr(engine.state, "to_pos_prob", self.logits_to_pos_prob)

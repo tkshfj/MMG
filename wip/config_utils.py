@@ -305,6 +305,86 @@ def _validate_required(cfg: Dict[str, Any]) -> None:
             raise ValueError("Plateau scheduler requires `monitor` (e.g., 'loss' or 'val_auc').")
 
 
+def _normalize_cls_loss_name(v: str | None) -> str:
+    """Map common aliases to {'bce','ce','auto'}."""
+    if not v:
+        return "auto"
+    s = str(v).strip().lower()
+    # BCE-with-logits family
+    if s in {"bcewithlogits", "bce_with_logits", "binary_cross_entropy_with_logits", "bce", "binary_bce"}:
+        return "bce"
+    # Cross-entropy family
+    if s in {"ce", "crossentropy", "cross_entropy", "softmax_ce"}:
+        return "ce"
+    if s in {"auto", "default"}:
+        return "auto"
+    # Unknown → pass through (but lowercased) so we can still warn/fix
+    return s
+
+
+def _sync_head_and_loss(cfg: Dict[str, Any]) -> None:
+    """
+    Enforce a compatible (head_logits, cls_loss, binary flags) trio and keep posprob_mode=auto.
+
+    Rules:
+      - head_logits==1 → cls_loss='bce', binary_single_logit=True, binary_bce_from_two_logits=False
+      - head_logits==2 → cls_loss='ce',  binary_single_logit=False
+      - posprob_mode defaults to 'auto'
+    """
+    # 0) Normalize current values
+    head_logits = cfg.get("head_logits", None)
+    if head_logits is not None:
+        try:
+            head_logits = int(head_logits)
+        except Exception:
+            head_logits = None
+
+    # Allow back-compat: infer head_logits from binary_single_logit when head_logits is absent
+    if head_logits is None:
+        bsl = cfg.get("binary_single_logit", None)
+        if isinstance(bsl, bool):
+            head_logits = 1 if bsl else 2
+            cfg["head_logits"] = head_logits
+
+    # Normalize/alias cls_loss
+    cls_loss = _normalize_cls_loss_name(cfg.get("cls_loss"))
+
+    # 1) Apply canonical combos if head_logits is known
+    if head_logits == 1:
+        if cls_loss not in {"bce", "auto"}:
+            print("[WARN] head_logits=1 → switching cls_loss to 'bce'.")
+        cfg["cls_loss"] = "bce"
+        cfg["binary_single_logit"] = True
+        cfg["binary_bce_from_two_logits"] = False  # never needed when head has a single logit
+
+    elif head_logits == 2:
+        if cls_loss not in {"ce", "auto"}:
+            print("[WARN] head_logits=2 → switching cls_loss to 'ce'.")
+        cfg["cls_loss"] = "ce"
+        cfg["binary_single_logit"] = False
+        # leave binary_bce_from_two_logits as-is (rarely used; keep explicit opt-in)
+
+    else:
+        # If still unknown, assume single-logit default (backward compatible)
+        cfg.setdefault("head_logits", 1)
+        if cls_loss == "auto":
+            cfg["cls_loss"] = "bce"
+        cfg.setdefault("binary_single_logit", True)
+        cfg.setdefault("binary_bce_from_two_logits", False)
+
+    # 2) Probability mapping should be automatic (keeps evaluator/ppcfg consistent)
+    cfg.setdefault("posprob_mode", "auto")
+
+    # 3) Guard against contradictory user flags
+    #    If user explicitly forced an incompatible pair, prefer head_logits and warn.
+    if cfg["head_logits"] == 1 and _normalize_cls_loss_name(cfg.get("cls_loss")) != "bce":
+        print("[WARN] Forcing cls_loss='bce' to match head_logits=1.")
+        cfg["cls_loss"] = "bce"
+    if cfg["head_logits"] == 2 and _normalize_cls_loss_name(cfg.get("cls_loss")) != "ce":
+        print("[WARN] Forcing cls_loss='ce' to match head_logits=2.")
+        cfg["cls_loss"] = "ce"
+
+
 def load_and_validate_config(
     wandb_config: Mapping[str, Any] | None,
     base_config_path: str | None = None,
@@ -337,6 +417,7 @@ def load_and_validate_config(
     # Coerce types & apply defaults
     _coerce_types(cfg)
     _apply_defaults(cfg)
+    _sync_head_and_loss(cfg)
 
     # calibration defaults & coercion (kept simple; can expand if nested YAML exists)
     cal = cfg.setdefault("calibration", {})

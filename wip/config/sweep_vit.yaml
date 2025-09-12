@@ -7,117 +7,93 @@ metric:
   goal: maximize
 
 parameters:
-  # Fixed knobs
-  architecture: { value: vit }
-  task:         { value: classification }
-  run_cap:      { value: 20 }
+  # Fixed / run control
+  architecture:          { value: vit }
+  task:                  { value: classification }
+  run_cap:               { value: 20 }
+  seed:                  { value: 42 }
 
-  # Execution
-  epochs:             { value: 40 }
-  num_workers:        { value: 8 }
-  debug:              { value: true }
-  debug_transforms:   { value: false }
-  console_iter_log:   { value: false }
-  console_epoch_log:  { value: true }
-  seed:               { value: 42 }
-  debug_score_hist:   { value: true }
-  debug_score_bins:   { value: 20 }
-  init_head_bias_from_prior:  { value: true }
-  init_threshold_from_prior:  { value: false }
-
-  # Two-pass validation / calibration (candidate thresholds)
-  two_pass_val:   { value: true }
-  log_calibrated: { value: true }
-  calibration_method:  { values: [rate_match, youden, f1] }
-  cal_fallback:        { values: [rate_match, keep_last] }
-  cal_q_bounds:        { value: [0.10, 0.90] }
-  cal_min_tp:          { values: [5, 10, 20] }
-  cal_bootstraps:      { values: [0, 25] }
-  cal_warmup_epochs:   { values: [1, 2, 3] }
-  cal_init_threshold:  { values: [0.40, 0.50, 0.60] }
-  cal_ema_beta:        { values: [0.10, 0.20, 0.30] }
-  cal_max_delta:       { values: [0.05, 0.10, 0.20] }
-  # cal_rate_tolerance:  { values: [0.08, 0.10, 0.12, 0.15] }
-  cal_auc_floor:       { values: [0.50, 0.52, 0.55] }
-
-  # Guardrails (authoritative threshold acceptance)
-  thr_warmup_epochs: { value: 5 }  # { values: [1, 2, 3] }   # distinct from cal_warmup if needed
-  thr_min:           { value: 0.05 }
-  thr_max:           { value: 0.95 }
-  thr_posrate_min:   { value: 0.05 }         # reject all-neg
-  thr_posrate_max:   { value: 0.95 }         # reject all-pos
-  thr_min_tp:        { values: [0, 5, 10] }
-  thr_min_tn:        { values: [0, 5] }
-  thr_hysteresis:    { values: [0.01, 0.02, 0.03] }
-
-  # Decision-health (optional; keeps pos_rate near base rate)
-  enable_decision_health: { value: true }  # { values: [false, true] }
-  health_warmup:          { value: 1 }  # { values: [0, 1, 2] }
-  rate_tol_override:      { value: 0.10 }  # { values: [0.05, 0.10, 0.15] }
-  health_warmup_max_delta: { value: 0.2 }      # or 0.15–0.3 depending on spread
-  health_rate_gain: { value: 0.75}            # 0.5–1.0
-  health_iters_warmup: { value: 2 }            # 1–3
+  # Execution/runtime
+  epochs:                { value: 40 }
+  num_workers:           { value: 8 }
+  batch_size:            { values: [32, 64] }
+  debug:                 { value: false }
+  console_iter_log:      { value: false }
+  console_epoch_log:     { value: true }
 
   # Data / labels
-  in_channels:  { value: 1 }
-  input_shape:  { value: [256, 256] }
-  patch_size:   { value: 16 }
-  num_classes:  { value: 2 }
-  class_balance: { value: inverse }
-  batch_size:   { values: [32, 64] }
+  in_channels:           { value: 1 }
+  input_shape:           { value: [256, 256] }
+  num_classes:           { value: 2 }
+  class_balance:         { value: inverse }
 
-  # ViT model
-  hidden_size:  { values: [384, 768] }
-  mlp_dim:      { values: [1536, 2048, 3072] }
-  num_layers:   { values: [8, 10, 12] }
-  num_heads:    { values: [6, 8, 12] }
+  # ViT backbone
+  patch_size:            { value: 16 }
+  hidden_size:           { values: [384, 768] }
+  mlp_dim:               { values: [1536, 2048, 3072] }
+  num_layers:            { values: [8, 10, 12] }
+  num_heads:             { values: [6, 8, 12] }
   dropout_rate:
     distribution: uniform
     min: 0.18
     max: 0.24
 
-  # Classification
-  binary_single_logit:        { value: true }
-  binary_bce_from_two_logits: { value: false }
-  cls_loss:       { value: bce }
-  cls_decision:   { value: threshold }
-  cls_threshold:  { values: [0.4, 0.5, 0.6] }  # seed; guardrails/acceptance decide final
+  # Classification head & probability mapping
+  head_logits:           { value: 1 }         # 1 → BCEWithLogits (single-logit binary head)
+  cls_loss:              { value: bce }
+  posprob_mode:          { value: auto }      # evaluator infers sigmoid/softmax from logits
+  positive_index:        { value: 1 }
+  init_head_bias_from_prior: { value: true }
+  init_threshold_from_prior:  { value: false }
+  cls_decision:          { value: threshold }
+  cls_threshold:         { values: [0.40, 0.50, 0.60] }  # seed; acceptance/guards decide final
 
-  positive_index: { value: 1 }
+  # Validation stack / threshold search
+  two_pass_val:          { value: true }
+  calibration_method:    { values: [bal_acc, f1] }   # matches attach_val_threshold_search
+  cal_max_delta:         { values: [0.05, 0.10, 0.20] }
+  cal_auc_floor:         { values: [0.50, 0.55] }
+  cal_ema_beta:          { values: [0.10, 0.20, 0.30] }  # mapped to ema_beta internally
+  rate_tol_override:     { value: 0.10 }                # mapped to rate_tolerance
 
-  # Optimizer / weight decay
-  optimizer:    { value: adamw }
+  # Guardrails for threshold acceptance (authoritative)
+  thr_warmup_epochs:     { value: 5 }
+  thr_min:               { value: 0.05 }
+  thr_max:               { value: 0.95 }
+  thr_posrate_min:       { value: 0.05 }
+  thr_posrate_max:       { value: 0.95 }
+  thr_min_tp:            { values: [0, 5, 10] }
+  thr_min_tn:            { values: [0, 5] }
+  thr_hysteresis:        { values: [0.01, 0.02, 0.03] }
+
+  # Optimizer / param groups
+  optimizer:             { value: adamw }
+  lr:
+    distribution: log_uniform_values
+    min: 0.00003
+    max: 0.0008
   weight_decay:
     distribution: log_uniform_values
     min: 0.00001
     max: 0.00005
 
-  # Param-group strategy (split optimizer settings)
-  param_groups:   { values: [single, split] }
-  head_lr_scale:  { value: 0.5 }   # lower LR on head
-  head_wd_scale:  { value: 1.5 }   # higher WD on head
-  head_keys:      { value: ["head","classifier","mlp_head","fc","cls"] }
+  # Split strategy (get_optimizer handles split/auto)
+  param_groups:          { values: [single, split, auto] }
+  head_lr_scale:         { value: 0.5 }
+  head_wd_scale:         { value: 1.5 }
+  head_keys:             { values: ["classification_head","classifier","mlp_head","fc","cls"] }
 
-  # Learning rate (single or base for split)
-  lr:
-    distribution: log_uniform_values
-    min: 0.00003
-    max: 0.0008
-
-  # LR strategy
-  lr_strategy: { values: [none, cosine, warmcos, plateau] }
-
-  # Cosine params
-  T_max:   { value: 40 }
-  eta_min: { value: 0.0 }
-
-  # Warmup params (used by warmcos)
-  warmup_epochs:       { values: [0, 2, 3] }
-  warmup_start_factor: { values: [0.1, 0.2] }
-
-  # Plateau params (only when lr_strategy=plateau)
-  plateau_metric:    { value: "val/auc" }
-  plateau_mode:      { value: max }
-  patience:          { value: 10 }
-  factor:            { values: [0.5, 0.3] }
-  plateau_threshold: { values: [0.0001, 0.0005] }
+  # LR schedule
+  lr_strategy:           { values: [none, cosine, warmcos, plateau] }
+  # cosine
+  T_max:                 { value: 40 }
+  eta_min:               { value: 0.0 }
+  # warmcos
+  warmup_epochs:         { values: [0, 2, 3] }
+  warmup_start_factor:   { values: [0.1, 0.2] }
+  # plateau
+  plateau_metric:        { value: "val/auc" }
+  plateau_mode:          { value: max }
+  patience:              { value: 10 }
+  factor:                { values: [0.5, 0.3] }
+  plateau_threshold:     { values: [0.0001, 0.0005] }

@@ -118,4 +118,4 @@ parameters:
   param_groups:  { values: [single, split] }
   head_lr_scale: { value: 0.5 }  # lower LR on head
   head_wd_scale: { value: 1.5 }  # slightly higher WD on head
-  head_keys:     { value: ["head","classifier","mlp_head","fc","cls"] }
+  head_keys:     { values: ["classification_head","classifier","mlp_head","fc","cls"] }

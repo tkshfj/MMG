@@ -223,6 +223,24 @@ def _seed_binary_head_bias_from_prior(model: torch.nn.Module, pos_prior: float) 
     return False
 
 
+def _canon_cls_loss(name: str | None) -> str:
+    n = str(name or "bce").lower().replace("-", "").replace("_", "")
+    if n in ("bce", "bcewithlogits", "bcelogits"):
+        return "bce"
+    if n in ("ce", "crossentropy", "crossentropyloss", "crossentropyloss"):
+        return "ce"
+    return n  # allow custom losses elsewhere to handle themselves
+
+
+def _infer_head_logits(cfg: dict) -> int:
+    """Prefer explicit head_logits; else fall back to legacy binary_single_logit heuristic."""
+    if "head_logits" in cfg:
+        return int(cfg["head_logits"])
+    num_classes = int(cfg.get("num_classes", 2))
+    single = bool(cfg.get("binary_single_logit", True)) and (num_classes == 2)
+    return 1 if single else num_classes
+
+
 def run(
     cfg: dict,
     train_loader,
@@ -232,6 +250,20 @@ def run(
 ) -> None:
     # model
     arch = normalize_arch(cfg.get("architecture"))
+
+    # loss x head preflight
+    head_logits = _infer_head_logits(cfg)
+    cls_loss = _canon_cls_loss(cfg.get("cls_loss", "bce"))
+    # Enforce valid pairings for standard binary classification heads:
+    if head_logits == 1 and cls_loss != "bce":
+        raise ValueError("Config mismatch: head_logits=1 requires a BCE-with-logits style loss (set cls_loss=bce).")
+    if head_logits == 2 and cls_loss != "ce":
+        raise ValueError("Config mismatch: head_logits=2 requires CrossEntropy (set cls_loss=ce).")
+    # Make the evaluator/metrics infer the correct probability mapping
+    cfg["head_logits"] = head_logits               # persist normalized value
+    cfg["cls_loss"] = cls_loss                     # persist normalized value
+    cfg["posprob_mode"] = cfg.get("posprob_mode", "auto")
+
     # build torch.nn.Module via the registry adapter
     model = build_model(cfg).to(device=device, dtype=torch.float32)
 
@@ -250,7 +282,8 @@ def run(
     pos_idx = int(cfg.get("positive_index", 1))
     cc = cfg.get("class_counts", [1, 1])
     pos_prior = float(cc[pos_idx] / max(1, sum(cc)))
-    if bool(cfg.get("binary_single_logit", True)) and bool(cfg.get("init_head_bias_from_prior", True)):
+    if head_logits == 1 and bool(cfg.get("init_head_bias_from_prior", True)):
+        # if bool(cfg.get("binary_single_logit", True)) and bool(cfg.get("init_head_bias_from_prior", True)):
         _seed_binary_head_bias_from_prior(model, pos_prior)
 
     use_split = str(cfg.get("param_groups", "single")).lower() == "split"
@@ -258,10 +291,8 @@ def run(
         base_lr = float(cfg.get("base_lr", cfg.get("lr", 1e-3)))
         head_mult = float(cfg.get("head_multiplier", 10.0))
         wd = float(cfg.get("weight_decay", 1e-4))
-
         bb = list(model.backbone_parameters())
         hd = list(model.head_parameters())
-
         # If something is wrong with grouping, fall back gracefully
         if len(bb) == 0 or len(hd) == 0:
             print("[WARN] split requested but backbone/head groups are empty; using single group.")
@@ -290,18 +321,11 @@ def run(
     )
 
     # loss (generic, uses class_counts for weights/pos_weight)
-    # loss_fn = make_default_loss(cfg, class_counts=cfg.get("class_counts"))
     loss_fn = model.get_loss_fn(task=cfg.get("task"), cfg=cfg, class_counts=cfg.get("class_counts"))
 
-    # Single source of truth for scores
-    ppcfg = PosProbCfg(
-        positive_index=int(cfg.get("positive_index", 1)),
-        binary_single_logit=bool(cfg.get("binary_single_logit", True)),
-        binary_bce_from_two_logits=bool(cfg.get("binary_bce_from_two_logits", False)),
-        mode=str(cfg.get("posprob_mode", "auto")),
-    )
-
-    # engines
+    # Build the canonical PosProbCfg once from cfg
+    ppcfg = PosProbCfg.from_cfg(cfg)
+    # Build engines
     trainer = build_trainer(
         device=device,
         max_epochs=cfg["epochs"],
@@ -311,8 +335,9 @@ def run(
         loss_function=loss_fn,
         prepare_batch=prepare_batch_std,   # training remains the std path
     )
-
-    # Standard evaluator used by the two-pass hook (no direct logging here)
+    # Attach single SoT probs to TRAINER (override the default placeholder)
+    ppcfg.attach_to_engine_state(trainer)
+    # Build evaluator and attach the same PosProbCfg
     std_evaluator = build_evaluator(
         device=device,
         data_loader=val_loader,
@@ -322,6 +347,8 @@ def run(
         include_seg=has_seg,
         ppcfg=ppcfg,
     )
+    # ensure evaluator uses the same instance
+    ppcfg.attach_to_engine_state(std_evaluator)
     # Seed the evaluator’s live threshold once
     std_evaluator.state.threshold = float(cfg.get("cls_threshold", 0.5))
 
@@ -411,23 +438,14 @@ def run(
             num_classes=int(cfg.get("num_classes", 2)),
             multitask=str(cfg.get("task", "multitask")).lower() == "multitask",
             enable_decision_health=health_on,
-            # score_provider=ppcfg,
             cfg=cfg,
         )
-        # give std evaluator the same probability mapping and threshold
-        # attach_classification_metrics(
-        #     std_evaluator,
-        #     cfg,
-        #     thr_getter=lambda: float(two_pass._thr_box.value),  # single source of truth
-        #     # score_provider=two_pass._score_provider,  # same prob mapping
-        #     ppcfg=ppcfg,
-        # )
 
     @trainer.on(Events.EPOCH_COMPLETED)
     def _validate_and_log(engine):
         ep = int(engine.state.epoch)
 
-        # (1) Optional calibration / two-pass
+        # Optional calibration / two-pass
         seg_metrics_from_tp = {}
         cls_metrics_from_tp = {}
         t_proposed = None
@@ -437,8 +455,9 @@ def run(
             )
             # if t is not None and ep >= cal_warmup:
             #     std_evaluator.state.threshold = float(t)
-
-            # uarded adoption of calibrator threshold
+            # proposed threshold from two-pass
+            t_proposed = t
+            # guarded adoption of calibrator threshold
             if t_proposed is not None and ep >= cal_warmup and ep >= thr_warmup:
                 cand = float(min(max(t_proposed, thr_min), thr_max))
                 pr = cls_metrics_from_tp.get("pos_rate", None)
@@ -462,16 +481,15 @@ def run(
                     # keep previous threshold (do nothing)
                     pass
 
-        # (2) Single standard evaluation (classification metrics + any seg metrics attached to std_evaluator)
+        # Single standard evaluation (classification metrics + any seg metrics attached to std_evaluator)
         std_evaluator.run(val_loader)
 
-        # (3) Build payload from the standard evaluator first
+        # Build payload from the standard evaluator first
         metrics = std_evaluator.state.metrics or {}
         payload = {"trainer/epoch": ep}
         payload.update(_flatten_metrics_for_wandb(metrics))  # -> val/...
 
-        # (3b) Merge segmentation metrics returned by two-pass (if any)
-        #      We namespace them under val/seg/* to avoid key collisions.
+        # Merge segmentation metrics returned by two-pass (if any)
         if has_seg and seg_metrics_from_tp:
             # payload.update(_flatten_metrics_for_wandb(seg_metrics_from_tp, prefix="val/seg/"))
             payload.update(_flatten_metrics_for_wandb(seg_metrics_from_tp, prefix="val/"))
@@ -486,7 +504,6 @@ def run(
                         v = float(v.item())
                     seg_score = float(v)
                     # Also expose namespaced copy (optional)
-                    # engine.state.metrics[f"val/seg/{k}"] = seg_score
                     engine.state.metrics[f"val/{k}"] = seg_score
                     break
 
@@ -507,7 +524,7 @@ def run(
                     std_evaluator.state.metrics[f"seg/{k}"] = v
                     std_evaluator.state.metrics["multi"] = multi
 
-        # (3c) If two-pass is OFF but seg metrics were attached to std_evaluator (step 1), also provide val/multi
+        # If two-pass is OFF but seg metrics were attached to std_evaluator (step 1), also provide val/multi
         elif has_seg:
             # Try to synthesize multi from metrics that were attached to std_evaluator
             seg_score = None
@@ -529,7 +546,7 @@ def run(
                 engine.state.metrics["val/multi"] = multi
                 std_evaluator.state.metrics["multi"] = multi
 
-        # (4) Threshold bookkeeping
+        # Threshold bookkeeping
         thr_search = metrics.get("threshold", None)
         if thr_search is not None:
             payload["val/search_threshold"] = float(thr_search)
@@ -537,7 +554,7 @@ def run(
         if two_pass is not None and ep >= cal_warmup:
             payload["val/cal_thr"] = payload["val/threshold"]
 
-        # (5) Validation loss + mirror into engine state for plateau
+        # Validation loss + mirror into engine state for plateau
         try:
             vloss = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
             payload["val/loss"] = vloss
@@ -645,7 +662,8 @@ def run(
         enable_decision_health=health_on,
     )
 
-    trainer.run()
+    # trainer.run()
+    trainer.run(train_loader)  # max_epochs=cfg["epochs"]
 
     if cfg.get("save_final_state", True):
         os.makedirs("outputs/best_model", exist_ok=True)
@@ -714,57 +732,3 @@ if __name__ == "__main__":
 
         # Run training with explicit loaders & device
         run(cfg, train_loader, val_loader, test_loader, device)
-
-    # # current live decision threshold (single SoT)
-    # def get_live_thr() -> float:
-    #     return float(getattr(std_evaluator.state, "threshold", 0.5))
-
-    # score_kwargs = {
-    #     "binary_single_logit": ppcfg.binary_single_logit,
-    #     "positive_index": ppcfg.positive_index,
-    #     "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
-    # }
-
-    # attach_val_threshold_search(
-    #     evaluator=std_evaluator,
-    #     mode=str(cfg.get("calibration_method", "bal_acc")),  # or "f1"
-    #     positive_index=ppcfg.positive_index,
-    #     score_kwargs=score_kwargs,
-    # )
-
-    # if bool(cfg.get("debug_pos_once", False)) or bool(cfg.get("debug", False)):
-    #     attach_pos_score_debug_once(
-    #         evaluator=std_evaluator,
-    #         bins=int(cfg.get("pos_hist_bins", 20)),
-    #         tag=str(cfg.get("pos_debug_tag", "debug_pos")),
-    #         positive_index=ppcfg.positive_index,
-    #         score_kwargs=score_kwargs,
-    #     )
-
-    # # Optionally compute per-epoch threshold & confusion stats for classification
-    # if has_cls:
-    #     val_metrics = make_cls_val_metrics(
-    #         num_classes=int(cfg.get("num_classes", 2)),
-    #         decision=str(cfg.get("cls_decision", "threshold")),
-    #         threshold=get_live_thr,
-    #         positive_index=int(cfg.get("positive_index", 1)),
-    #         score_provider=ppcfg,
-    #     )
-    #     for k, m in val_metrics.items():
-    #         m.attach(std_evaluator, k)
-
-    # # When we have segmentation but two-pass is disabled, attach seg metrics here
-    # if has_seg and not bool(cfg.get("two_pass_val", False)):
-    #     try:
-    #         # Prefer project-local helper if it exists
-    #         from seg_eval import make_seg_val_metrics  # util, if present
-    #         seg_metrics = make_seg_val_metrics(
-    #             num_classes=int(cfg.get("num_classes", 2)),
-    #             threshold=float(cfg.get("seg_threshold", 0.5)),
-    #         )
-    #         # Keep a "seg/" namespace for clarity
-    #         for k, m in seg_metrics.items():
-    #             m.attach(std_evaluator, f"seg/{k}")
-    #     except Exception:
-    #         # Fallback: do nothing rather than crash; two-pass path will still merge seg metrics
-    #         pass

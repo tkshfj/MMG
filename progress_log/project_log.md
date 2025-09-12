@@ -1,7 +1,11 @@
 # Project Log
 
+# 2025-09-12
+- Refactor ViT/Registry: fix head, init bias, enforce shapes; Ignite: normalize logits/probs, add param-group/grad diagnostics, unify validation.
+
 # 2025-09-11
 - Stabilize two-pass evaluation: add BaseModel loss API, unify logits-to-probs mapping, enforce low-spread clamp with min TP/TN, and update CNN/ViT/MTL sweeps
+- Strengthen warmup decision-health, add low-spread clamp and min TP/TN enforcement, smooth thresholds with EMA and hysteresis, align CNN/ViT/MTL sweeps, and fix CalCfg field wiring.
 
 # 2025-09-10
 - Fix: Unify logit-to-prob mapping across OT & PosProb; use model.param_groups(); harden ViT head/backbone split & bias init

@@ -11,7 +11,7 @@ from ignite.metrics import Accuracy, Precision, Recall, ConfusionMatrix, ROC_AUC
 # from ignite.metrics.confusion_matrix import ConfusionMatrix
 from ignite.metrics import DiceCoefficient, JaccardIndex, Metric, MetricsLambda, EpochMetric
 from utils.safe import to_tensor, to_float_scalar, to_py  # labels_to_1d_indices
-from posprob import PosProbCfg  # positive_score_from_logits
+from posprob import PosProbCfg
 
 
 # Helpers
@@ -19,23 +19,6 @@ def get_threshold_from_state(engine) -> float:
     # Single source of truth for threshold
     thr = getattr(engine.state, "threshold", None)
     return float(thr if thr is not None else 0.5)
-
-
-# def probs_from_logits(
-#     logits: Any, *, num_classes: int = 2, positive_index: int = 1,
-#     binary_single_logit: Optional[bool] = None,
-#     binary_bce_from_two_logits: Optional[bool] = None,
-# ) -> torch.Tensor:
-#     t = torch.as_tensor(logits).float()
-#     if int(num_classes) <= 2:
-#         return positive_score_from_logits(
-#             t,
-#             positive_index=positive_index,
-#             binary_single_logit=binary_single_logit,
-#             binary_bce_from_two_logits=binary_bce_from_two_logits,
-#             mode="auto",
-#         ).view(-1)
-#     return torch.softmax(t, dim=-1)
 
 
 def make_cm_rates(cm: ConfusionMatrix) -> dict[str, Metric]:

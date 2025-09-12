@@ -7,73 +7,57 @@ metric:
   goal: maximize
 
 parameters:
-  # Fixed experiment shape
+  # Experiment shape
   architecture: { value: simple_cnn }
   task:         { value: classification }
   run_cap:      { value: 20 }
-  in_channels:  { value: 1 }
-  input_shape:  { value: [256, 256] }
-  num_classes:  { value: 2 }
-  class_balance: { value: inverse }
 
-  # Binary head
-  binary_single_logit:        { value: true }
-  binary_bce_from_two_logits: { value: false }
+  # Data / labels
+  in_channels:   { value: 1 }
+  input_shape:   { value: [256, 256] }
+  num_classes:   { value: 2 }
+  class_balance: { value: inverse }
 
   # Exec / logging
   epochs:            { value: 40 }
   num_workers:       { value: 8 }
   seed:              { value: 42 }
-  debug:             { value: true }
-  debug_transforms:  { value: false }
+  debug:             { value: false }
   console_iter_log:  { value: false }
   console_epoch_log: { value: true }
+
+  # Binary head & decisions
+  head_logits: { value: 1 }
+  cls_loss:    { value: bce }
+  posprob_mode: { value: auto }
+  binary_single_logit:        { value: true }
+  binary_bce_from_two_logits: { value: false }
+  cls_decision:   { value: threshold }
+  cls_threshold:  { value: 0.5 }         # seed only; search/guards decide final
+  positive_index: { value: 1 }
   init_head_bias_from_prior: { value: true }
   init_threshold_from_prior: { value: false }
 
-  # Two-pass validation + calibrator (candidate source)
-  two_pass_val:   { value: true }
-  log_calibrated: { value: true }
-
-  calibration_method: { values: [rate_match, youden, f1] }
-  cal_fallback:       { values: [rate_match, keep_last] }
-  cal_q_bounds:       { value: [0.10, 0.90] }
-  cal_min_tp:         { values: [5, 10, 20] }
-  cal_bootstraps:     { values: [0, 25] }
-  cal_warmup_epochs:  { values: [1, 2, 3] }
-  cal_init_threshold: { values: [0.40, 0.50, 0.60] }
-  cal_ema_beta:       { values: [0.10, 0.20, 0.30] }
+  # Lightweight two-pass / threshold search (refactored picker)
+  two_pass_val:       { value: true }
+  calibration_method: { values: [bal_acc, f1] }   # modes supported by attach_val_threshold_search
+  cal_warmup_epochs:  { values: [1, 2] }
+  ema_beta:           { values: [0.10, 0.20, 0.30] }  # smoothing on threshold movement
   cal_max_delta:      { values: [0.05, 0.10, 0.20] }
-  # cal_rate_tolerance: { values: [0.10, 0.12, 0.15, 0.20] }  # feeds calibrator.cfg.rate_tolerance
   cal_auc_floor:      { values: [0.50, 0.55] }
 
   # Guardrails (authoritative acceptance layer)
-  thr_warmup_epochs: { value: 5 }  # { values: [1, 2, 3] }  # distinct from cal_warmup if desired
+  thr_warmup_epochs: { value: 5 }
   thr_min:           { value: 0.05 }
   thr_max:           { value: 0.95 }
-  thr_posrate_min:   { value: 0.05 }  # reject all-neg (≈0) and extreme envelopes
-  thr_posrate_max:   { value: 0.95 }  # reject all-pos (≈1)
-  thr_min_tp:        { values: [0, 5, 10] }  # optional count sanity
+  thr_posrate_min:   { value: 0.05 }
+  thr_posrate_max:   { value: 0.95 }
+  thr_min_tp:        { values: [0, 5, 10] }
   thr_min_tn:        { values: [0, 5] }
   thr_hysteresis:    { values: [0.01, 0.02, 0.03] }
 
-  # Decision-health (optional, enforced after acceptance)
-  enable_decision_health: { value: true }  # { values: [false, true] }
-  health_warmup:          { value: 1 }  # { values: [0, 1, 2] }
-  rate_tol_override:      { value: 0.10 }  # { values: [0.05, 0.10, 0.15] }  # ± tolerance around base rate
-  health_warmup_max_delta: { value: 0.2 }      # or 0.15–0.3 depending on spread
-  health_rate_gain: { value: 0.75}            # 0.5–1.0
-  health_iters_warmup: { value: 2 }            # 1–3
-
-  # Loss / decision display (seed threshold only; acceptance overrides)
-  cls_loss:       { value: auto }
-  cls_decision:   { value: threshold }
-  cls_threshold:  { value: 0.5 }
-  positive_index: { value: 1 }
-
   # Core tunables
-  batch_size:
-    values: [32, 64]
+  batch_size: { values: [32, 64] }
   lr:
     distribution: log_uniform_values
     min: 0.00003
@@ -87,29 +71,24 @@ parameters:
     min: 0.18
     max: 0.24
 
-  # LR strategy
-  lr_strategy:
-    values: [none, cosine, warmcos, plateau]
-
-  # Cosine
+  # LR strategy (wired via attach_lr_scheduling)
+  lr_strategy: { values: [none, cosine, warmcos, plateau] }
+  # cosine
   T_max:   { value: 40 }
   eta_min: { value: 0.0 }
-
-  # Warmup (used by warmcos)
-  warmup_epochs:
-    values: [0, 2, 3]
-  warmup_start_factor:
-    values: [0.1, 0.2]
-
-  # Plateau
-  plateau_metric:   { value: val/loss }
+  # warmcos
+  warmup_epochs:       { values: [0, 2, 3] }
+  warmup_start_factor: { values: [0.1, 0.2] }
+  # plateau
+  plateau_metric:   { value: "val/loss" }
   plateau_mode:     { value: min }
-  patience:         { value: 0 }
+  patience:         { value: 5 }
   factor:           { values: [0.5, 0.3] }
   plateau_threshold: { values: [0.0001, 0.0005] }
 
-  # Param-group strategy
+  # Optimizer/param-group strategy
+  optimizer:      { value: adamw }
   param_groups:  { values: [single, split] }
   head_lr_scale: { value: 0.5 }
   head_wd_scale: { value: 1.5 }
-  head_keys:     { value: ["head","classifier","mlp_head","fc","cls"] }
+  head_keys:     { values: ["classification_head","classifier","mlp_head","fc","cls"] }
