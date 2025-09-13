@@ -10,7 +10,6 @@ parameters:
   # Experiment shape
   architecture: { value: simple_cnn }
   task:         { value: classification }
-  run_cap:      { value: 20 }
 
   # Data / labels
   in_channels:   { value: 1 }
@@ -18,43 +17,9 @@ parameters:
   num_classes:   { value: 2 }
   class_balance: { value: inverse }
 
-  # Exec / logging
-  epochs:            { value: 40 }
-  num_workers:       { value: 8 }
-  seed:              { value: 42 }
-  debug:             { value: false }
-  console_iter_log:  { value: false }
-  console_epoch_log: { value: true }
-
-  # Binary head & decisions
-  head_logits: { value: 1 }
-  cls_loss:    { value: bce }
-  posprob_mode: { value: auto }
-  binary_single_logit:        { value: true }
-  binary_bce_from_two_logits: { value: false }
-  cls_decision:   { value: threshold }
-  cls_threshold:  { value: 0.5 }         # seed only; search/guards decide final
-  positive_index: { value: 1 }
-  init_head_bias_from_prior: { value: true }
-  init_threshold_from_prior: { value: false }
-
-  # Lightweight two-pass / threshold search (refactored picker)
-  two_pass_val:       { value: true }
-  calibration_method: { values: [bal_acc, f1] }   # modes supported by attach_val_threshold_search
-  cal_warmup_epochs:  { values: [1, 2] }
-  ema_beta:           { values: [0.10, 0.20, 0.30] }  # smoothing on threshold movement
-  cal_max_delta:      { values: [0.05, 0.10, 0.20] }
-  cal_auc_floor:      { values: [0.50, 0.55] }
-
-  # Guardrails (authoritative acceptance layer)
-  thr_warmup_epochs: { value: 5 }
-  thr_min:           { value: 0.05 }
-  thr_max:           { value: 0.95 }
-  thr_posrate_min:   { value: 0.05 }
-  thr_posrate_max:   { value: 0.95 }
-  thr_min_tp:        { values: [0, 5, 10] }
-  thr_min_tn:        { values: [0, 5] }
-  thr_hysteresis:    { values: [0.01, 0.02, 0.03] }
+  # Runtime
+  epochs:      { value: 40 }
+  num_workers: { value: 8 }
 
   # Core tunables
   batch_size: { values: [32, 64] }
@@ -71,24 +36,126 @@ parameters:
     min: 0.18
     max: 0.24
 
-  # LR strategy (wired via attach_lr_scheduling)
-  lr_strategy: { values: [none, cosine, warmcos, plateau] }
-  # cosine
-  T_max:   { value: 40 }
-  eta_min: { value: 0.0 }
-  # warmcos
-  warmup_epochs:       { values: [0, 2, 3] }
-  warmup_start_factor: { values: [0.1, 0.2] }
-  # plateau
-  plateau_metric:   { value: "val/loss" }
-  plateau_mode:     { value: min }
-  patience:         { value: 5 }
-  factor:           { values: [0.5, 0.3] }
-  plateau_threshold: { values: [0.0001, 0.0005] }
+  # Head & loss
+  head_logits: { value: 1 }   # 1-logit binary head
+  cls_loss:    { value: bce }
+  cls_decision:   { value: threshold }
+  positive_index: { value: 1 }
+  init_head_bias_from_prior: { value: true }
 
-  # Optimizer/param-group strategy
+  # Two-pass calibration / threshold control
+  two_pass_val:       { value: true }
+  calibration_method: { values: [bal_acc, f1] }
+  cal_warmup_epochs:  { values: [1, 2] }
+  cal_ema_beta:       { values: [0.10, 0.20, 0.30] }
+  cal_max_delta:      { values: [0.05, 0.10, 0.20] }
+  cal_auc_floor:      { values: [0.50, 0.55] }
+
+  # Guardrails for threshold adoption
+  thr_warmup_epochs: { value: 5 }
+  thr_min:           { value: 0.05 }
+  thr_max:           { value: 0.95 }
+  thr_posrate_min:   { value: 0.05 }
+  thr_posrate_max:   { value: 0.95 }
+  thr_min_tp:        { values: [0, 5, 10] }
+  thr_min_tn:        { values: [0, 5] }
+  thr_hysteresis:    { values: [0.01, 0.02, 0.03] }
+
+  # Optimizer / param-group strategy
   optimizer:      { value: adamw }
-  param_groups:  { values: [single, split] }
-  head_lr_scale: { value: 0.5 }
-  head_wd_scale: { value: 1.5 }
-  head_keys:     { values: ["classification_head","classifier","mlp_head","fc","cls"] }
+  param_groups:   { values: [single, split] }
+  head_lr_scale:  { value: 0.5 }
+  head_wd_scale:  { value: 1.5 }
+
+  # LR scheduling (pick one stable strategy)
+  lr_scheduler:        { value: warmcos }
+  warmup_epochs:       { values: [2, 3] }
+  warmup_start_factor: { values: [0.1, 0.2] }
+
+
+# parameters:
+#   # Experiment shape
+#   architecture: { value: simple_cnn }
+#   task:         { value: classification }
+#   run_cap:      { value: 20 }
+
+#   # Data / labels
+#   in_channels:   { value: 1 }
+#   input_shape:   { value: [256, 256] }
+#   num_classes:   { value: 2 }
+#   class_balance: { value: inverse }
+
+#   # Exec / logging
+#   epochs:            { value: 40 }
+#   num_workers:       { value: 8 }
+#   seed:              { value: 42 }
+#   debug:             { value: false }
+#   console_iter_log:  { value: false }
+#   console_epoch_log: { value: true }
+
+#   # Binary head & decisions
+#   head_logits: { value: 1 }
+#   cls_loss:    { value: bce }
+#   posprob_mode: { value: auto }
+#   binary_single_logit:        { value: true }
+#   binary_bce_from_two_logits: { value: false }
+#   cls_decision:   { value: threshold }
+#   cls_threshold:  { value: 0.5 }         # seed only; search/guards decide final
+#   positive_index: { value: 1 }
+#   init_head_bias_from_prior: { value: true }
+#   init_threshold_from_prior: { value: false }
+
+#   # Lightweight two-pass / threshold search (refactored picker)
+#   two_pass_val:       { value: true }
+#   calibration_method: { values: [bal_acc, f1] }   # modes supported by attach_val_threshold_search
+#   cal_warmup_epochs:  { values: [1, 2] }
+#   ema_beta:           { values: [0.10, 0.20, 0.30] }  # smoothing on threshold movement
+#   cal_max_delta:      { values: [0.05, 0.10, 0.20] }
+#   cal_auc_floor:      { values: [0.50, 0.55] }
+
+#   # Guardrails (authoritative acceptance layer)
+#   thr_warmup_epochs: { value: 5 }
+#   thr_min:           { value: 0.05 }
+#   thr_max:           { value: 0.95 }
+#   thr_posrate_min:   { value: 0.05 }
+#   thr_posrate_max:   { value: 0.95 }
+#   thr_min_tp:        { values: [0, 5, 10] }
+#   thr_min_tn:        { values: [0, 5] }
+#   thr_hysteresis:    { values: [0.01, 0.02, 0.03] }
+
+#   # Core tunables
+#   batch_size: { values: [32, 64] }
+#   lr:
+#     distribution: log_uniform_values
+#     min: 0.00003
+#     max: 0.0003
+#   weight_decay:
+#     distribution: log_uniform_values
+#     min: 0.000005
+#     max: 0.00005
+#   dropout_rate:
+#     distribution: uniform
+#     min: 0.18
+#     max: 0.24
+
+#   # LR strategy (wired via attach_lr_scheduling)
+#   lr_strategy: { values: [none, cosine, warmcos, plateau] }
+#   # cosine
+#   T_max:   { value: 40 }
+#   eta_min: { value: 0.0 }
+#   # warmcos
+#   warmup_epochs:       { values: [0, 2, 3] }
+#   warmup_start_factor: { values: [0.1, 0.2] }
+#   # plateau
+#   plateau_metric:   { value: "val/loss" }
+#   plateau_mode:     { value: min }
+#   patience:         { value: 5 }
+#   factor:           { values: [0.5, 0.3] }
+#   plateau_threshold: { values: [0.0001, 0.0005] }
+
+#   # Optimizer/param-group strategy
+#   optimizer:      { value: adamw }
+#   param_groups:  { values: [single, split] }
+#   head_lr_scale: { value: 0.5 }
+#   head_wd_scale: { value: 1.5 }
+#   head_keys:     { values: ["classification_head","classifier","mlp_head","fc","cls"] }
