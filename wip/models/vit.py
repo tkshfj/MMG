@@ -59,7 +59,7 @@ def _coerce_logits_any(raw: Any, out_dim: Optional[int] = None) -> torch.Tensor:
             if torch.is_tensor(item):
                 candidates.append(item)
             elif isinstance(item, dict):
-                t = _from_dict(item);  # noqa
+                t = _from_dict(item)  # noqa
                 if t is not None:
                     candidates.append(t)
         if not candidates:
@@ -76,17 +76,19 @@ def _coerce_logits_any(raw: Any, out_dim: Optional[int] = None) -> torch.Tensor:
 class ViTModel(nn.Module, BaseModel):
     """
     MONAI ViT for classification.
-    Key guarantees:
-      - Returns RAW logits (no Sigmoid/Softmax). BCEWithLogits/CE handle activation.
-      - Exposes 'head' vs 'backbone' parameter helpers for optimizer split.
-      - Head module is discoverable by the registry (classifier names aligned).
+    Guarantees:
+      - Returns RAW logits (no Sigmoid/Softmax). Use BCEWithLogits/CE.
+      - Head is discoverable via common names ('classification_head','classifier',...).
+      - Provides backbone/head parameter helpers for optimizer split.
     """
 
     def __init__(self, cfg: Optional[Mapping[str, Any]] = None, **kwargs: Any):
         super().__init__()
         cfg = dict(cfg) if cfg is not None else {}
+        # Stash resolved config for forward-time options (e.g., auto_resize_to_img)
+        self.config: dict[str, Any] = {**cfg, **kwargs}
 
-        # resolve core cfg/kwargs
+        # core cfg/kwargs
         spatial_dims: int = int(kwargs.get("spatial_dims", cfg.get("spatial_dims", 2)))
         in_ch: int = int(kwargs.get("in_channels", cfg.get("in_channels", 1)))
         req_classes: int = int(kwargs.get("num_classes", cfg.get("num_classes", 2)))
@@ -126,16 +128,16 @@ class ViTModel(nn.Module, BaseModel):
         dropout = float(kwargs.get("dropout_rate", cfg.get("dropout_rate", 0.1)))
 
         if hidden_size % num_heads != 0:
-            # snap to divisible-by-heads to avoid MONAI internal asserts
             def _snap(x: int, m: int) -> int:
                 down = (x // m) * m
                 up = down + m
                 return up if (x - down) > (up - x) else down
             snapped = _snap(hidden_size, num_heads)
-            logger.info("ViT hidden_size adjusted %d → %d to be divisible by num_heads=%d.", hidden_size, snapped, num_heads)
+            logger.info("ViT hidden_size adjusted %d → %d to be divisible by num_heads=%d.",
+                        hidden_size, snapped, num_heads)
             hidden_size = max(num_heads, snapped)
 
-        # MONAI ViT (classification=True returns logits from a Linear head; no activation)
+        # MONAI ViT backbone (classification=True → Linear head; no activation)
         self.img_size = tuple(img_size)
         self.patch_size = tuple(ps)
         self.net = ViT(
@@ -152,42 +154,19 @@ class ViTModel(nn.Module, BaseModel):
             dropout_rate=dropout,
         )
 
-        # optional head pre-layers (kept minimal; preserve last Linear)
-        head_p = float(cfg.get("head_dropout", 0.0))
-        use_head_norm = bool(cfg.get("head_norm", False))
-        if head_p > 0.0 or use_head_norm:
-            h = self._head_module()
-            if isinstance(h, nn.Linear):
-                layers = []
-                if use_head_norm:
-                    layers.append(nn.LayerNorm(h.in_features))
-                if head_p > 0.0:
-                    layers.append(nn.Dropout(p=head_p))
-                layers.append(nn.Linear(h.in_features, h.out_features, bias=True))
-                new_head = nn.Sequential(*layers)
-                with torch.no_grad():
-                    new_head[-1].weight.copy_(h.weight)
-                    if h.bias is not None:
-                        new_head[-1].bias.copy_(h.bias)
-                self._set_head_module(new_head)
-            elif isinstance(h, nn.Sequential) and isinstance(list(h.children())[-1], nn.Linear):
-                last: nn.Linear = list(h.children())[-1]  # type: ignore
-                pre = nn.Sequential(*list(h.children())[:-1])
-                new_head = nn.Sequential(
-                    pre,
-                    *([nn.LayerNorm(last.in_features)] if use_head_norm else []),
-                    *([nn.Dropout(p=head_p)] if head_p > 0.0 else []),
-                    nn.Linear(last.in_features, last.out_features, bias=True),
-                )
-                with torch.no_grad():
-                    new_head[-1].weight.copy_(last.weight)
-                    if last.bias is not None:
-                        new_head[-1].bias.copy_(last.bias)
-                self._set_head_module(new_head)
-            else:
-                logger.info("Head dropout requested (p=%.3f), but no linear classification head found; skipping.", head_p)
+        # make head recognizable (alias) and guaranteed Linear → raw logits
+        head = getattr(self.net, "classification_head", None)
+        if isinstance(head, nn.Linear):
+            # Expose a stable name at both nested and top levels
+            self.classifier = head
+            setattr(self.net, "classifier", self.classifier)
+        else:
+            # Fallback: install a new Linear head
+            self.classifier = nn.Linear(hidden_size, out_dim, bias=True)
+            setattr(self.net, "classification_head", self.classifier)
+            setattr(self.net, "classifier", self.classifier)
 
-        # gate bias seeding on config to avoid double-init (registry may also do it)
+        # optional bias init from prior for single-logit binary
         cc = cfg.get("class_counts")
         if bool(cfg.get("init_head_bias_from_prior", False)) and cc is not None and out_dim == 1:
             try:
@@ -198,20 +177,14 @@ class ViTModel(nn.Module, BaseModel):
             except Exception as e:
                 logger.warning("Bias init skipped (class_counts=%s): %s", cc, e)
 
-        # stash resolved config (handy for BaseModel helpers)
-        self.config = dict(cfg)
-        for k, v in kwargs.items():
-            self.config.setdefault(k, v)
-
         logger.info(
             "ViT resolved: spatial=%d, in_ch=%d, img=%s, patch=%s, hidden=%d, mlp_dim=%d, heads=%d, out_dim=%d",
             self.spatial_dims, self.in_channels, self.img_size, self.patch_size, hidden_size, mlp_dim, num_heads, self.out_dim
         )
 
-    # head discovery / grouping
+    # head discovery / mutation (class-level methods)
     def _head_module(self) -> Optional[nn.Module]:
-        # Align with registry search keys so head replacement/splitting works.
-        for attr in ("classification_head", "classifier", "mlp_head", "fc", "cls", "head"):
+        for attr in ("classifier", "classification_head", "mlp_head", "fc", "cls", "head"):
             if hasattr(self.net, attr):
                 mod = getattr(self.net, attr)
                 if isinstance(mod, nn.Linear):
@@ -223,16 +196,15 @@ class ViTModel(nn.Module, BaseModel):
         return None
 
     def _set_head_module(self, new: nn.Module) -> None:
-        for attr in ("classification_head", "classifier", "mlp_head", "fc", "cls", "head"):
-            if hasattr(self.net, attr):
-                setattr(self.net, attr, new)
-                return
-        # if no known attr exists, create a sane one
+        # Prefer canonical aliasing on both names
+        setattr(self.net, "classification_head", new)
         setattr(self.net, "classifier", new)
+        self.classifier = new
 
+    # param grouping helpers
     def backbone_parameters(self) -> Iterator[nn.Parameter]:
         head = self._head_module()
-        head_ids = set(id(p) for p in head.parameters()) if head is not None else set()
+        head_ids = {id(p) for p in head.parameters()} if head is not None else set()
         for p in self.parameters():
             if p.requires_grad and id(p) not in head_ids:
                 yield p
@@ -246,8 +218,7 @@ class ViTModel(nn.Module, BaseModel):
     def param_groups(self):
         return {"backbone": list(self.backbone_parameters()), "head": list(self.head_parameters())}
 
-    # -bias seed ----------------------------------------------------------------
-
+    # bias seed
     def _init_binary_bias_from_prior(self, p: float):
         import math
         p = float(min(max(p, 1e-6), 1 - 1e-6))
@@ -265,14 +236,12 @@ class ViTModel(nn.Module, BaseModel):
                     last.bias.fill_(b)
                     logger.info("Initialized binary head bias to %.4f.", b)
 
-    # forward
+    # forward (returns RAW logits)
     def forward(self, batch: Mapping[str, torch.Tensor] | torch.Tensor) -> Mapping[str, torch.Tensor]:
-        # get image tensor
         x = batch[self.image_key] if isinstance(batch, Mapping) else batch
         if not torch.is_tensor(x):
             raise TypeError(f"[ViTModel] Expected Tensor for '{self.image_key}', got {type(x)}")
 
-        # enforce NCHW / NCDHW and shape
         expected_ndim = 2 + self.spatial_dims  # N + C + spatial
         if x.ndim != expected_ndim:
             raise RuntimeError(
@@ -284,7 +253,7 @@ class ViTModel(nn.Module, BaseModel):
 
         spatial = tuple(int(s) for s in x.shape[2:])
         if spatial != self.img_size:
-            if bool(getattr(self, "config", {}).get("auto_resize_to_img", False)):
+            if bool(self.config.get("auto_resize_to_img", False)):
                 mode = "trilinear" if self.spatial_dims == 3 else "bilinear"
                 x = F.interpolate(x, size=self.img_size, mode=mode, align_corners=False)
             else:
@@ -294,24 +263,373 @@ class ViTModel(nn.Module, BaseModel):
                 )
         x = x.contiguous()
 
-        # MONAI forward → RAW logits (no activation here)
+        # MONAI ViT with classification=True returns logits (no activation)
         raw = self.net(x)
-        logits = _coerce_logits_any(raw, out_dim=self.out_dim)
+        logits = raw if torch.is_tensor(raw) else _coerce_logits_any(raw, out_dim=self.out_dim)
 
-        # normalize shape to [B, C]
         if logits.ndim == 1:
             logits = logits.unsqueeze(1)
         if logits.ndim != 2:
             raise RuntimeError(f"[ViTModel] Expected logits [B,C] or [B], got {tuple(logits.shape)}")
 
-        # light sanity check: flag near-constant logits early
-        with torch.no_grad():
-            s = logits if logits.size(1) == 1 else (logits.max(dim=1).values - logits.min(dim=1).values)
-            if torch.isfinite(s).all() and float(s.std().item()) < 1e-6:
-                logger.debug("[ViTModel] logits near-constant this batch (std < 1e-6)")
-
-        # expose canonical keys for the training/eval stack
         return {"cls_logits": logits, "logits": logits}
+
+
+# class ViTModel(nn.Module, BaseModel):
+#     """
+#     MONAI ViT for classification.
+#     Key guarantees:
+#       - Returns RAW logits (no Sigmoid/Softmax). BCEWithLogits/CE handle activation.
+#       - Exposes 'head' vs 'backbone' parameter helpers for optimizer split.
+#       - Head module is discoverable by the registry (classifier names aligned).
+#     """
+
+#     def __init__(self, cfg: Optional[Mapping[str, Any]] = None, **kwargs: Any):
+#         super().__init__()
+#         cfg = dict(cfg) if cfg is not None else {}
+
+#         # resolve core cfg/kwargs
+#         spatial_dims: int = int(kwargs.get("spatial_dims", cfg.get("spatial_dims", 2)))
+#         in_ch: int = int(kwargs.get("in_channels", cfg.get("in_channels", 1)))
+#         req_classes: int = int(kwargs.get("num_classes", cfg.get("num_classes", 2)))
+#         head_logits: int = int(kwargs.get("head_logits", cfg.get("head_logits", 1)))  # 1→BCEWithLogits, 2+→CE
+
+#         self.in_channels = in_ch
+#         self.spatial_dims = spatial_dims
+#         self.image_key = str(kwargs.get("image_key", cfg.get("image_key", "image")))
+
+#         patch_size = kwargs.get("patch_size", cfg.get("patch_size", 16))
+#         img_size = kwargs.get("img_size", kwargs.get("image_size", cfg.get("img_size", cfg.get("image_size", None))))
+#         input_shape = kwargs.get("input_shape", cfg.get("input_shape", (256, 256)))
+
+#         # out_dim from head_logits
+#         out_dim: int = 1 if (req_classes == 2 and head_logits == 1) else int(req_classes)
+#         self.head_logits = head_logits
+#         self.num_classes = req_classes
+#         self.out_dim = out_dim
+
+#         # image/patch geometry
+#         if img_size is None:
+#             img_size = _normalize_img_size(input_shape, in_ch, spatial_dims)
+#         else:
+#             img_size = (int(img_size),) * spatial_dims if isinstance(img_size, int) else tuple(int(s) for s in img_size)
+#         if len(img_size) != spatial_dims:
+#             raise ValueError(f"img_size {img_size} rank != spatial_dims={spatial_dims}")
+
+#         ps = (patch_size,) * len(img_size) if isinstance(patch_size, int) else tuple(int(p) for p in patch_size)
+#         if len(ps) != len(img_size) or any(s % p != 0 for s, p in zip(img_size, ps)):
+#             raise ValueError(f"img_size {img_size} must be divisible by patch_size {ps}")
+
+#         # transformer dims
+#         hidden_size = int(kwargs.get("hidden_size", cfg.get("hidden_size", 384)))
+#         mlp_dim = int(kwargs.get("mlp_dim", cfg.get("mlp_dim", 4 * hidden_size)))
+#         num_layers = int(kwargs.get("num_layers", cfg.get("num_layers", 12)))
+#         num_heads = int(kwargs.get("num_heads", cfg.get("num_heads", 8)))
+#         dropout = float(kwargs.get("dropout_rate", cfg.get("dropout_rate", 0.1)))
+
+#         if hidden_size % num_heads != 0:
+#             # snap to divisible-by-heads to avoid MONAI internal asserts
+#             def _snap(x: int, m: int) -> int:
+#                 down = (x // m) * m
+#                 up = down + m
+#                 return up if (x - down) > (up - x) else down
+#             snapped = _snap(hidden_size, num_heads)
+#             logger.info("ViT hidden_size adjusted %d → %d to be divisible by num_heads=%d.", hidden_size, snapped, num_heads)
+#             hidden_size = max(num_heads, snapped)
+
+#         # MONAI ViT (classification=True returns logits from a Linear head; no activation)
+#         self.img_size = tuple(img_size)
+#         self.patch_size = tuple(ps)
+#         self.net = ViT(
+#             in_channels=in_ch,
+#             img_size=self.img_size,
+#             patch_size=self.patch_size,
+#             spatial_dims=spatial_dims,
+#             classification=True,
+#             num_classes=out_dim,
+#             hidden_size=hidden_size,
+#             mlp_dim=mlp_dim,
+#             num_layers=num_layers,
+#             num_heads=num_heads,
+#             dropout_rate=dropout,
+#         )
+
+#         head = getattr(self.net, "classification_head", None)
+#         if isinstance(head, nn.Linear):
+#             # Keep the head registered only inside self.net; store a soft ref for convenience
+#             self._head_ref = head
+#         else:
+#             # Fallback: create our own linear head and install it where ViT expects it
+#             hidden = int(kwargs.get("hidden_size", cfg.get("hidden_size", 384)))
+#             new_head = nn.Linear(hidden, out_dim, bias=True)
+#             setattr(self.net, "classification_head", new_head)
+#             self._head_ref = new_head
+
+#         # (Optional) If we want an alternate name inside the same parent for name-based searches,
+#         # *rename* rather than duplicate. But since head_keys include "classification_head",
+#         # we can skip this entirely.
+#         # setattr(self.net, "classifier", getattr(self.net, "classification_head"))
+
+#         # --- remove these nested helpers from __init__ (keep class methods below instead) ---
+#         # def backbone_parameters(self) -> Iterator[nn.Parameter]: ...
+#         # def head_parameters(self) -> Iterator[nn.Parameter]: ...
+#         # def param_groups(self): ...
+
+#         # --- later in the class, tweak _set_head_module to refresh the soft ref too ---
+#         def _set_head_module(self, new: nn.Module) -> None:
+#             for attr in ("classification_head", "classifier", "mlp_head", "fc", "cls", "head"):
+#                 if hasattr(self.net, attr):
+#                     setattr(self.net, attr, new)
+#                     # Ensure the canonical attr exists for ViT forward
+#                     if attr != "classification_head" and hasattr(self.net, "classification_head"):
+#                         # keep both names pointing to the same object only if needed,
+#                         # otherwise prefer a single canonical name:
+#                         pass
+#                     break
+#             else:
+#                 setattr(self.net, "classification_head", new)
+#             self._head_ref = new  # soft ref (not registering under self)
+
+#         def _head_module(self) -> Optional[nn.Module]:
+#             for attr in ("classification_head", "classifier", "mlp_head", "fc", "cls", "head"):
+#                 if hasattr(self.net, attr):
+#                     mod = getattr(self.net, attr)
+#                     if isinstance(mod, nn.Linear):
+#                         return mod
+#                     if isinstance(mod, (nn.Sequential, nn.ModuleList)) and len(list(mod.children())) > 0:
+#                         last = list(mod.children())[-1]
+#                         if isinstance(last, nn.Linear):
+#                             return mod
+#             return None
+
+#         def backbone_parameters(self) -> Iterator[nn.Parameter]:
+#             head = self._head_module()
+#             head_ids = set(id(p) for p in head.parameters()) if head is not None else set()
+#             for p in self.parameters():
+#                 if p.requires_grad and id(p) not in head_ids:
+#                     yield p
+
+#         def head_parameters(self) -> Iterator[nn.Parameter]:
+#             head = self._head_module()
+#             if head is None:
+#                 return iter(())
+#             return (p for p in head.parameters() if p.requires_grad)
+
+#         def param_groups(self):
+#             return {"backbone": list(self.backbone_parameters()), "head": list(self.head_parameters())}
+
+        # # Make the head recognizable and top-level; guarantee it is a Linear with no activation.
+        # head = getattr(self.net, "classification_head", None)
+        # if isinstance(head, nn.Linear):
+        #     # Keep the head registered only inside self.net; store a soft ref for convenience
+        #     self._head_ref = head
+        # else:
+        #     # Fallback: create our own linear head and install it where ViT expects it
+        #     hidden = int(kwargs.get("hidden_size", cfg.get("hidden_size", 384)))
+        #     new_head = nn.Linear(hidden, out_dim, bias=True)
+        #     setattr(self.net, "classification_head", new_head)
+        #     self._head_ref = new_head
+
+        # head = getattr(self.net, "classification_head", None)
+        # if isinstance(head, nn.Linear):
+        #     # Expose a stable, optimizer-friendly name at the top level
+        #     self.classifier = head
+        #     # Also expose a nested alias inside the submodule tree (helps name-based searches)
+        #     setattr(self.net, "classifier", self.classifier)
+        # else:
+        #     # Fallback: create our own linear head
+        #     hidden = int(kwargs.get("hidden_size", cfg.get("hidden_size", 384)))
+        #     self.classifier = nn.Linear(hidden, out_dim, bias=True)
+        #     # Attach to the net so named_parameters() sees it with a predictable key
+        #     setattr(self.net, "classifier", self.classifier)
+
+        # (Optional) If we previously added LayerNorm/Dropout around the head, keep them,
+        # but ensure the *last* stage is a raw Linear. Example:
+        # self.classifier = nn.Sequential(nn.LayerNorm(hidden), nn.Dropout(p=head_p), nn.Linear(hidden, out_dim, bias=True))
+        # setattr(self.net, "classifier", self.classifier)
+
+        # Param-group helpers become trivial and robust
+        # def backbone_parameters(self) -> Iterator[nn.Parameter]:
+        #     head_ids = {id(p) for p in self.classifier.parameters()} if hasattr(self, "classifier") else set()
+        #     for p in self.parameters():
+        #         if p.requires_grad and id(p) not in head_ids:
+        #             yield p
+
+        # def head_parameters(self) -> Iterator[nn.Parameter]:
+        #     if hasattr(self, "classifier"):
+        #         yield from (p for p in self.classifier.parameters() if p.requires_grad)
+
+        # def param_groups(self):
+        #     return {"backbone": list(self.backbone_parameters()), "head": list(self.head_parameters())}
+
+        # # optional head pre-layers (kept minimal; preserve last Linear)
+        # head_p = float(cfg.get("head_dropout", 0.0))
+        # use_head_norm = bool(cfg.get("head_norm", False))
+        # if head_p > 0.0 or use_head_norm:
+        #     h = self._head_module()
+        #     if isinstance(h, nn.Linear):
+        #         layers = []
+        #         if use_head_norm:
+        #             layers.append(nn.LayerNorm(h.in_features))
+        #         if head_p > 0.0:
+        #             layers.append(nn.Dropout(p=head_p))
+        #         layers.append(nn.Linear(h.in_features, h.out_features, bias=True))
+        #         new_head = nn.Sequential(*layers)
+        #         with torch.no_grad():
+        #             new_head[-1].weight.copy_(h.weight)
+        #             if h.bias is not None:
+        #                 new_head[-1].bias.copy_(h.bias)
+        #         self._set_head_module(new_head)
+        #     elif isinstance(h, nn.Sequential) and isinstance(list(h.children())[-1], nn.Linear):
+        #         last: nn.Linear = list(h.children())[-1]  # type: ignore
+        #         pre = nn.Sequential(*list(h.children())[:-1])
+        #         new_head = nn.Sequential(
+        #             pre,
+        #             *([nn.LayerNorm(last.in_features)] if use_head_norm else []),
+        #             *([nn.Dropout(p=head_p)] if head_p > 0.0 else []),
+        #             nn.Linear(last.in_features, last.out_features, bias=True),
+        #         )
+        #         with torch.no_grad():
+        #             new_head[-1].weight.copy_(last.weight)
+        #             if last.bias is not None:
+        #                 new_head[-1].bias.copy_(last.bias)
+        #         self._set_head_module(new_head)
+        #     else:
+        #         logger.info("Head dropout requested (p=%.3f), but no linear classification head found; skipping.", head_p)
+
+        # # gate bias seeding on config to avoid double-init (registry may also do it)
+        # cc = cfg.get("class_counts")
+        # if bool(cfg.get("init_head_bias_from_prior", False)) and cc is not None and out_dim == 1:
+        #     try:
+        #         neg, pos = float(cc[0]), float(cc[1])
+        #         tot = max(1.0, neg + pos)
+        #         p_pos = min(max(pos / tot, 1e-6), 1.0 - 1e-6)
+        #         self._init_binary_bias_from_prior(p_pos)
+        #     except Exception as e:
+        #         logger.warning("Bias init skipped (class_counts=%s): %s", cc, e)
+
+        # # stash resolved config (handy for BaseModel helpers)
+        # self.config = dict(cfg)
+        # for k, v in kwargs.items():
+        #     self.config.setdefault(k, v)
+
+        # logger.info(
+        #     "ViT resolved: spatial=%d, in_ch=%d, img=%s, patch=%s, hidden=%d, mlp_dim=%d, heads=%d, out_dim=%d",
+        #     self.spatial_dims, self.in_channels, self.img_size, self.patch_size, hidden_size, mlp_dim, num_heads, self.out_dim
+        # )
+
+    # # head discovery / grouping
+    # def _head_module(self) -> Optional[nn.Module]:
+    #     # Align with registry search keys so head replacement/splitting works.
+    #     for attr in ("classification_head", "classifier", "mlp_head", "fc", "cls", "head"):
+    #         if hasattr(self.net, attr):
+    #             mod = getattr(self.net, attr)
+    #             if isinstance(mod, nn.Linear):
+    #                 return mod
+    #             if isinstance(mod, (nn.Sequential, nn.ModuleList)) and len(list(mod.children())) > 0:
+    #                 last = list(mod.children())[-1]
+    #                 if isinstance(last, nn.Linear):
+    #                     return mod
+    #     return None
+
+    # def _set_head_module(self, new: nn.Module) -> None:
+    #     for attr in ("classification_head", "classifier", "mlp_head", "fc", "cls", "head"):
+    #         if hasattr(self.net, attr):
+    #             setattr(self.net, attr, new)
+    #             return
+    #     # if no known attr exists, create a sane one
+    #     setattr(self.net, "classifier", new)
+
+    # def backbone_parameters(self) -> Iterator[nn.Parameter]:
+    #     head = self._head_module()
+    #     head_ids = set(id(p) for p in head.parameters()) if head is not None else set()
+    #     for p in self.parameters():
+    #         if p.requires_grad and id(p) not in head_ids:
+    #             yield p
+
+    # def head_parameters(self) -> Iterator[nn.Parameter]:
+    #     head = self._head_module()
+    #     if head is None:
+    #         return iter(())
+    #     return (p for p in head.parameters() if p.requires_grad)
+
+    # def param_groups(self):
+    #     return {"backbone": list(self.backbone_parameters()), "head": list(self.head_parameters())}
+
+    # # bias seed
+    # def _init_binary_bias_from_prior(self, p: float):
+    #     import math
+    #     p = float(min(max(p, 1e-6), 1 - 1e-6))
+    #     b = math.log(p / (1 - p))
+    #     head = self._head_module()
+    #     if head is None:
+    #         return
+    #     with torch.no_grad():
+    #         if isinstance(head, nn.Linear) and head.out_features == 1 and head.bias is not None:
+    #             head.bias.fill_(b)
+    #             logger.info("Initialized binary head bias to %.4f.", b)
+    #         elif isinstance(head, nn.Sequential):
+    #             last = list(head.children())[-1]
+    #             if isinstance(last, nn.Linear) and last.out_features == 1 and last.bias is not None:
+    #                 last.bias.fill_(b)
+    #                 logger.info("Initialized binary head bias to %.4f.", b)
+
+    # # forward
+    # def forward(self, batch: Mapping[str, torch.Tensor] | torch.Tensor) -> Mapping[str, torch.Tensor]:
+    #     # get image tensor
+    #     x = batch[self.image_key] if isinstance(batch, Mapping) else batch
+    #     if not torch.is_tensor(x):
+    #         raise TypeError(f"[ViTModel] Expected Tensor for '{self.image_key}', got {type(x)}")
+
+    #     # enforce NCHW / NCDHW and shape
+    #     expected_ndim = 2 + self.spatial_dims  # N + C + spatial
+    #     if x.ndim != expected_ndim:
+    #         raise RuntimeError(
+    #             f"[ViTModel] Expected tensor with {expected_ndim} dims "
+    #             f"(N,C,{'D,H,W' if self.spatial_dims==3 else 'H,W'}), got {tuple(x.shape)}"
+    #         )
+    #     if x.shape[1] != self.in_channels:
+    #         raise RuntimeError(f"[ViTModel] Expected C={self.in_channels}, got C={x.shape[1]}")
+
+    #     spatial = tuple(int(s) for s in x.shape[2:])
+    #     if spatial != self.img_size:
+    #         if bool(getattr(self, "config", {}).get("auto_resize_to_img", False)):
+    #             mode = "trilinear" if self.spatial_dims == 3 else "bilinear"
+    #             x = F.interpolate(x, size=self.img_size, mode=mode, align_corners=False)
+    #         else:
+    #             raise RuntimeError(
+    #                 f"[ViTModel] Expected spatial size={self.img_size}, got {spatial}. "
+    #                 f"Set config['auto_resize_to_img']=True to enable on-the-fly resize."
+    #             )
+    #     x = x.contiguous()
+
+    #     # MONAI ViT with classification=True returns logits (no activation)
+    #     raw = self.net(x)
+    #     logits = raw if torch.is_tensor(raw) else _coerce_logits_any(raw, out_dim=self.out_dim)
+    #     # logits = _coerce_logits_any(raw, out_dim=self.out_dim)
+
+    #     # Normalize to [B, C]
+    #     if logits.ndim == 1:
+    #         logits = logits.unsqueeze(1)
+    #     if logits.ndim != 2:
+    #         raise RuntimeError(f"[ViTModel] Expected logits [B,C] or [B], got {tuple(logits.shape)}")
+
+    #     return {"cls_logits": logits, "logits": logits}
+
+# # normalize shape to [B, C]
+# if logits.ndim == 1:
+#     logits = logits.unsqueeze(1)
+# if logits.ndim != 2:
+#     raise RuntimeError(f"[ViTModel] Expected logits [B,C] or [B], got {tuple(logits.shape)}")
+
+# # light sanity check: flag near-constant logits early
+# with torch.no_grad():
+#     s = logits if logits.size(1) == 1 else (logits.max(dim=1).values - logits.min(dim=1).values)
+#     if torch.isfinite(s).all() and float(s.std().item()) < 1e-6:
+#         logger.debug("[ViTModel] logits near-constant this batch (std < 1e-6)")
+
+# # expose canonical keys for the training/eval stack
+# return {"cls_logits": logits, "logits": logits}
 
 # import logging
 # from typing import Any, Iterator, Mapping, Optional, Sequence, Tuple
@@ -673,7 +991,7 @@ class ViTModel(nn.Module, BaseModel):
 #             if torch.isfinite(logits).all():
 #                 s = logits if logits.size(1) == 1 else (logits.max(dim=1).values - logits.min(dim=1).values)
 #                 if s.std().item() < 1e-6:
-#                     # Use your logger if available; print kept for simplicity
+#                     # Use logger if available; print kept for simplicity
 #                     logger.debug("[ViTModel] logits near-constant this batch (std < 1e-6)")
 
 #         # Provide both keys for compatibility with existing pipelines

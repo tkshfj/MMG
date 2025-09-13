@@ -67,9 +67,14 @@ parameters:
     distribution: log_uniform_values
     min: 0.00001
     max: 0.00005
-  param_groups:   { values: [single, split, auto] }
-  head_lr_scale:  { value: 0.5 }
+  param_groups:   { values: [split, auto] }  # { values: [single, split, auto] }
+  head_lr_scale:  { values: [1.0, 1.5] }  # { value: 0.5 }
   head_wd_scale:  { value: 1.5 }
+  head_keys:  { values: ["classification_head","classifier","mlp_head","fc","cls"] }
+
+  # Optional warm freeze to let the head specialize
+  freeze_backbone_warmup: { values: [false, true] }
+  freeze_backbone_epochs: { value: 2 }
 
   # LR schedules (choose among these; knobs apply per strategy)
   lr_scheduler:    { values: [cosine, warmcos, plateau] }
@@ -160,11 +165,10 @@ parameters:
 #     min: 0.00001
 #     max: 0.00005
 
-#   # Split strategy (get_optimizer handles split/auto)
-#   param_groups:          { values: [single, split, auto] }
-#   head_lr_scale:         { value: 0.5 }
-#   head_wd_scale:         { value: 1.5 }
-#   head_keys:             { values: ["classification_head","classifier","mlp_head","fc","cls"] }
+  # Split strategy (get_optimizer handles split/auto)
+  # param_groups:          { values: [single, split, auto] }
+  # head_lr_scale:         { value: 0.5 }
+  # head_wd_scale:         { value: 1.5 }
 
 #   # LR schedule
 #   lr_strategy:           { values: [none, cosine, warmcos, plateau] }

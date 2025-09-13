@@ -3,6 +3,7 @@
 # 2025-09-13
 - Refactor registry/base and optimizer: head lookup/bias init, split param groups (decay/no-decay), config normalization, metrics alignment
 - Refactor registry/base + optimizer split; normalize config; align metrics; ensure ViT returns raw logits to fix flat probs and stabilize calibration
+- Refactor ViT to emit raw logits, harden optimizer head detection and decay/no-decay splits, add inline logits sanity checks, dedupe two-pass validation, gate decision-health, and refresh sweep YAMLs
 
 # 2025-09-12
 - Refactor ViT/Registry: fix head, init bias, enforce shapes; Ignite: normalize logits/probs, add param-group/grad diagnostics, unify validation.

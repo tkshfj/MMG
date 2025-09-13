@@ -346,7 +346,20 @@ def run(
         loss_function=loss_fn,
         prepare_batch=prepare_batch_std,   # training remains the std path
     )
-    # Attach single SoT probs to TRAINER (override the default placeholder)
+    # backbone warm-freeze hook
+    if cfg.get("freeze_backbone_warmup", False):
+        for p in model.backbone_parameters():
+            p.requires_grad = False
+        unfreeze_at = int(cfg.get("freeze_backbone_epochs", 2))
+
+        @trainer.on(Events.EPOCH_COMPLETED)
+        def _unfreeze_backbone(engine):
+            if engine.state.epoch >= unfreeze_at:
+                for p in model.backbone_parameters():
+                    p.requires_grad = True
+                engine.remove_event_handler(_unfreeze_backbone, Events.EPOCH_COMPLETED)
+
+    # Attach single SoT probs to trainer
     ppcfg.attach_to_engine_state(trainer)
     # Build evaluator and attach the same PosProbCfg
     std_evaluator = build_evaluator(
