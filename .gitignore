@@ -14,7 +14,6 @@ wandb/
 
 /working/
 /temporary/
-/consolidated/
 
 # DS_Store files
 .DS_Store
