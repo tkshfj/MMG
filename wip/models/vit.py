@@ -31,6 +31,55 @@ def _normalize_img_size(
     )
 
 
+def _coerce_logits_any(raw: Any, out_dim: Optional[int] = None) -> torch.Tensor:
+    """
+    Accept outputs in multiple forms and return a logits tensor:
+    - Tensor
+    - Dict with common keys (e.g., 'logits', 'cls_logits', 'y_pred', etc.)
+    - Tuple/list of items; prefer a tensor whose last dim matches out_dim if provided
+    """
+    def _from_dict(d: dict) -> Optional[torch.Tensor]:
+        for k in ("logits", "cls_logits", "class_logits", "y_pred", "out", "pred", "classification"):
+            v = d.get(k, None)
+            if torch.is_tensor(v):
+                return v
+        # last resort: first tensor value
+        for v in d.values():
+            if torch.is_tensor(v):
+                return v
+        return None
+
+    # Tensor case
+    if torch.is_tensor(raw):
+        return raw
+    # Dict case
+    if isinstance(raw, dict):
+        t = _from_dict(raw)
+        if t is not None:
+            return t
+        raise RuntimeError(f"[ViTModel] Could not find logits tensor in dict keys={list(raw.keys())}")
+    # Tuple/List case
+    if isinstance(raw, (list, tuple)):
+        candidates = []
+        for item in raw:
+            if torch.is_tensor(item):
+                candidates.append(item)
+            elif isinstance(item, dict):
+                t = _from_dict(item)
+                if t is not None:
+                    candidates.append(t)
+        if not candidates:
+            raise RuntimeError(f"[ViTModel] Could not find logits tensor in tuple/list types={[type(it) for it in raw]}")
+        # Prefer a candidate whose last dim == out_dim when that hint is available
+        if out_dim is not None:
+            for t in candidates:
+                if t.ndim >= 1 and t.shape[-1] == int(out_dim):
+                    return t
+        return candidates[0]
+    # Fallback
+    raise RuntimeError(f"[ViTModel] Unexpected forward output type: {type(raw)}")
+
+
 class ViTModel(nn.Module, BaseModel):
     """
     MONAI ViT for classification, mirroring SimpleCNNModel:
@@ -254,52 +303,6 @@ class ViTModel(nn.Module, BaseModel):
             "head": list(self.head_parameters()),
         }
 
-    def _coerce_logits(self, raw: Any) -> torch.Tensor:
-        """
-        Accept MONAI ViT outputs in multiple forms:
-        - Tensor
-        - Dict with common keys
-        - Tuple/list where first Tensor (or dict containing a Tensor) is logits
-        """
-        def _from_dict(d: dict) -> Optional[torch.Tensor]:
-            for k in ("logits", "cls_logits", "class_logits", "y_pred", "out", "pred", "classification"):
-                v = d.get(k, None)
-                if torch.is_tensor(v):
-                    return v
-            for v in d.values():
-                if torch.is_tensor(v):
-                    return v
-            return None
-        # Tensor case
-        if torch.is_tensor(raw):
-            return raw
-        # Dict case
-        if isinstance(raw, dict):
-            t = _from_dict(raw)
-            if t is not None:
-                return t
-            raise RuntimeError(f"[ViTModel] Could not find logits tensor in dict keys={list(raw.keys())}")
-        # Tuple/List case (e.g., (logits,) or (aux, logits...))
-        if isinstance(raw, (list, tuple)):
-            # 1) prefer a Tensor with trailing dim == out_dim
-            candidates = []
-            for item in raw:
-                if torch.is_tensor(item):
-                    candidates.append(item)
-                elif isinstance(item, dict):
-                    t = _from_dict(item)
-                    if t is not None:
-                        candidates.append(t)
-            for t in candidates:
-                if t.ndim >= 2 and t.shape[-1] == self.out_dim:
-                    return t
-            # 2) otherwise, first tensor-like is fine
-            if candidates:
-                return candidates[0]
-            raise RuntimeError(f"[ViTModel] Could not find logits tensor in tuple/list types={[type(it) for it in raw]}")
-        # Fallback
-        raise RuntimeError(f"[ViTModel] Unexpected forward output type: {type(raw)}")
-
     def forward(self, batch: dict[str, torch.Tensor] | torch.Tensor) -> dict[str, torch.Tensor]:
         # 1) Extract image tensor explicitly (no guessing)
         if isinstance(batch, dict):
@@ -339,7 +342,9 @@ class ViTModel(nn.Module, BaseModel):
 
         # 3) Call MONAI ViT (it should output [B, head_logits] for classification=True)
         raw = self.net(x)
-        logits = self._coerce_logits(raw)
+        # Use module-level helper to avoid instance binding pitfalls
+        logits = _coerce_logits_any(raw, out_dim=self.out_dim)
+        # logits = self._coerce_logits(raw)
 
         # 4) Normalize classifier output to [B, C]
         if not torch.is_tensor(logits):
@@ -359,3 +364,49 @@ class ViTModel(nn.Module, BaseModel):
 
         # Provide both keys for compatibility with existing pipelines
         return {"cls_logits": logits, "logits": logits}
+
+    # def _coerce_logits(self, raw: Any) -> torch.Tensor:
+    #     """
+    #     Accept MONAI ViT outputs in multiple forms:
+    #     - Tensor
+    #     - Dict with common keys
+    #     - Tuple/list where first Tensor (or dict containing a Tensor) is logits
+    #     """
+    #     def _from_dict(d: dict) -> Optional[torch.Tensor]:
+    #         for k in ("logits", "cls_logits", "class_logits", "y_pred", "out", "pred", "classification"):
+    #             v = d.get(k, None)
+    #             if torch.is_tensor(v):
+    #                 return v
+    #         for v in d.values():
+    #             if torch.is_tensor(v):
+    #                 return v
+    #         return None
+    #     # Tensor case
+    #     if torch.is_tensor(raw):
+    #         return raw
+    #     # Dict case
+    #     if isinstance(raw, dict):
+    #         t = _from_dict(raw)
+    #         if t is not None:
+    #             return t
+    #         raise RuntimeError(f"[ViTModel] Could not find logits tensor in dict keys={list(raw.keys())}")
+    #     # Tuple/List case (e.g., (logits,) or (aux, logits...))
+    #     if isinstance(raw, (list, tuple)):
+    #         # 1) prefer a Tensor with trailing dim == out_dim
+    #         candidates = []
+    #         for item in raw:
+    #             if torch.is_tensor(item):
+    #                 candidates.append(item)
+    #             elif isinstance(item, dict):
+    #                 t = _from_dict(item)
+    #                 if t is not None:
+    #                     candidates.append(t)
+    #         for t in candidates:
+    #             if t.ndim >= 2 and t.shape[-1] == self.out_dim:
+    #                 return t
+    #         # 2) otherwise, first tensor-like is fine
+    #         if candidates:
+    #             return candidates[0]
+    #         raise RuntimeError(f"[ViTModel] Could not find logits tensor in tuple/list types={[type(it) for it in raw]}")
+    #     # Fallback
+    #     raise RuntimeError(f"[ViTModel] Unexpected forward output type: {type(raw)}")

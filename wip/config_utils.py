@@ -373,7 +373,7 @@ def _sync_head_and_loss(cfg: Dict[str, Any]) -> None:
         cfg.setdefault("binary_bce_from_two_logits", False)
 
     # 2) Probability mapping should be automatic (keeps evaluator/ppcfg consistent)
-    cfg.setdefault("posprob_mode", "auto")
+    # cfg.setdefault("posprob_mode", "auto")
 
     # 3) Guard against contradictory user flags
     #    If user explicitly forced an incompatible pair, prefer head_logits and warn.

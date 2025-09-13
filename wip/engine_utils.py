@@ -12,7 +12,7 @@ from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Unio
 from ignite.handlers import EarlyStopping, Checkpoint, DiskSaver
 from ignite.engine import Events, Engine
 from utils.safe import to_float_scalar, is_finite_float, to_tensor
-from posprob import PosProbCfg
+from utils.posprob import PosProbCfg
 from optim_factory import grad_norms_by_group  # zero_grad_if_nan
 from metrics_utils import (
     extract_cls_logits_from_any,
@@ -231,55 +231,32 @@ def is_ignite_engine(obj) -> bool:
 
 
 def _pick_logits_from_output(out: Any) -> Optional[torch.Tensor]:
-    # Returns raw logits only; never probabilities. Decisions must use decision_from_logits(...).
-    if isinstance(out, (tuple, list)) and len(out) >= 1:
-        return out[0]
-    if isinstance(out, dict):
-        for k in ("y_pred", "logits", "cls_out"):
-            v = out.get(k, None)
-            if v is not None:
-                return v
-    return None
+    try:
+        t = PosProbCfg._pick_logits(out)  # uses the same key precedence as the SoT
+        return t if torch.is_tensor(t) else None
+    except Exception:
+        return None
 
 
-# def ppcfg_from_logits(logits, positive_index=1):
-#     if logits.ndim == 1 or (logits.ndim >= 2 and logits.shape[-1] == 1):
-#         scheme = "bce1"
-#     elif logits.ndim >= 2 and logits.shape[-1] >= 2:
-#         scheme = "ce"
+# def decision_from_logits(
+#     logits: torch.Tensor,
+#     threshold: float,
+#     *,
+#     positive_index: int = 1,
+#     to_pos_prob: Callable[[torch.Tensor], torch.Tensor] | None = None,
+# ) -> torch.Tensor:
+#     """
+#     Return int64 predictions computed as (p_pos >= threshold), never on raw logits.
+#     Prefer passing to_pos_prob = evaluator.state.to_pos_prob for single SoT.
+#     """
+#     if to_pos_prob is None:
+#         # Better fallback: treat 2-logit binary as BCE2; ≥3 as CE; scalar/1-col as BCE1.
+#         last = (logits.ndim > 0 and logits.shape[-1]) or 1
+#         scheme = "bce1" if last == 1 else ("bce2" if last == 2 else "ce")
+#         probs = PosProbCfg(positive_index=int(positive_index), scheme=scheme).logits_to_pos_prob(logits)
 #     else:
-#         scheme = "bce1"
-#     return PosProbCfg(positive_index=int(positive_index), scheme=scheme)
-
-
-def decision_from_logits(
-    logits: torch.Tensor,
-    threshold: float,
-    *,
-    positive_index: int = 1,
-    to_pos_prob: Callable[[torch.Tensor], torch.Tensor] | None = None,
-) -> torch.Tensor:
-    """
-    Return int64 predictions computed as (p_pos >= threshold), never on raw logits.
-    Prefer passing to_pos_prob = evaluator.state.to_pos_prob for single SoT.
-    """
-    if to_pos_prob is None:
-        # Fallback: construct a minimal PosProbCfg (kept for backward compat)
-        # pp = PosProbCfg(
-        #     binary_single_logit=(logits.ndim in (1, 2) and (logits.ndim == 1 or logits.shape[-1] == 1)),
-        #     positive_index=int(positive_index))
-        # ppcfg = ppcfg_from_logits(logits, positive_index)
-        if logits.ndim == 1 or (logits.ndim >= 2 and logits.shape[-1] == 1):
-            scheme = "bce1"          # single-logit BCEWithLogits
-        elif logits.ndim >= 2 and logits.shape[-1] >= 2:
-            scheme = "ce"             # multi-logit CrossEntropy-style
-        else:
-            scheme = "bce1"           # safe fallback
-        pp = PosProbCfg(positive_index=int(positive_index), scheme=scheme)
-        probs = pp.logits_to_pos_prob(logits)
-    else:
-        probs = to_pos_prob(logits)
-    return (probs.view(-1) >= float(threshold)).long()
+#         probs = to_pos_prob(logits)
+#     return (probs.reshape(-1) >= float(threshold)).long()
 
 
 def build_trainer(
@@ -303,24 +280,28 @@ def build_trainer(
 
     def _iteration_update(engine: Engine, batch):
         network.train()
-
         dev = getattr(engine.state, "device", device)
         nb = getattr(engine.state, "non_blocking", bool(getattr(train_data_loader, "pin_memory", False)))
-
         x, targets = prepare_batch(batch, dev, nb)
-
         optimizer.zero_grad(set_to_none=True)
         preds = network(x)
+
+        # Ensure a single source-of-truth mapping is available on this engine
+        ppcfg: PosProbCfg = getattr(engine.state, "ppcfg", None)
+        if ppcfg is None:
+            # fall back to whatever config the caller stashed on state; empty {} is safe
+            ppcfg = PosProbCfg.from_cfg(getattr(engine.state, "cfg", {}))
+            ppcfg.attach_to_engine_state(engine)
 
         # early logits-spread probe to catch constant scores
         try:
             it = int(getattr(engine.state, "iteration", 0) or 0)
             dbg_logit_until = int(getattr(engine.state, "logit_debug_steps", _logit_dbg_steps_default))
             if it <= dbg_logit_until:
-                from metrics_utils import extract_cls_logits_from_any
-                logits = extract_cls_logits_from_any(preds)
+                # Prefer posprob’s extractor to avoid drift
+                logits = ppcfg.pick_logits(preds)
                 if torch.is_tensor(logits):
-                    logits = logits.detach().float().view(-1)
+                    logits = logits.detach().float().reshape(-1)
                     if logits.numel() > 0:
                         lmin, lmed, lmax = logits.min().item(), logits.median().item(), logits.max().item()
                         lstd = logits.std(unbiased=False).item()
@@ -343,7 +324,7 @@ def build_trainer(
         dbg_until = int(getattr(engine.state, "grad_debug_steps", _grad_dbg_steps_default))
         dbg_every = int(getattr(engine.state, "grad_debug_every", _grad_dbg_every_default))
 
-        out: Dict[str, float] = {}
+        out: Dict[str, Any] = {}  # allow tensors too (pos_prob, y, logits)
 
         if it <= dbg_until and it % max(1, dbg_every) == 0:
             try:
@@ -415,6 +396,19 @@ def build_trainer(
             out["logits/med"] = float(lmed)
             out["logits/max"] = float(lmax)
             out["logits/std"] = float(lstd)
+        # Canonical outputs for metrics/calibration (always emit)
+        try:
+            logits_t = ppcfg.pick_logits(preds)
+            if torch.is_tensor(logits_t):
+                out["logits_tensor"] = logits_t.detach()
+                pos_prob = ppcfg.logits_to_pos_prob(logits_t).detach()
+                if pos_prob.ndim == 1:
+                    pos_prob = pos_prob.unsqueeze(1)  # [B,1]
+                out["pos_prob"] = pos_prob
+                out["y"] = ppcfg.pick_labels(targets)
+                out["prob/std"] = float(pos_prob.float().std(unbiased=False).item())
+        except Exception:
+            pass
 
         return out
 
@@ -428,9 +422,8 @@ def build_trainer(
     _attach_device_state(trainer, device, getattr(train_data_loader, "pin_memory", False))
 
     # unified scorer on trainer.state (parity with evaluator)
-    if not hasattr(trainer.state, "ppcfg"):
-        trainer.state.ppcfg = PosProbCfg.from_cfg(getattr(trainer.state, "cfg", {}))
-        trainer.state.to_pos_prob = trainer.state.ppcfg.logits_to_pos_prob
+    ppcfg0 = PosProbCfg.from_cfg(getattr(trainer.state, "cfg", {}))
+    ppcfg0.attach_to_engine_state(trainer)
 
     # attach training metrics (bare names)
     if train_metrics and not getattr(trainer.state, "_train_metrics_attached", False):
@@ -465,9 +458,17 @@ def build_evaluator(
 
     # single source-of-truth scorer
     if ppcfg is None:
-        # ppcfg = PosProbCfg.from_cfg(cfg)
-        ppcfg = PosProbCfg(positive_index=1, scheme="bce1")
-        # ppcfg = PosProbCfg()  # defaults: positive_index=1, binary_single_logit=True, mode="auto"
+        # Prefer model.config if available; otherwise default to BCE1 single-logit.
+        src_cfg = {}
+        net_cfg = getattr(network, "config", None)
+        if isinstance(net_cfg, dict):
+            src_cfg = net_cfg
+        elif net_cfg is not None:
+            try:
+                src_cfg = dict(net_cfg)
+            except Exception:
+                src_cfg = {}
+        ppcfg = PosProbCfg.from_cfg(src_cfg or {})
 
     def _eval_step(engine: Engine, batch: Mapping[str, Any]) -> Dict[str, Any]:
         dev = getattr(engine.state, "device", device)
@@ -489,16 +490,16 @@ def build_evaluator(
 
         # classification head
         try:
-            logits = extract_cls_logits_from_any(net_out)
-            if torch.is_tensor(logits):
-                logits = logits.float()
-            else:
-                logits = torch.as_tensor(logits, dtype=torch.float32, device=dev)
-            out_map["y_pred"] = logits  # Keep logits here. Ignite metrics' output transforms will convert to probs/decisions.
-            out_map["logits"] = logits
-            out_map["cls_out"] = logits
+            try:
+                logits = ppcfg.pick_logits(net_out)  # Prefer the SoT extractor
+            except Exception:
+                logits = extract_cls_logits_from_any(net_out)  # Fallback to legacy helper if present
+            logits = torch.as_tensor(logits, dtype=torch.float32, device=dev)
+            out_map["y_pred"] = out_map["logits"] = out_map["cls_out"] = logits
             if y is not None:
-                out_map["y"] = torch.as_tensor(y, device=dev).long().view(-1)
+                # Use the SoT label picker so shapes/dtypes are consistent everywhere
+                out_map["y"] = ppcfg.pick_labels({"label": y}).to(device=dev)
+                # out_map["y"] = torch.as_tensor(y, device=dev).long().view(-1)
         except Exception:
             pass
 
@@ -564,9 +565,8 @@ def attach_engine_metrics(
 
     # single PosProbCfg for both trainer/evaluator metrics
     if ppcfg is None:
-        # ppcfg = PosProbCfg.from_cfg(cfg)
-        # ppcfg.positive_index = int(positive_index)
-        ppcfg = PosProbCfg(positive_index=int(positive_index), scheme="bce1")
+        # Reuse evaluator's if present (SoT), otherwise derive from cfg on state.
+        ppcfg = getattr(getattr(evaluator, "state", object()), "ppcfg", None) or PosProbCfg.from_cfg(getattr(getattr(evaluator, "state", object()), "cfg", {}) or {})  # noqa F841
 
     # training metrics (keep light; classification-only by default)
     train_metrics = make_metrics(
@@ -591,9 +591,8 @@ def attach_engine_metrics(
     # validation metrics: start with classification
     val_metrics = make_cls_val_metrics(
         num_classes=num_classes,
-        decision=cls_decision,
-        # threshold=cls_threshold,
-        threshold=lambda: float(getattr(evaluator.state, "threshold", cls_threshold)),
+        cls_decision=cls_decision,
+        cls_threshold=lambda: float(getattr(evaluator.state, "threshold", cls_threshold)),
         positive_index=positive_index,
         ppcfg=ppcfg,
         device=dev,
@@ -692,7 +691,7 @@ def make_prepare_batch(
         x = get_first(bdict, "image", "images", "x")
         if x is None:
             raise KeyError("Batch missing image tensor (expected one of: 'image', 'images', 'x').")
-        x = _to_device(to_tensor(x).float(), dev, nb)
+        x = _to_device(to_tensor(x), dev, nb)
 
         # labels (classification)
         y_cls = get_first(bdict, "label", "classification", "class", "target", "y")
@@ -922,47 +921,47 @@ def attach_lr_scheduling(
         scheduler.step()
 
 
-def _best_threshold_from_probs(p: torch.Tensor, y_true: torch.Tensor, mode: str = "bal_acc") -> tuple[float, dict]:
-    """
-    p: (N,) positive-class probabilities in [0,1]
-    y_true: (N,) {0,1}
-    Returns (threshold, stats_dict)
-    """
-    with torch.no_grad():
-        p = p.detach().float().clamp_(0.0, 1.0).view(-1)     # keep device, in-place clamp
-        y = y_true.detach().long().view(-1).to(p.device)
-        # candidate thresholds: unique preds + endpoints
-        # stay on the same device; quantile works on CUDA too
-        cand = torch.quantile(p, torch.linspace(0, 1, 101, device=p.device)).unique()
+# def _best_threshold_from_probs(p: torch.Tensor, y_true: torch.Tensor, mode: str = "bal_acc") -> tuple[float, dict]:
+#     """
+#     p: (N,) positive-class probabilities in [0,1]
+#     y_true: (N,) {0,1}
+#     Returns (threshold, stats_dict)
+#     """
+#     with torch.no_grad():
+#         p = p.detach().float().clamp_(0.0, 1.0).view(-1)     # keep device, in-place clamp
+#         y = y_true.detach().long().view(-1).to(p.device)
+#         # candidate thresholds: unique preds + endpoints
+#         # stay on the same device; quantile works on CUDA too
+#         cand = torch.quantile(p, torch.linspace(0, 1, 101, device=p.device)).unique()
 
-        best_thr, best_score, best_stats = 0.5, -1.0, {}
-        for thr in cand:
-            y_hat = (p >= thr).long()
-            tp = int(((y_hat == 1) & (y == 1)).sum())
-            tn = int(((y_hat == 0) & (y == 0)).sum())
-            fp = int(((y_hat == 1) & (y == 0)).sum())
-            fn = int(((y_hat == 0) & (y == 1)).sum())
+#         best_thr, best_score, best_stats = 0.5, -1.0, {}
+#         for thr in cand:
+#             y_hat = (p >= thr).long()
+#             tp = int(((y_hat == 1) & (y == 1)).sum())
+#             tn = int(((y_hat == 0) & (y == 0)).sum())
+#             fp = int(((y_hat == 1) & (y == 0)).sum())
+#             fn = int(((y_hat == 0) & (y == 1)).sum())
 
-            prec = tp / max(tp + fp, 1)
-            rec1 = tp / max(tp + fn, 1)   # recall for class 1
-            rec0 = tn / max(tn + fp, 1)   # recall for class 0
-            bal_acc = 0.5 * (rec0 + rec1)
-            f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
-            pos_rate = (tp + fp) / max(len(y), 1)
+#             prec = tp / max(tp + fp, 1)
+#             rec1 = tp / max(tp + fn, 1)   # recall for class 1
+#             rec0 = tn / max(tn + fp, 1)   # recall for class 0
+#             bal_acc = 0.5 * (rec0 + rec1)
+#             f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
+#             pos_rate = (tp + fp) / max(len(y), 1)
 
-            score = bal_acc if mode == "bal_acc" else f1
-            if score > best_score:
-                best_score = float(score)
-                best_thr = float(thr)
-                best_stats = dict(
-                    tp=tp, tn=tn, fp=fp, fn=fn,
-                    prec=float(prec), rec=float(rec1),
-                    rec_0=float(rec0), rec_1=float(rec1),
-                    bal_acc=float(bal_acc), f1=float(f1),
-                    pos_rate=float(pos_rate),
-                )
+#             score = bal_acc if mode == "bal_acc" else f1
+#             if score > best_score:
+#                 best_score = float(score)
+#                 best_thr = float(thr)
+#                 best_stats = dict(
+#                     tp=tp, tn=tn, fp=fp, fn=fn,
+#                     prec=float(prec), rec=float(rec1),
+#                     rec_0=float(rec0), rec_1=float(rec1),
+#                     bal_acc=float(bal_acc), f1=float(f1),
+#                     pos_rate=float(pos_rate),
+#                 )
 
-        return best_thr, best_stats
+#         return best_thr, best_stats
 
 
 # threshold calibration helpers (logits-aware)
@@ -1193,34 +1192,18 @@ def attach_val_threshold_search(
             return
         if logits is None:
             return
-        to_pos_prob = getattr(engine.state, "to_pos_prob", None)
-        if to_pos_prob is None:
-            return
-        # prob = to_pos_prob(logits)
-        # buf["scores"].append(prob.detach().reshape(-1))
-        # buf["targets"].append(torch.as_tensor(y_true).detach().reshape(-1).long())
-        p = to_pos_prob(logits).detach().reshape(-1).clamp_(0.0, 1.0).cpu()  # <-- .cpu()
-        y = torch.as_tensor(y_true).detach().reshape(-1).long().cpu()        # <-- .cpu()
-        buf["scores"].append(p)
-        buf["targets"].append(y)
+        # Store raw logits and labels on CPU; we will map to probs once, later.
+        buf["scores"].append(torch.as_tensor(logits).detach().reshape(-1).cpu())
+        buf["targets"].append(torch.as_tensor(y_true).detach().reshape(-1).long().cpu())
 
     @evaluator.on(Events.EPOCH_COMPLETED)
     def _choose_threshold(engine: Engine):
         if not buf["scores"]:
             return
 
-        # We already stored CPU probs & labels in _collect — switch to logits-first:
-        # If we prefer to keep _collect as logits, change that collection and adapt here.
-        probs = torch.cat(buf["scores"], dim=0).clamp(0.0, 1.0)
-        y_true = torch.cat(buf["targets"], dim=0).long()
-
-        # Reconstruct logits-like via logit(p) for the helper, so the same path is exercised.
-        # (Or, better: collect logits in _collect and skip this inversion.)
-        eps = 1e-6
-        p_np = probs.numpy()
-        logits_np = np.log(np.clip(p_np, eps, 1 - eps)) - np.log(np.clip(1 - p_np, eps, 1 - eps))
-        logits = torch.from_numpy(logits_np)
-        labels = y_true
+        # We stored raw logits; map to probs inside pick_threshold_from_logits using the SoT.
+        logits = torch.cat(buf["scores"], dim=0)
+        labels = torch.cat(buf["targets"], dim=0).long()
 
         # prev = float(getattr(evaluator.state, "threshold", 0.5))
         prev = float(engine.state.threshold) if hasattr(engine.state, "threshold") else float(getattr(engine.state, "cls_threshold", 0.5))
@@ -1283,7 +1266,8 @@ def attach_val_threshold_search(
         )
 
         # summaries
-        probs_final = to_pos_prob(torch.from_numpy(logits_np)).numpy()  # for consistent metrics dump
+        # probs_final = to_pos_prob(torch.from_numpy(logits_np)).numpy()  # for consistent metrics dump
+        probs_final = to_pos_prob(logits).cpu().numpy()
         y_hat = (probs_final >= new_thr).astype(np.int64)
         tp = int(((labels.numpy() == 1) & (y_hat == 1)).sum())
         tn = int(((labels.numpy() == 0) & (y_hat == 0)).sum())
@@ -1292,8 +1276,8 @@ def attach_val_threshold_search(
         pos_rate = float(y_hat.mean())
 
         m = engine.state.metrics
-        m["score_mean"] = float(p_np.mean())
-        m["score_std"] = float(p_np.std())
+        m["score_mean"] = float(probs_final.mean())
+        m["score_std"] = float(probs_final.std())
         m["gt_pos_rate"] = float((labels.numpy() == 1).mean())
 
         m["search_threshold"] = float(new_thr)
@@ -1306,10 +1290,14 @@ def attach_val_threshold_search(
         if "auc" in s:
             m["search_auc"] = float(s["auc"])
 
-        evaluator.state.threshold = float(new_thr)
+        # evaluator.state.threshold = float(new_thr)
+        # try:
+        #     if hasattr(evaluator, "trainer"):
+        #         evaluator.trainer.state.threshold = float(new_thr)
+        engine.state.threshold = float(new_thr)
         try:
-            if hasattr(evaluator, "trainer"):
-                evaluator.trainer.state.threshold = float(new_thr)
+            if hasattr(engine, "trainer"):
+                engine.trainer.state.threshold = float(new_thr)
         except Exception:
             pass
 
@@ -1558,11 +1546,8 @@ def attach_early_stopping(
     if patience <= 0:
         return None  # disabled
 
-    def _auc_score_fn(engine):
-        return float(engine.state.metrics.get("auc", 0.0))
-    score_fn = make_warmup_safe_score_fn(metric_key=metric_key, mode=mode, trainer=trainer, warmup_epochs=warmup_epochs)  # noqa: F841
-    # handler = EarlyStopping(patience=int(patience), score_function=score_fn, trainer=trainer)
-    handler = EarlyStopping(patience=int(patience), score_function=_auc_score_fn, trainer=trainer)
+    score_fn = make_warmup_safe_score_fn(metric_key=metric_key, mode=mode, trainer=trainer, warmup_epochs=warmup_epochs)
+    handler = EarlyStopping(patience=int(patience), score_function=score_fn, trainer=trainer)
     evaluator.add_event_handler(Events.COMPLETED, handler)
     return handler
 
@@ -1633,7 +1618,7 @@ __all__ = [
     "attach_best_checkpoint",
     "build_trainer",
     "build_evaluator",
-    "decision_from_logits",
+    # "decision_from_logits",
     "get_label_indices_from_batch",
     "make_prepare_batch",
     "make_warmup_safe_score_fn",

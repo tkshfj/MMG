@@ -21,7 +21,7 @@ from ignite.engine import Events
 
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
-from model_registry import build_model  # make_default_loss
+from models.model_registry import build_model  # make_default_loss
 from engine_utils import (
     build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
     get_label_indices_from_batch, build_evaluator, attach_best_checkpoint, attach_val_stack,
@@ -32,7 +32,7 @@ from optim_factory import get_optimizer, make_scheduler
 from handlers import register_handlers, configure_wandb_step_semantics
 from constants import CHECKPOINT_DIR
 from resume_utils import restore_training_state
-from posprob import PosProbCfg
+from utils.posprob import PosProbCfg
 
 # determinism (CPU side + algorithm choices), safe pre-fork
 torch.backends.cudnn.deterministic = True
@@ -262,7 +262,7 @@ def run(
     # Make the evaluator/metrics infer the correct probability mapping
     cfg["head_logits"] = head_logits               # persist normalized value
     cfg["cls_loss"] = cls_loss                     # persist normalized value
-    cfg["posprob_mode"] = cfg.get("posprob_mode", "auto")
+    # cfg["posprob_mode"] = cfg.get("posprob_mode", "auto")
 
     # build torch.nn.Module via the registry adapter
     model = build_model(cfg).to(device=device, dtype=torch.float32)
@@ -286,26 +286,37 @@ def run(
         # if bool(cfg.get("binary_single_logit", True)) and bool(cfg.get("init_head_bias_from_prior", True)):
         _seed_binary_head_bias_from_prior(model, pos_prior)
 
-    use_split = str(cfg.get("param_groups", "single")).lower() == "split"
-    if use_split and all(hasattr(model, m) for m in ("backbone_parameters", "head_parameters")):
-        base_lr = float(cfg.get("base_lr", cfg.get("lr", 1e-3)))
-        head_mult = float(cfg.get("head_multiplier", 10.0))
-        wd = float(cfg.get("weight_decay", 1e-4))
-        bb = list(model.backbone_parameters())
-        hd = list(model.head_parameters())
-        # If something is wrong with grouping, fall back gracefully
-        if len(bb) == 0 or len(hd) == 0:
-            print("[WARN] split requested but backbone/head groups are empty; using single group.")
-            parameters_for_opt = model.parameters()
-        else:
-            parameters_for_opt = [
-                {"params": bb, "lr": base_lr, "weight_decay": wd},  # backbone
-                {"params": hd, "lr": base_lr * head_mult, "weight_decay": wd},  # head
-            ]
-    else:
-        parameters_for_opt = model.parameters()
+    if "head_multiplier" in cfg and "head_lr_scale" not in cfg:
+        cfg["head_lr_scale"] = float(cfg.pop("head_multiplier"))
+    if "base_lr" in cfg and "lr" not in cfg:
+        cfg["lr"] = float(cfg.pop("base_lr"))
 
-    optimizer = get_optimizer(cfg, parameters_for_opt, verbose=True)
+    # Grouping defaults so the factory will auto-split head/backbone & decay/no-decay
+    cfg.setdefault("param_groups", "auto")
+    cfg.setdefault("decay_split", True)
+
+    # use_split = str(cfg.get("param_groups", "single")).lower() == "split"
+    # if use_split and all(hasattr(model, m) for m in ("backbone_parameters", "head_parameters")):
+    #     base_lr = float(cfg.get("base_lr", cfg.get("lr", 1e-3)))
+    #     head_mult = float(cfg.get("head_multiplier", 10.0))
+    #     wd = float(cfg.get("weight_decay", 1e-4))
+    #     bb = list(model.backbone_parameters())
+    #     hd = list(model.head_parameters())
+    #     # If something is wrong with grouping, fall back gracefully
+    #     if len(bb) == 0 or len(hd) == 0:
+    #         print("[WARN] split requested but backbone/head groups are empty; using single group.")
+    #         parameters_for_opt = model.parameters()
+    #     else:
+    #         parameters_for_opt = [
+    #             {"params": bb, "lr": base_lr, "weight_decay": wd},  # backbone
+    #             {"params": hd, "lr": base_lr * head_mult, "weight_decay": wd},  # head
+    #         ]
+    # else:
+    #     parameters_for_opt = model.parameters()
+
+    # optimizer = get_optimizer(cfg, parameters_for_opt, verbose=True)
+
+    optimizer = get_optimizer(cfg, model, verbose=True)
 
     # flags
     task = str(cfg.get("task", "multitask")).lower()

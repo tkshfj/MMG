@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-09-13
+- Refactor registry/base and optimizer: head lookup/bias init, split param groups (decay/no-decay), config normalization, metrics alignment.
+
 # 2025-09-12
 - Refactor ViT/Registry: fix head, init bias, enforce shapes; Ignite: normalize logits/probs, add param-group/grad diagnostics, unify validation.
 

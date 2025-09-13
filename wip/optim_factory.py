@@ -133,7 +133,10 @@ def _split_decay_by_name(named_params: Iterable[Tuple[str, torch.nn.Parameter]]
 # Optimizer factory
 def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = False) -> Optimizer:
     name = str(cfg.get("optimizer", "adamw")).lower()
-    lr = cfg.get("lr", None)
+
+    # normalized reads (single source of truth)
+    lr = cfg.get("lr", cfg.get("base_lr", None))
+    lr = float(lr) if lr is not None else None
     weight_decay = float(cfg.get("weight_decay", 1e-4))
     momentum = float(cfg.get("momentum", 0.9))
 
@@ -146,35 +149,34 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
     if name not in opts:
         raise ValueError(f"Unknown optimizer: {name}")
 
-    # handle split param groups here if a model was passed in and we can identify head vs backbone
-    pg_mode = str(cfg.get("param_groups", "single")).lower()
+    pg_mode = str(cfg.get("param_groups", "single")).lower()    # choose ONE default
+    # split head/backbone if we have a model object
     if pg_mode in ("split", "auto") and hasattr(parameters, "parameters"):
-        base_lr = float(cfg.get("lr", 1e-3))
-        # Allow boosting (>1) or down-scaling (<1) of head LR; clamp to a safe range
-        head_lr_scale = float(cfg.get("head_lr_scale", 1.0))
-        head_lr_scale = float(min(max(head_lr_scale, 0.05), 10.0))  # [0.05, 10]
+        base_lr = float(lr if lr is not None else 1e-3)
+        head_lr_scale = float(cfg.get("head_lr_scale", cfg.get("head_multiplier", 1.0)))
+        head_lr_scale = float(min(max(head_lr_scale, 0.05), 10.0))  # clamp once
         head_wd_scale = float(cfg.get("head_wd_scale", 1.0))
-        head_wd_scale = float(max(head_wd_scale, 0.0))              # allow 0..∞ (0 disables WD on head)
-        use_decay_split = bool(cfg.get("decay_split", True))         # split decay/no-decay per group
+        head_wd_scale = float(max(head_wd_scale, 0.0))
+        use_decay_split = bool(cfg.get("decay_split", True))
 
-        # Prefer model.param_groups() if available (exact control from the model)
-        _tag_param_names(parameters)  # helpful for other tools; not required here
+        # Prefer model.param_groups() if available
+        _tag_param_names(parameters)
         model_groups = _consume_model_param_groups(parameters)
         head_params = model_groups.get("head") if model_groups is not None else None
         backbone_params = model_groups.get("backbone") if model_groups is not None else None
 
-        # Prefer explicit helpers on the model (if param_groups() not provided or incomplete)        backbone_params = None
+        # Fallback: explicit helpers
         if head_params is None and hasattr(parameters, "head_parameters") and callable(getattr(parameters, "head_parameters")):
             head_params = list(parameters.head_parameters())
         if backbone_params is None and hasattr(parameters, "backbone_parameters") and callable(getattr(parameters, "backbone_parameters")):
             backbone_params = list(parameters.backbone_parameters())
 
-        # Fallback: if only head is known, derive backbone as the complement
+        # Fallback: complement
         if head_params is not None and backbone_params is None:
             head_ids = {id(p) for p in head_params}
             backbone_params = [p for p in parameters.parameters() if getattr(p, "requires_grad", False) and id(p) not in head_ids]
 
-        # Name-based fallback if helpers missing
+        # Fallback: name-based split
         if head_params is None or backbone_params is None:
             head_keys = tuple(k.lower() for k in cfg.get("head_keys", ("classification_head", "head", "classifier", "mlp_head", "fc", "cls")))
             heads, backs = [], []
@@ -185,20 +187,21 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
             if heads and backs:
                 head_params, backbone_params = heads, backs
 
-        # Clean up and sanity-check splits
+        # Clean & disjoint
         if head_params is not None and backbone_params is not None:
             head_params = _dedupe_params([p for p in head_params if getattr(p, "requires_grad", False)])
             backbone_params = _dedupe_params([p for p in backbone_params if getattr(p, "requires_grad", False)])
             head_params, backbone_params = _disjoint(head_params, backbone_params)
 
-        # If we can split, build per-group settings; optionally split decay/no-decay inside each
         if head_params and backbone_params:
-            wd = float(cfg.get("weight_decay", 1e-4))
+            wd = weight_decay
             param_groups: List[Dict[str, Any]] = []
             if use_decay_split:
-                # Use names for reliable filtering
-                bb_named = [(n, p) for n, p in parameters.named_parameters() if p in set(backbone_params)]
-                hd_named = [(n, p) for n, p in parameters.named_parameters() if p in set(head_params)]
+                # use id-sets; Parameters are not hashable
+                bb_ids = {id(p) for p in backbone_params}
+                hd_ids = {id(p) for p in head_params}
+                bb_named = [(n, p) for n, p in parameters.named_parameters() if id(p) in bb_ids]
+                hd_named = [(n, p) for n, p in parameters.named_parameters() if id(p) in hd_ids]
                 bb_decay, bb_no = _split_decay_by_name(bb_named)
                 hd_decay, hd_no = _split_decay_by_name(hd_named)
                 if bb_decay:
@@ -214,25 +217,28 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
                     {"params": backbone_params, "lr": base_lr, "weight_decay": wd},
                     {"params": head_params, "lr": base_lr * head_lr_scale, "weight_decay": wd * head_wd_scale},
                 ])
-            opt_kwargs: Dict[str, Any] = {"weight_decay": weight_decay}
+
+            # Per-group LRs/WDs are set; don't override with global weight_decay/lr
+            opt_kwargs: Dict[str, Any] = {}
             if name in ("sgd", "rmsprop"):
                 opt_kwargs["momentum"] = momentum
-            # Per-group LR/WD already set above; pass no global lr/wd overrides.
-            optimizer = opts[name](param_groups, **({k: v for k, v in opt_kwargs.items() if k != "weight_decay"}))
+            optimizer = opts[name](param_groups, **opt_kwargs)
             if verbose:
                 _print_param_group_summary(optimizer, parameters)
             return optimizer
         elif pg_mode in ("split", "auto") and verbose:
             print("[optim] split requested but could not identify both head and backbone; falling back to single group.")
 
+    # single group path (raw params/model or provided param-group dicts)
     param_groups = _extract_param_groups(parameters)
     opt_kwargs: Dict[str, Any] = {"weight_decay": weight_decay}
     if name in ("sgd", "rmsprop"):
         opt_kwargs["momentum"] = momentum
 
+    # If caller didn't provide per-group LRs, require a (possibly normalized) lr
     if not (isinstance(param_groups[0], dict) and all("lr" in g for g in param_groups)):
         if lr is None:
-            raise ValueError("get_optimizer: provide `cfg.lr` when passing raw params or models without per-group LRs.")
+            raise ValueError("get_optimizer: provide `cfg.lr` (or `base_lr`) when passing raw params or models without per-group LRs.")
         optimizer = opts[name](param_groups, lr=float(lr), **opt_kwargs)
     else:
         optimizer = opts[name](param_groups, **opt_kwargs)
@@ -241,6 +247,122 @@ def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = Fa
         _print_param_group_summary(optimizer, parameters)
 
     return optimizer
+
+
+# def get_optimizer(cfg: Mapping[str, Any], parameters: Any, *, verbose: bool = False) -> Optimizer:
+#     name = str(cfg.get("optimizer", "adamw")).lower()
+#     lr = cfg.get("lr", None)
+#     weight_decay = float(cfg.get("weight_decay", 1e-4))
+#     momentum = float(cfg.get("momentum", 0.9))
+#     _lr = cfg.get("lr", cfg.get("base_lr", None))
+#     head_lr_scale = float(cfg.get("head_lr_scale", cfg.get("head_multiplier", 1.0)))
+#     pg_mode = str(cfg.get("param_groups", "auto")).lower()
+#     use_decay_split = bool(cfg.get("decay_split", True))
+
+#     opts = {
+#         "adamw": torch.optim.AdamW,
+#         "adam": torch.optim.Adam,
+#         "sgd": torch.optim.SGD,
+#         "rmsprop": torch.optim.RMSprop,
+#     }
+#     if name not in opts:
+#         raise ValueError(f"Unknown optimizer: {name}")
+
+#     # handle split param groups here if a model was passed in and we can identify head vs backbone
+#     pg_mode = str(cfg.get("param_groups", "single")).lower()
+#     if pg_mode in ("split", "auto") and hasattr(parameters, "parameters"):
+#         base_lr = float(cfg.get("lr", 1e-3))
+#         # Allow boosting (>1) or down-scaling (<1) of head LR; clamp to a safe range
+#         head_lr_scale = float(cfg.get("head_lr_scale", 1.0))
+#         head_lr_scale = float(min(max(head_lr_scale, 0.05), 10.0))  # [0.05, 10]
+#         head_wd_scale = float(cfg.get("head_wd_scale", 1.0))
+#         head_wd_scale = float(max(head_wd_scale, 0.0))              # allow 0..∞ (0 disables WD on head)
+#         use_decay_split = bool(cfg.get("decay_split", True))         # split decay/no-decay per group
+
+#         # Prefer model.param_groups() if available (exact control from the model)
+#         _tag_param_names(parameters)  # helpful for other tools; not required here
+#         model_groups = _consume_model_param_groups(parameters)
+#         head_params = model_groups.get("head") if model_groups is not None else None
+#         backbone_params = model_groups.get("backbone") if model_groups is not None else None
+
+#         # Prefer explicit helpers on the model (if param_groups() not provided or incomplete)        backbone_params = None
+#         if head_params is None and hasattr(parameters, "head_parameters") and callable(getattr(parameters, "head_parameters")):
+#             head_params = list(parameters.head_parameters())
+#         if backbone_params is None and hasattr(parameters, "backbone_parameters") and callable(getattr(parameters, "backbone_parameters")):
+#             backbone_params = list(parameters.backbone_parameters())
+
+#         # Fallback: if only head is known, derive backbone as the complement
+#         if head_params is not None and backbone_params is None:
+#             head_ids = {id(p) for p in head_params}
+#             backbone_params = [p for p in parameters.parameters() if getattr(p, "requires_grad", False) and id(p) not in head_ids]
+
+#         # Name-based fallback if helpers missing
+#         if head_params is None or backbone_params is None:
+#             head_keys = tuple(k.lower() for k in cfg.get("head_keys", ("classification_head", "head", "classifier", "mlp_head", "fc", "cls")))
+#             heads, backs = [], []
+#             for n, p in parameters.named_parameters():
+#                 if not getattr(p, "requires_grad", False):
+#                     continue
+#                 (heads if any(k in n.lower() for k in head_keys) else backs).append(p)
+#             if heads and backs:
+#                 head_params, backbone_params = heads, backs
+
+#         # Clean up and sanity-check splits
+#         if head_params is not None and backbone_params is not None:
+#             head_params = _dedupe_params([p for p in head_params if getattr(p, "requires_grad", False)])
+#             backbone_params = _dedupe_params([p for p in backbone_params if getattr(p, "requires_grad", False)])
+#             head_params, backbone_params = _disjoint(head_params, backbone_params)
+
+#         # If we can split, build per-group settings; optionally split decay/no-decay inside each
+#         if head_params and backbone_params:
+#             wd = float(cfg.get("weight_decay", 1e-4))
+#             param_groups: List[Dict[str, Any]] = []
+#             if use_decay_split:
+#                 # Use names for reliable filtering
+#                 bb_named = [(n, p) for n, p in parameters.named_parameters() if p in set(backbone_params)]
+#                 hd_named = [(n, p) for n, p in parameters.named_parameters() if p in set(head_params)]
+#                 bb_decay, bb_no = _split_decay_by_name(bb_named)
+#                 hd_decay, hd_no = _split_decay_by_name(hd_named)
+#                 if bb_decay:
+#                     param_groups.append({"params": bb_decay, "lr": base_lr, "weight_decay": wd})
+#                 if bb_no:
+#                     param_groups.append({"params": bb_no, "lr": base_lr, "weight_decay": 0.0})
+#                 if hd_decay:
+#                     param_groups.append({"params": hd_decay, "lr": base_lr * head_lr_scale, "weight_decay": wd * head_wd_scale})
+#                 if hd_no:
+#                     param_groups.append({"params": hd_no, "lr": base_lr * head_lr_scale, "weight_decay": 0.0})
+#             else:
+#                 param_groups.extend([
+#                     {"params": backbone_params, "lr": base_lr, "weight_decay": wd},
+#                     {"params": head_params, "lr": base_lr * head_lr_scale, "weight_decay": wd * head_wd_scale},
+#                 ])
+#             opt_kwargs: Dict[str, Any] = {"weight_decay": weight_decay}
+#             if name in ("sgd", "rmsprop"):
+#                 opt_kwargs["momentum"] = momentum
+#             # Per-group LR/WD already set above; pass no global lr/wd overrides.
+#             optimizer = opts[name](param_groups, **({k: v for k, v in opt_kwargs.items() if k != "weight_decay"}))
+#             if verbose:
+#                 _print_param_group_summary(optimizer, parameters)
+#             return optimizer
+#         elif pg_mode in ("split", "auto") and verbose:
+#             print("[optim] split requested but could not identify both head and backbone; falling back to single group.")
+
+#     param_groups = _extract_param_groups(parameters)
+#     opt_kwargs: Dict[str, Any] = {"weight_decay": weight_decay}
+#     if name in ("sgd", "rmsprop"):
+#         opt_kwargs["momentum"] = momentum
+
+#     if not (isinstance(param_groups[0], dict) and all("lr" in g for g in param_groups)):
+#         if lr is None:
+#             raise ValueError("get_optimizer: provide `cfg.lr` when passing raw params or models without per-group LRs.")
+#         optimizer = opts[name](param_groups, lr=float(lr), **opt_kwargs)
+#     else:
+#         optimizer = opts[name](param_groups, **opt_kwargs)
+
+#     if verbose and hasattr(parameters, "parameters"):
+#         _print_param_group_summary(optimizer, parameters)
+
+#     return optimizer
 
 
 # Scheduler factory
@@ -372,7 +494,8 @@ def make_scheduler(cfg: dict, optimizer: torch.optim.Optimizer, train_loader=Non
     Pure factory: builds and returns a torch scheduler (no event wiring).
     Supported: none, cosine, step, multistep, exponential, plateau, onecycle, linear_warmup_cosine
     """
-    name = str(cfg.get("lr_scheduler", "none") or "none").lower()
+    # name = str(cfg.get("lr_scheduler", "none") or "none").lower()
+    name = str(cfg.get("lr_scheduler", cfg.get("lr_strategy", "none")) or "none").lower()
 
     if name in ("none", "", "off", "false"):
         return None

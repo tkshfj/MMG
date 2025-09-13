@@ -484,9 +484,6 @@ class BaseModel(ModelRegistryProtocol):
         if isinstance(counts, (list, tuple)):
             cnt = torch.tensor(counts, dtype=torch.float)
             if use_single:
-                # pos = cnt[pos_idx]
-                # neg = cnt.sum() - pos
-                # pos_w = (neg / (pos.clamp_min(1e-8))).clamp_max(1e6)  # scalar
                 pos = cnt[pos_idx].clamp_min(1e-8)
                 neg = (cnt.sum() - pos).clamp_min(1e-8)
                 pos_w = (neg / pos).clamp_max(1e6)
@@ -504,8 +501,6 @@ class BaseModel(ModelRegistryProtocol):
             ce_kwargs["label_smoothing"] = float(ls)
         if ig is not None:
             ce_kwargs["ignore_index"] = int(ig)
-        # Created here, tensors are moved to logits' device in-call
-        # bce_pos_weight = pos_w
         focal_gamma = float(self._cfg_get(cfg, "focal_gamma", 2.0))
 
         # classification loss
@@ -526,7 +521,6 @@ class BaseModel(ModelRegistryProtocol):
                 return F.binary_cross_entropy_with_logits(
                     logits.float(),
                     y_bin,
-                    # pos_weight=(None if bce_pos_weight is None else bce_pos_weight.to(logits))
                     pos_weight=pw
                 )
 

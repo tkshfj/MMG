@@ -9,7 +9,7 @@ from ignite.engine import Events, Engine
 from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
 from protocols import CalibratorProtocol
 from utils.safe import to_py, labels_to_1d_indices
-from posprob import PosProbCfg
+from utils.posprob import PosProbCfg
 from metrics_utils import (
     extract_cls_logits_from_any,
     extract_seg_logits_from_any,
@@ -815,9 +815,10 @@ class TwoPassEvaluator:
             # classification logits (if present)
             try:
                 cls_logits = extract_cls_logits_from_any(raw)
-                out_map["cls_out"] = cls_logits
-                out_map["logits"] = cls_logits
-                out_map["y_pred"] = cls_logits  # Ignite CM wants y_pred/y
+                out_map["cls_out"] = out_map["logits"] = out_map["y_pred"] = cls_logits
+                # out_map["cls_out"] = cls_logits
+                # out_map["logits"] = cls_logits
+                # out_map["y_pred"] = cls_logits  # Ignite CM wants y_pred/y
                 # optional debug: publish the mapped positive-class probabilities
                 # via the single source of truth (PosProbCfg)
                 if hasattr(self, "_score_provider") and self._score_provider is not None:
@@ -867,6 +868,13 @@ class TwoPassEvaluator:
 
             for name, m in cls_metrics.items():
                 m.attach(self._std_engine, name)
+
+            # help downstream transforms expecting engine.state.to_pos_prob:
+            # mirror the SoT callable on engine.state
+            try:
+                self._score_provider.attach_to_engine_state(self._std_engine)
+            except Exception:
+                pass
 
         # Decision health on the STANDARD pass (uncalibrated)
         # Only if a trainer was provided and classification metrics exist.
