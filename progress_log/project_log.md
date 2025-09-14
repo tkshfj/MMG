@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-09-14
+- Unify DenseNet/SwinUNETR/UNet: feature_size, seg labels, class-count fix, safe quantiles, attach_val_stack, scalar & per-class Dice/IoU
+
 # 2025-09-13
 - Refactor registry/base and optimizer: head lookup/bias init, split param groups (decay/no-decay), config normalization, metrics alignment
 - Refactor registry/base + optimizer split; normalize config; align metrics; ensure ViT returns raw logits to fix flat probs and stabilize calibration
