@@ -3,7 +3,7 @@ program: main.py
 method: bayes
 
 metric:
-  name: val/dice
+  name: val/dice_1
   goal: maximize
 
 parameters:
@@ -76,7 +76,7 @@ parameters:
   warmup_start_factor: { values: [0.1, 0.2] }
 
   # Plateau (monitor sweep metric)
-  plateau_metric:    { value: "val/dice" }
+  plateau_metric:    { value: "val/dice_1" }
   plateau_mode:      { value: max }
   patience:          { values: [3, 6] }
   factor:            { values: [0.5, 0.3] }

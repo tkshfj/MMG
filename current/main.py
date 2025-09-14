@@ -19,7 +19,7 @@ from ignite.engine import Events
 
 from config_utils import load_and_validate_config
 from data_utils import build_dataloaders
-from models.model_registry import build_model  # make_default_loss
+from models.model_registry import build_model
 from engine_utils import (
     build_trainer, make_prepare_batch, attach_lr_scheduling, read_current_lr,
     get_label_indices_from_batch, build_evaluator, attach_best_checkpoint, attach_val_stack,
@@ -499,7 +499,8 @@ def run(
         network=model,
         optimizer=optimizer,
         loss_function=loss_fn,
-        prepare_batch=prepare_batch_std,   # training remains the std path
+        prepare_batch=prepare_batch_std,
+        class_counts=class_counts,
     )
     # backbone warm-freeze hook
     if cfg.get("freeze_backbone_warmup", False):
@@ -619,14 +620,6 @@ def run(
         watch_key_for_ckpt = watch_metric
     else:
         watch_key_for_ckpt = f"val/{watch_metric}"
-
-    # # scheduler/watch setup
-    # two_pass_enabled = bool(cfg.get("two_pass_val", False))
-    # # default_watch = "auc" if has_cls else "dice"
-    # # default_watch = "val/dice" if (has_seg and not has_cls) else "val/auc"
-    # # default_watch = "dice" if (has_seg and not has_cls) else "auc"
-    # default_watch = "dice" if seg_only else "auc"
-    # watch_metric = cfg.get("watch_metric", default_watch)
 
     # single source for warmup/log toggles
     cal_warmup = int(cfg.get("cal_warmup_epochs", 1))
@@ -912,6 +905,20 @@ if __name__ == "__main__":
             seed=42,
             cfg=cfg,
         )
+
+        # infer counts
+        from data_utils import infer_class_counts
+        num_classes = int(cfg.get("out_channels", cfg.get("num_classes", 2)))
+        ds = getattr(train_loader, "dataset", None)
+        class_counts = getattr(ds, "class_counts", None)
+        if class_counts is None:
+            class_counts = infer_class_counts(train_loader, num_classes=num_classes, max_batches=16)
+            try:
+                # cache on the dataset so engine_utils.build_trainer can pick it up
+                setattr(ds, "class_counts", class_counts)
+            except Exception:
+                pass
+        # logger.info(f"class_counts={class_counts}")
 
         if cfg.get("print_dataset_sizes", True):
             print(f"[INFO] Train: {len(train_loader.dataset)} | Val: {len(val_loader.dataset)} | Test: {len(test_loader.dataset)}")

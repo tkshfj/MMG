@@ -11,16 +11,19 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union, Mapping
 from ignite.handlers import EarlyStopping, Checkpoint, DiskSaver
 from ignite.engine import Events, Engine
+from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
 from utils.safe import to_float_scalar, is_finite_float, to_tensor
 from utils.posprob import PosProbCfg
-from optim_factory import grad_norms_by_group  # zero_grad_if_nan
+from utils.losses import make_seg_loss
+from optim_factory import grad_norms_by_group
 from metrics_utils import (
     extract_cls_logits_from_any,
     extract_seg_logits_from_any,
     make_metrics,
     make_cls_val_metrics,
     make_seg_val_metrics,
-    coerce_loss_dict
+    coerce_loss_dict,
+    make_seg_output_transform,
 )
 
 
@@ -248,7 +251,22 @@ def build_trainer(
     prepare_batch,
     train_metrics: Optional[Dict[str, Any]] = None,
 ) -> Engine:
-    assert callable(loss_function), "loss_function must be callable"
+    # assert callable(loss_function), "loss_function must be callable"
+    # Allow None/"auto" to trigger default segmentation loss construction.
+    auto_loss = (loss_function is None) or (
+        isinstance(loss_function, str) and loss_function.lower() in {"auto", "seg", "seg_auto", "seg_ce_dice"}
+    )
+    if auto_loss:
+        # Discover class counts: prefer dataset attribute, else uniform
+        ds = getattr(train_data_loader, "dataset", None)
+        counts = getattr(ds, "class_counts", None)
+        if counts is None:
+            counts = [1, 1]
+        # Alpha/Beta knobs from model.config if available
+        cfg_src = getattr(network, "config", {}) or {}
+        _alpha = float(cfg_src.get("alpha", 1.0))
+        _beta = float(cfg_src.get("beta", 0.5))
+        seg_loss_fn = make_seg_loss(class_counts=counts, alpha=_alpha, beta=_beta, device=device)
     assert callable(prepare_batch), "prepare_batch must be callable"
 
     # Defaults; caller may override after construction via trainer.state.*
@@ -290,7 +308,14 @@ def build_trainer(
             pass
 
         # Normalize any loss return to a dict with a 'loss' tensor
-        loss_out = loss_function(preds, targets)
+        if auto_loss and isinstance(targets, dict) and ("mask" in targets):
+            # Default seg loss: CE(weighted) + Dice(weighted) on indices mask
+            seg_logits = extract_seg_logits_from_any(preds)
+            if seg_logits is None:
+                raise RuntimeError("auto seg loss: could not extract 'seg_logits' from model output.")
+            loss_out = seg_loss_fn(seg_logits, targets["mask"])
+        else:
+            loss_out = loss_function(preds, targets)
         loss_map = coerce_loss_dict(loss_out)
         total = loss_map["loss"]
         if not torch.is_tensor(total):
@@ -509,6 +534,8 @@ def build_evaluator(
     # Persist device hints on the engine (spawn-safe)
     setattr(evaluator.state, "device", device)
     setattr(evaluator.state, "non_blocking", pin)
+    # Make the model available to metrics' output_transform
+    setattr(evaluator.state, "model", network)
     # bind unified scorer to engine.state
     setattr(evaluator.state, "ppcfg", ppcfg)
     setattr(evaluator.state, "to_pos_prob", ppcfg.logits_to_pos_prob)
@@ -579,18 +606,29 @@ def attach_engine_metrics(
         device=dev,
     )
 
-    # optional: add segmentation validation metrics
+    # segmentation validation metrics
     if "segmentation" in task_set:
         seg_nc = int(seg_num_classes) if seg_num_classes is not None else int(num_classes)
-        seg_thr = float(seg_threshold) if seg_threshold is not None else float(cls_threshold)
-        val_metrics.update(
-            make_seg_val_metrics(
-                num_classes=seg_nc,
-                threshold=seg_thr,
-                ignore_index=seg_ignore_index,
-            )
+        # Seed a dedicated seg threshold on the evaluator (independent of cls threshold)
+        if getattr(evaluator.state, "seg_threshold", None) is None:
+            evaluator.state.seg_threshold = float(seg_threshold) if seg_threshold is not None else 0.5
+        # Build the segmentation output transforms once, with dynamic threshold support.
+        seg_ots = make_seg_output_transform(
+            threshold=lambda: float(getattr(evaluator.state, "seg_threshold", 0.5))
         )
-
+        # ConfusionMatrix expects scores ([B,K,H,W]) for multi-class or 2-col one-hot for binary.
+        seg_cm = ConfusionMatrix(
+            num_classes=seg_nc,
+            output_transform=seg_ots.cm,
+            device=dev,
+        )
+        seg_dice = DiceCoefficient(seg_cm)
+        seg_iou = JaccardIndex(seg_cm)
+        # Attach with the same keys your logs expect
+        seg_cm.attach(evaluator, "seg_confmat")
+        seg_dice.attach(evaluator, "dice")
+        seg_iou.attach(evaluator, "iou")
+        val_metrics.update({"seg_confmat": seg_cm, "dice": seg_dice, "iou": seg_iou})
     if not getattr(evaluator.state, "_val_metrics_attached", False):
         for k, m in val_metrics.items():
             m.attach(evaluator, k)

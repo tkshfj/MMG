@@ -5,7 +5,7 @@ import os
 import ast
 import numpy as np
 import pandas as pd
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 import torch
 from monai.data import CacheDataset
 from sklearn.model_selection import train_test_split
@@ -231,6 +231,62 @@ def _df_to_items(df: pd.DataFrame, *, task: str) -> list[dict]:
                     continue
             items.append(it)
     return items
+
+
+def _extract_mask_from_batch(batch) -> Optional[torch.Tensor]:
+    # dict batch: common MONAI-style
+    if isinstance(batch, Mapping):
+        m = batch.get("mask", None)
+        if m is None:
+            lab = batch.get("label", None)
+            if isinstance(lab, Mapping):
+                m = lab.get("mask", None)
+        return None if m is None else torch.as_tensor(m)
+
+    # tuple/list batch: (x, y) or (x, y, m)
+    if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+        y = batch[1]
+        if isinstance(y, Mapping) and "mask" in y:
+            return torch.as_tensor(y["mask"])
+        if len(batch) >= 3:
+            return torch.as_tensor(batch[2])
+
+    return None
+
+
+def _to_index_mask(mask: torch.Tensor) -> torch.Tensor:
+    # accept [B,H,W], [B,1,H,W], or [B,C,H,W] one-hot/logits
+    m = mask
+    if m.ndim == 4 and m.size(1) > 1:
+        m = m.argmax(dim=1)
+    elif m.ndim == 4 and m.size(1) == 1:
+        m = m[:, 0]
+    elif m.ndim == 2:
+        m = m.unsqueeze(0)  # [1,H,W]
+    return m.long()
+
+
+def infer_class_counts(train_loader, *, num_classes: int, max_batches: int | None = None):
+    counts = torch.zeros(int(num_classes), dtype=torch.long)
+    seen_any = False
+    with torch.no_grad():
+        for i, batch in enumerate(train_loader):
+            mask = _extract_mask_from_batch(batch)
+            if mask is None:
+                continue
+            seen_any = True
+            idx = _to_index_mask(mask)  # [B,H,W]
+            # bincount per batch to avoid per-class loops
+            bc = torch.bincount(idx.view(-1), minlength=int(num_classes))
+            counts[: bc.numel()] += bc.to(counts.dtype)
+            if max_batches is not None and (i + 1) >= int(max_batches):
+                break
+    if not seen_any:
+        # safe fallback if dataset has no masks in batches
+        return [1] * int(num_classes)
+    # avoid zeros (stable CE/Dice weights)
+    counts = torch.clamp(counts, min=1)
+    return [int(v) for v in counts.tolist()]
 
 
 def build_dataloaders(

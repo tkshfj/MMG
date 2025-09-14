@@ -68,6 +68,7 @@ class UNetModel(nn.Module, BaseModel):
         norm = _get("norm", "instance")
         act = _get("act", "prelu")
         dropout = float(_get("dropout", 0.0))
+        lesion_class = int(_get("lesion_class", 1))
 
         if bool(_get("debug", False)):
             logger.info(
@@ -97,12 +98,31 @@ class UNetModel(nn.Module, BaseModel):
         config_snapshot.setdefault("seg_num_classes", int(out_channels))
         config_snapshot.setdefault("out_channels", int(out_channels))
         config_snapshot.setdefault("num_classes", int(out_channels))  # safe alias for seg
+        config_snapshot.setdefault("lesion_class", lesion_class)
         self.config = config_snapshot
 
     def forward(self, batch: Dict[str, torch.Tensor] | torch.Tensor) -> Dict[str, torch.Tensor]:
         x = batch["image"] if isinstance(batch, dict) else batch
         seg_logits = self.net(x)  # [B, C, H, W]
         return {"logits": seg_logits, "seg_logits": seg_logits}
+
+    @torch.no_grad()
+    def predict_from_logits(self, logits: torch.Tensor) -> torch.Tensor:
+        """
+        Convert raw logits [B, C, H, W] to discrete labels [B, H, W] via softmax+argmax.
+        This avoids thresholding a single channel and is robust to class-index swaps.
+        """
+        if logits.dim() != 4:
+            raise ValueError(f"Expected [B, C, H, W] logits, got {tuple(logits.shape)}")
+        return torch.softmax(logits, dim=1).argmax(dim=1)
+
+    def extract_logits(self, y_pred: Any):
+        if isinstance(y_pred, dict):
+            for k in ("seg_logits", "logits", "y_pred"):
+                v = y_pred.get(k, None)
+                if v is not None:
+                    return v
+        return y_pred
 
     def param_groups(self) -> Dict[str, list]:
         # Single param group for segmentation by default
@@ -114,15 +134,6 @@ class UNetModel(nn.Module, BaseModel):
     def get_num_classes(self, config=None) -> int:
         cfg = self._cfg(config)
         return int(self._cfg_get(cfg, "out_channels", self._cfg_get(cfg, "seg_num_classes", 1)))
-
-    # Optional convenience extractor
-    def extract_logits(self, y_pred: Any):
-        if isinstance(y_pred, dict):
-            for k in ("seg_logits", "logits", "y_pred"):
-                v = y_pred.get(k, None)
-                if v is not None:
-                    return v
-        return y_pred
 
 
 # import logging

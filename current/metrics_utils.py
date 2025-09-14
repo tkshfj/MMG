@@ -8,9 +8,8 @@ import torch
 import numpy as np
 from monai.data.meta_tensor import MetaTensor
 from ignite.metrics import Accuracy, Precision, Recall, ConfusionMatrix, ROC_AUC
-# from ignite.metrics.confusion_matrix import ConfusionMatrix
 from ignite.metrics import DiceCoefficient, JaccardIndex, Metric, MetricsLambda, EpochMetric
-from utils.safe import to_tensor, to_float_scalar, to_py  # labels_to_1d_indices
+from utils.safe import to_tensor, to_float_scalar, to_py
 from utils.posprob import PosProbCfg
 
 
@@ -598,6 +597,40 @@ class ClsOTs:
     cm: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]  # ([B,C] scores, y)
 
 
+@dataclass(frozen=True)
+class SegOTs:
+    """
+    Pack of segmentation output transforms.
+    - index: returns discrete indices (y_hat_idx[B,H,W], y_idx[B,H,W])
+    - cm:    returns scores for ConfusionMatrix (probs[B,K,H,W] or 2-col one-hot, y_idx)
+    """
+    index: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]
+    cm: Callable[[Any], Tuple[torch.Tensor, torch.Tensor]]
+
+
+def make_seg_output_transform(
+    *,
+    threshold: float | Callable[[], float] = 0.5,
+) -> SegOTs:
+    """
+    Factory to build both segmentation OTs, with dynamic or fixed threshold support.
+    - For multi-class (C>1): index OT does softmax→argmax; CM OT returns softmax probs.
+    - For binary (C==1):     index OT uses sigmoid≥thr; CM OT returns 2-col one-hot scores.
+    """
+    def _thr() -> float:
+        return float(threshold()) if callable(threshold) else float(threshold)
+
+    def _index_ot(output: Any) -> Tuple[torch.Tensor, torch.Tensor]:
+        # indices for metrics expecting discrete labels
+        return seg_confmat_output_transform_default(output, threshold=_thr())
+
+    def _cm_ot(output: Any) -> Tuple[torch.Tensor, torch.Tensor]:
+        # scores for ConfusionMatrix (it will argmax internally)
+        return seg_confmat_output_transform(output, threshold=_thr())
+
+    return SegOTs(index=_index_ot, cm=_cm_ot)
+
+
 def cls_decision_output_transform(
     *,
     ppcfg: PosProbCfg,
@@ -965,4 +998,8 @@ __all__ = [
     "extract_seg_logits_from_any",
     "attach_classification_metrics",
     "coerce_loss_dict",
+    "SegOTs",
+    "make_seg_output_transform",
+    "seg_confmat_output_transform_default",
+    "seg_confmat_output_transform",
 ]

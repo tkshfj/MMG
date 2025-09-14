@@ -4,6 +4,7 @@
 - Unify DenseNet/SwinUNETR/UNet: feature_size, seg labels, class-count fix, safe quantiles, attach_val_stack, scalar & per-class Dice/IoU
 - Fix mtlunet scheduler to use val/multi for ReduceLROnPlateau
 - Refactor two-pass overwrite seg metrics on evaluator, mirror to engine.state val/*, compute val/multi
+- Fix seg metric wiring: refactor engine_utils to build CM/Dice/IoU directly, add CE+Dice loss, add make_seg_output_transform
 
 # 2025-09-13
 - Refactor registry/base and optimizer: head lookup/bias init, split param groups (decay/no-decay), config normalization, metrics alignment
