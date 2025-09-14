@@ -281,7 +281,7 @@ def _console_print_metrics(epoch: int, metrics: dict):
 
     # segmentation: scalar & per-class Dice/IoU (supports plain or seg/* keys)
     dice_key = "dice" if "dice" in metrics else ("seg/dice" if "seg/dice" in metrics else None)
-    iou_key  = "iou"  if "iou"  in metrics else ("seg/iou"  if "seg/iou"  in metrics else None)
+    iou_key = "iou" if "iou" in metrics else ("seg/iou" if "seg/iou" in metrics else None)
 
     MAX_PER_CLASS = 16  # keep console readable
 
@@ -474,6 +474,7 @@ def run(
     task = str(cfg.get("task", "multitask")).lower()
     has_cls = (str(cfg.get("task", "classification")).lower() == "classification") or bool(cfg.get("has_cls", False))
     has_seg = (str(cfg.get("task", "classification")).lower() == "segmentation") or bool(cfg.get("has_seg", False))
+    is_mtl = bool(has_cls and has_seg)
     seg_only = has_seg and not has_cls
     health_on = decision_health_active_from_cfg(cfg)
 
@@ -590,13 +591,41 @@ def run(
         pos_debug_tag=str(cfg.get("pos_debug_tag", "debug_pos")),
     )
 
-    # scheduler/watch setup
+    # scheduler/watch setup (defaults)
     two_pass_enabled = bool(cfg.get("two_pass_val", False))
-    # default_watch = "auc" if has_cls else "dice"
-    # default_watch = "val/dice" if (has_seg and not has_cls) else "val/auc"
-    # default_watch = "dice" if (has_seg and not has_cls) else "auc"
-    default_watch = "dice" if seg_only else "auc"
-    watch_metric = cfg.get("watch_metric", default_watch)
+    if is_mtl:
+        default_watch = "multi"     # weighted blend logged as evaluator.state.metrics["multi"]
+        default_plateau = "multi"
+    elif has_seg:
+        default_watch = "dice"
+        default_plateau = "dice"
+    else:
+        default_watch = "auc"
+        default_plateau = "auc"
+
+    # user overrides still respected
+    watch_metric = str(cfg.get("watch_metric", default_watch))
+    plateau_metric_cfg = str(cfg.get("plateau_metric", default_plateau))
+
+    # Normalize keys for scheduler/checkpoint:
+    # - Evaluator stores "multi"/"dice"/"auc" (no "val/" prefix)
+    # - Trainer mirrors under "val/*"
+    # We will step ReduceLROnPlateau from the evaluator, so pass the *bare* key ("multi"|"dice"|"auc")
+    plateau_key_for_eval = plateau_metric_cfg.replace("val/", "").replace("val_", "")
+
+    # For checkpoint, conventionally use "val/<watch_metric>"
+    if watch_metric.startswith("val/"):
+        watch_key_for_ckpt = watch_metric
+    else:
+        watch_key_for_ckpt = f"val/{watch_metric}"
+
+    # # scheduler/watch setup
+    # two_pass_enabled = bool(cfg.get("two_pass_val", False))
+    # # default_watch = "auc" if has_cls else "dice"
+    # # default_watch = "val/dice" if (has_seg and not has_cls) else "val/auc"
+    # # default_watch = "dice" if (has_seg and not has_cls) else "auc"
+    # default_watch = "dice" if seg_only else "auc"
+    # watch_metric = cfg.get("watch_metric", default_watch)
 
     # single source for warmup/log toggles
     cal_warmup = int(cfg.get("cal_warmup_epochs", 1))
@@ -722,8 +751,10 @@ def run(
         evaluator=None,  # two-pass writes into trainer.state.metrics
         optimizer=optimizer,
         scheduler=scheduler,
-        plateau_metric=str(cfg.get("plateau_metric", "val/loss")),
-        plateau_source="trainer",
+        # plateau_metric=str(cfg.get("plateau_metric", "val/loss")),
+        plateau_metric=plateau_key_for_eval,
+        plateau_mode=str(cfg.get("plateau_mode", "max")),
+        plateau_source="trainer",  # plateau_source="evaluator",
     )
 
     # Best checkpoint (model only, extend 'objects' as needed)
@@ -731,7 +762,8 @@ def run(
         trainer, std_evaluator, model, optimizer,
         save_dir=CHECKPOINT_DIR,
         filename_prefix="best",
-        watch_metric=watch_metric,
+        # watch_metric=watch_metric,
+        watch_metric=watch_key_for_ckpt,
         watch_mode=watch_mode,
         n_saved=1,
     )

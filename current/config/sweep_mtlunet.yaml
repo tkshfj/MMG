@@ -85,7 +85,8 @@ parameters:
   warmup_start_factor: { values: [0.1, 0.2] }
 
   # plateau
-  plateau_metric:    { value: "val/auc" }
+  watch_metric:   { value: val/multi }
+  plateau_metric:    { value: "val/multi" }
   plateau_mode:      { value: max }
   patience:          { value: 10 }
   factor:            { values: [0.5, 0.3] }

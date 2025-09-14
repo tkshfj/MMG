@@ -2,6 +2,7 @@
 
 # 2025-09-14
 - Unify DenseNet/SwinUNETR/UNet: feature_size, seg labels, class-count fix, safe quantiles, attach_val_stack, scalar & per-class Dice/IoU
+- Fix mtlunet scheduler to use val/multi for ReduceLROnPlateau
 
 # 2025-09-13
 - Refactor registry/base and optimizer: head lookup/bias init, split param groups (decay/no-decay), config normalization, metrics alignment
