@@ -57,11 +57,6 @@ def normalize_arch(name: str | None) -> str:
     return str(name or "model").lower().replace("/", "_").replace(" ", "_")
 
 
-# def get_task_flags(task: str | None) -> Tuple[bool, bool]:
-#     t = (task or "multitask").lower()
-#     return t != "segmentation", t != "classification"
-
-
 @torch.no_grad()
 def _compute_loss(model, val_loader, loss_fn, prepare_batch, device) -> float:
     was_training = model.training
@@ -251,98 +246,128 @@ def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict
     return out
 
 
-# def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
-#     """
-#     Convert evaluator metrics into W&B-friendly scalars.
-#     - Scalars -> prefix/key
-#     - Tensors with 1 elem -> prefix/key
-#     - Tensors with >1 elems -> prefix/key/mean|min|max
-#     - Confmat arrays -> prefix/key (list) and per-cell prefix/key_ij
-#     """
-#     import numpy as _np
-#     out: dict[str, float | list] = {}
-
-#     for k, v in (metrics_dict or {}).items():
-#         key = f"{prefix}{k}"
-
-#         # Special case: confusion matrix-like keys
-#         if "confmat" in k:
-#             try:
-#                 if torch.is_tensor(v):
-#                     arr = v.detach().cpu().to(torch.int64).numpy()
-#                 elif isinstance(v, _np.ndarray):
-#                     arr = v.astype(_np.int64)
-#                 else:
-#                     arr = _np.asarray(v, dtype=_np.int64)
-
-#                 # store the whole matrix (ok as list) + per-cell scalars
-#                 out[key] = arr.tolist()
-#                 if arr.ndim == 2:
-#                     for i in range(arr.shape[0]):
-#                         for j in range(arr.shape[1]):
-#                             out[f"{key}_{i}{j}"] = int(arr[i, j])
-#                 continue
-#             except Exception:
-#                 # fall through to generic handling if anything goes wrong
-#                 pass
-
-#         # Generic numeric/scalar
-#         try:
-#             out[key] = float(v)  # works for Python/numpy scalars
-#             continue
-#         except Exception:
-#             pass
-
-#         # Tensor handling
-#         if isinstance(v, torch.Tensor):
-#             t = v.detach()
-#             if t.ndim == 0 or t.numel() == 1:
-#                 out[key] = float(t.item())
-#             else:
-#                 t = t.float()
-#                 out[f"{key}/mean"] = float(t.mean().item())
-#                 out[f"{key}/min"] = float(t.min().item())
-#                 out[f"{key}/max"] = float(t.max().item())
-#             continue
-
-#         # Last resort: skip or stringify
-#         # out[key] = str(v)  # uncomment if we want to keep non-numeric values
-
-#     return out
-
-
 def _console_print_metrics(epoch: int, metrics: dict):
+    import numpy as np
+    import torch
+
     def _as_scalar(x):
         if torch.is_tensor(x) and x.numel() == 1:
             return float(x.item())
         return x
 
-    # format a few scalars nicely
+    # local coercion to a 1D numpy vector (no new global helpers)
+    def _to_1d_array(v):
+        try:
+            if isinstance(v, torch.Tensor):
+                t = v.detach().cpu()
+                if t.ndim == 0:
+                    return np.asarray([float(t.item())], dtype=np.float64)
+                return np.asarray(t.view(-1), dtype=np.float64)
+            arr = np.asarray(v)
+            if arr.ndim == 0:
+                return np.asarray([float(arr.reshape(-1)[0])], dtype=np.float64)
+            return arr.reshape(-1).astype(np.float64, copy=False)
+        except Exception:
+            return None
+
     parts = []
-    # for k in ("acc", "prec", "recall", "auc", "pos_rate", "gt_pos_rate"):
+
+    # common scalar metrics (classification-friendly)
     for k in ("acc", "precision_pos", "recall_pos", "auc", "pos_rate", "gt_pos_rate"):
         v = metrics.get(k)
         if v is not None:
             v = _as_scalar(v)
             parts.append(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
 
-    # confusion matrix (handle both names)
-    for cm_key in ("cls_confmat", "val/confmat", "seg_confmat"):
+    # segmentation: scalar & per-class Dice/IoU (supports plain or seg/* keys)
+    dice_key = "dice" if "dice" in metrics else ("seg/dice" if "seg/dice" in metrics else None)
+    iou_key  = "iou"  if "iou"  in metrics else ("seg/iou"  if "seg/iou"  in metrics else None)
+
+    MAX_PER_CLASS = 16  # keep console readable
+
+    if dice_key is not None:
+        vec = _to_1d_array(metrics.get(dice_key))
+        if vec is not None and vec.size > 0:
+            mean_dice = float(vec.mean())
+            per = ", ".join(f"{i}:{vec[i]:.4f}" for i in range(min(vec.size, MAX_PER_CLASS)))
+            parts.append(f"dice: {mean_dice:.4f} ({per})")
+
+    if iou_key is not None:
+        vec = _to_1d_array(metrics.get(iou_key))
+        if vec is not None and vec.size > 0:
+            mean_iou = float(vec.mean())
+            per = ", ".join(f"{i}:{vec[i]:.4f}" for i in range(min(vec.size, MAX_PER_CLASS)))
+            parts.append(f"iou: {mean_iou:.4f} ({per})")
+
+    # Confusion matrices: always print segmentation if present; also print classification if present.
+    # Map multiple possible keys to normalized labels and print each label once.
+    cm_candidates = (
+        ("seg/confmat", "seg_confmat"),
+        ("seg_confmat", "seg_confmat"),
+        ("cls_confmat", "cls_confmat"),
+        ("confmat", "cls_confmat"),
+        ("val/confmat", "cls_confmat"),
+    )
+    printed = set()
+    for cm_key, norm_label in cm_candidates:
+        if norm_label in printed:
+            continue
         cm = metrics.get(cm_key)
-        if cm is not None:
-            # MetaTensor → Tensor
-            if hasattr(cm, "as_tensor"):
-                cm = cm.as_tensor()
-            # Tensor/ndarray → python list of ints
+        if cm is None:
+            continue
+        if hasattr(cm, "as_tensor"):  # MetaTensor → Tensor
+            cm = cm.as_tensor()
+        try:
             if torch.is_tensor(cm):
                 cm_list = cm.detach().cpu().to(torch.int64).tolist()
             else:
                 cm_list = np.asarray(cm, dtype=np.int64).tolist()
+            parts.append(f"{norm_label}: {cm_list}")
+            printed.add(norm_label)
+        except Exception:
+            # Fall back to repr if conversion fails
+            parts.append(f"{norm_label}: {cm}")
+            printed.add(norm_label)
 
-            parts.append(f"{cm_key}: {cm_list}")
-            break
+    # Fallback: if nothing recognized, dump raw dict
+    if not parts:
+        parts.append(", ".join(f"{k}: {v}" for k, v in (metrics or {}).items()))
 
     print(f"[INFO] Epoch[{epoch}] Metrics -- " + " ".join(parts))
+
+
+# def _console_print_metrics(epoch: int, metrics: dict):
+#     def _as_scalar(x):
+#         if torch.is_tensor(x) and x.numel() == 1:
+#             return float(x.item())
+#         return x
+
+#     # format a few scalars nicely
+#     parts = []
+#     # for k in ("acc", "prec", "recall", "auc", "pos_rate", "gt_pos_rate"):
+#     for k in ("acc", "precision_pos", "recall_pos", "auc", "pos_rate", "gt_pos_rate"):
+#         v = metrics.get(k)
+#         if v is not None:
+#             v = _as_scalar(v)
+#             parts.append(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
+
+#     # confusion matrix (handle both names)
+#     for cm_key in ("cls_confmat", "val/confmat", "seg_confmat"):
+#         cm = metrics.get(cm_key)
+#         if cm is not None:
+#             # MetaTensor → Tensor
+#             if hasattr(cm, "as_tensor"):
+#                 cm = cm.as_tensor()
+#             # Tensor/ndarray → python list of ints
+#             if torch.is_tensor(cm):
+#                 cm_list = cm.detach().cpu().to(torch.int64).tolist()
+#             else:
+#                 cm_list = np.asarray(cm, dtype=np.int64).tolist()
+
+#             parts.append(f"{cm_key}: {cm_list}")
+#             break
+
+#     print(f"[INFO] Epoch[{epoch}] Metrics -- " + " ".join(parts))
 
 
 def is_wandb_sweep() -> bool:
