@@ -453,7 +453,6 @@ def build_evaluator(
         dev = getattr(engine.state, "device", device)
         nb = getattr(engine.state, "non_blocking", nb_default)
         x, targets = prepare_batch(batch, dev, nb)
-
         # parse targets (can be tensor label, dict with label/mask, etc.)
         y = m = None
         if isinstance(targets, dict):
@@ -461,7 +460,6 @@ def build_evaluator(
             m = targets.get("mask")
         else:
             y = targets
-
         with torch.inference_mode():
             net_out = network(x) if inferer is None else inferer(x, network)
 
@@ -486,8 +484,7 @@ def build_evaluator(
         if include_seg:
             try:
                 seg_logits = extract_seg_logits_from_any(net_out)
-                out_map["seg_out"] = seg_logits
-                out_map["seg_logits"] = seg_logits
+                out_map["seg_out"] = out_map["seg_logits"] = seg_logits
             except Exception:
                 pass
 
@@ -1464,9 +1461,6 @@ def attach_val_stack(
                 name = f"{ns}{k}" if ns else k
                 m.attach(evaluator, name)
             attached.update({(f"{ns}{k}" if ns else k): v for k, v in seg_metrics.items()})
-            # for k, m in seg_metrics.items():
-            #     m.attach(evaluator, f"seg/{k}")
-            # attached.update({f"seg/{k}": v for k, v in seg_metrics.items()})
         except Exception:
             pass
 

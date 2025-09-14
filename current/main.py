@@ -579,7 +579,8 @@ def run(
         cls_decision=str(cfg.get("cls_decision", "threshold")),
         threshold_getter=get_live_thr,
         positive_index=int(cfg.get("positive_index", 1)),
-        has_seg=has_seg and not bool(cfg.get("two_pass_val", False)),   # seg metrics here only when 2-pass is OFF
+        # has_seg=has_seg and not bool(cfg.get("two_pass_val", False)),   # seg metrics here only when 2-pass is OFF
+        has_seg=has_seg,
         seg_num_classes=cfg.get("seg_num_classes"),
         seg_threshold=cfg.get("seg_threshold"),
         seg_ignore_index=cfg.get("seg_ignore_index"),
@@ -693,14 +694,58 @@ def run(
         payload = {"trainer/epoch": ep}
         payload.update(_flatten_metrics_for_wandb(metrics, prefix="val/"))
 
-        # (optional) also mirror a single watch metric into engine.state.metrics
-        # so schedulers/checkpoints can read it reliably
-        # If we use attach_val_stack (seg is namespaced), pick a default like "seg/dice"
-        default_watch = "seg/dice" if (has_seg and not has_cls) else "auc"
-        watch_key = str(cfg.get("watch_metric", default_watch))
-        # make it discoverable by Plateau / checkpoint logic which may look for "val/…"
-        if watch_key in metrics:
-            v = metrics[watch_key]
+        # Two-pass: overwrite seg metrics
+        seg_only = bool(has_seg and not has_cls)
+        if has_seg and seg_metrics_from_tp:
+            # Log calibrated seg metrics to W&B
+            payload.update(_flatten_metrics_for_wandb(seg_metrics_from_tp, prefix="val/"))
+
+            # Mirror into evaluator & engine for schedulers/console/checkpoints
+            seg_ns = "" if seg_only else "seg/"
+            for k, v in seg_metrics_from_tp.items():
+                std_evaluator.state.metrics[f"{seg_ns}{k}"] = v
+                engine.state.metrics[f"val/{k}"] = (float(v.item()) if torch.is_tensor(v) and v.numel() == 1 else v)
+
+            # Optionally compute a combined multi score for MTL (seg + cls)
+            if has_cls:
+                # seg score: prefer dice, fall back to mean_dice/iou/jaccard
+                seg_score = None
+                for k in ("dice", "mean_dice", "iou", "jaccard"):
+                    if k in seg_metrics_from_tp:
+                        v = seg_metrics_from_tp[k]
+                        seg_score = (float(v.item()) if torch.is_tensor(v) and v.numel() == 1 else float(v))
+                        break
+                if seg_score is not None:
+                    # cls score: prefer AUC, fallback to ACC; prefer two-pass if provided
+                    cls_score = None
+                    for ck in ("auc", "acc"):
+                        if ck in cls_metrics_from_tp:
+                            cv = cls_metrics_from_tp[ck]
+                            cls_score = (float(cv.item()) if torch.is_tensor(cv) and cv.numel() == 1 else float(cv))
+                            break
+                    if cls_score is None:
+                        cv = metrics.get("auc", metrics.get("acc", 0.0))
+                        if torch.is_tensor(cv):
+                            cls_score = float(cv.mean().item()) if cv.numel() > 1 else float(cv.item())
+                        else:
+                            try:
+                                cls_score = float(cv)
+                            except Exception:
+                                cls_score = 0.0
+
+                    w = float(cfg.get("multi_weight", 0.5))
+                    multi = w * seg_score + (1.0 - w) * cls_score
+                    payload["val/multi"] = multi
+                    std_evaluator.state.metrics["multi"] = multi
+                    engine.state.metrics["val/multi"] = multi
+
+        # Mirror a single watch metric into engine.state.metrics for schedulers/checkpoints
+        # Defaults: cls->auc, seg->dice, mtl->multi
+        _default_watch = "multi" if (has_cls and has_seg) else ("dice" if has_seg else "auc")
+        watch_key = str(cfg.get("watch_metric", _default_watch))
+        watch_lookup = watch_key.replace("val/", "").replace("val_", "")
+        if watch_lookup in metrics:
+            v = metrics[watch_lookup]
             if isinstance(v, torch.Tensor):
                 v = float(v.detach().mean().item()) if v.numel() > 1 else float(v.item())
             else:
@@ -709,9 +754,9 @@ def run(
                 except Exception:
                     v = None
             if v is not None:
-                engine.state.metrics[f"val/{watch_key}"] = v
-                # also put a short alias if we prefer (e.g., for "seg/dice")
-                if watch_key == "seg/dice":
+                engine.state.metrics[f"val/{watch_lookup}"] = v
+                # convenient alias when watching seg dice
+                if watch_lookup == "seg/dice":
                     engine.state.metrics["val/dice"] = v  # convenient alias
 
         # validation loss (if we compute it separately)
