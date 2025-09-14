@@ -12,8 +12,6 @@ random.seed(seed)
 np.random.seed(seed)
 
 import time
-from typing import Tuple
-
 import torch
 import torch.nn as nn
 from monai.utils import set_determinism
@@ -59,9 +57,9 @@ def normalize_arch(name: str | None) -> str:
     return str(name or "model").lower().replace("/", "_").replace(" ", "_")
 
 
-def get_task_flags(task: str | None) -> Tuple[bool, bool]:
-    t = (task or "multitask").lower()
-    return t != "segmentation", t != "classification"
+# def get_task_flags(task: str | None) -> Tuple[bool, bool]:
+#     t = (task or "multitask").lower()
+#     return t != "segmentation", t != "classification"
 
 
 @torch.no_grad()
@@ -135,9 +133,48 @@ def _to_wandb_value(v):
 
 def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
     import numpy as _np
-    out = {}
-    for k, v in (metrics_dict or {}).items():
+    import torch
+
+    def _as_1d_array(v):
+        # Returns a 1D numpy array if v looks like a vector; else None
+        try:
+            if isinstance(v, torch.Tensor):
+                t = v.detach().cpu()
+                if t.ndim == 1:
+                    return t.numpy()
+                if t.ndim > 1 and 1 in t.shape and t.numel() == max(t.shape):
+                    # squeeze (e.g., [1,C] or [C,1])
+                    return t.view(-1).numpy()
+            elif isinstance(v, _np.ndarray):
+                if v.ndim == 1:
+                    return v
+                if v.ndim > 1 and 1 in v.shape and v.size == max(v.shape):
+                    return v.reshape(-1)
+            elif isinstance(v, (list, tuple)):
+                # only treat short 1D lists as vectors
+                return _np.asarray(v).reshape(-1)
+        except Exception:
+            pass
+        return None
+
+    def _log_classwise(key_base: str, vec, out: dict, *, exclude_bg: bool = False):
+        arr = _np.asarray(vec, dtype=_np.float64).reshape(-1)
+        # mean across classes; toggle exclude_bg to ignore index 0
+        start = 1 if (exclude_bg and arr.size > 1) else 0
+        mean_val = float(arr[start:].mean()) if arr[start:].size > 0 else float("nan")
+        out[f"{prefix}{key_base}"] = mean_val
+        # per-class
+        for i, v in enumerate(arr):
+            out[f"{prefix}{key_base}_{i}"] = float(v)
+
+    out: dict[str, float | list] = {}
+
+    for raw_k, v in (metrics_dict or {}).items():
+        # Strip optional seg/ namespace on log keys
+        k = raw_k[4:] if raw_k.startswith("seg/") else raw_k
         key = f"{prefix}{k}"
+
+        # Special-case: confusion matrices -> store matrix (list) + per-cell scalars
         if "confmat" in k:
             try:
                 if torch.is_tensor(v):
@@ -146,19 +183,132 @@ def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict
                     arr = v.astype(_np.int64)
                 else:
                     arr = _np.asarray(v, dtype=_np.int64)
-                if arr.ndim == 2 and arr.shape[0] >= 1 and arr.shape[1] >= 1:
-                    out[key] = arr.tolist()
+                out[key] = arr.tolist()
+                if arr.ndim == 2:
                     for i in range(arr.shape[0]):
                         for j in range(arr.shape[1]):
                             out[f"{key}_{i}{j}"] = int(arr[i, j])
-                else:
-                    # Fallback: store as-is without per-cell scalars
-                    out[key] = arr.tolist() if arr.ndim > 0 else int(arr)
+                continue
             except Exception:
-                out[key] = _to_wandb_value(v)
-        else:
-            out[key] = _to_wandb_value(v)
+                # fall through to generic handling
+                pass
+
+        # Classwise handling for dice/iou vectors
+        if k in ("dice", "iou"):
+            vec = _as_1d_array(v)
+            if vec is not None and vec.ndim == 1 and 1 <= vec.size <= 64:
+                # Set exclude_bg=True if we want the mean over classes 1..C-1
+                _log_classwise(k, vec, out, exclude_bg=False)
+                continue  # done with this key
+
+        # Generic scalars
+        try:
+            out[key] = float(v)  # python/numpy scalars
+            continue
+        except Exception:
+            pass
+
+        # Torch tensors
+        if isinstance(v, torch.Tensor):
+            t = v.detach()
+            if t.ndim == 0 or t.numel() == 1:
+                out[key] = float(t.item())
+            else:
+                # For non-dice/iou multi-element tensors, log mean/min/max
+                t = t.float()
+                out[f"{key}/mean"] = float(t.mean().item())
+                out[f"{key}/min"] = float(t.min().item())
+                out[f"{key}/max"] = float(t.max().item())
+            continue
+
+        # Numpy arrays (non-dice/iou)
+        if isinstance(v, _np.ndarray):
+            if v.ndim == 0 or v.size == 1:
+                out[key] = float(v.reshape(-1)[0])
+            else:
+                out[f"{key}/mean"] = float(v.mean())
+                out[f"{key}/min"] = float(v.min())
+                out[f"{key}/max"] = float(v.max())
+            continue
+
+        # Lists/tuples (non-dice/iou): summarize
+        if isinstance(v, (list, tuple)):
+            try:
+                arr = _np.asarray(v, dtype=_np.float64)
+                if arr.ndim == 0 or arr.size == 1:
+                    out[key] = float(arr.reshape(-1)[0])
+                else:
+                    out[f"{key}/mean"] = float(arr.mean())
+                    out[f"{key}/min"] = float(arr.min())
+                    out[f"{key}/max"] = float(arr.max())
+                continue
+            except Exception:
+                pass
+
+        # Fallback: skip non-numeric types
+        # out[key] = str(v)  # only if we really want the raw repr
+
     return out
+
+
+# def _flatten_metrics_for_wandb(metrics_dict: dict, prefix: str = "val/") -> dict:
+#     """
+#     Convert evaluator metrics into W&B-friendly scalars.
+#     - Scalars -> prefix/key
+#     - Tensors with 1 elem -> prefix/key
+#     - Tensors with >1 elems -> prefix/key/mean|min|max
+#     - Confmat arrays -> prefix/key (list) and per-cell prefix/key_ij
+#     """
+#     import numpy as _np
+#     out: dict[str, float | list] = {}
+
+#     for k, v in (metrics_dict or {}).items():
+#         key = f"{prefix}{k}"
+
+#         # Special case: confusion matrix-like keys
+#         if "confmat" in k:
+#             try:
+#                 if torch.is_tensor(v):
+#                     arr = v.detach().cpu().to(torch.int64).numpy()
+#                 elif isinstance(v, _np.ndarray):
+#                     arr = v.astype(_np.int64)
+#                 else:
+#                     arr = _np.asarray(v, dtype=_np.int64)
+
+#                 # store the whole matrix (ok as list) + per-cell scalars
+#                 out[key] = arr.tolist()
+#                 if arr.ndim == 2:
+#                     for i in range(arr.shape[0]):
+#                         for j in range(arr.shape[1]):
+#                             out[f"{key}_{i}{j}"] = int(arr[i, j])
+#                 continue
+#             except Exception:
+#                 # fall through to generic handling if anything goes wrong
+#                 pass
+
+#         # Generic numeric/scalar
+#         try:
+#             out[key] = float(v)  # works for Python/numpy scalars
+#             continue
+#         except Exception:
+#             pass
+
+#         # Tensor handling
+#         if isinstance(v, torch.Tensor):
+#             t = v.detach()
+#             if t.ndim == 0 or t.numel() == 1:
+#                 out[key] = float(t.item())
+#             else:
+#                 t = t.float()
+#                 out[f"{key}/mean"] = float(t.mean().item())
+#                 out[f"{key}/min"] = float(t.min().item())
+#                 out[f"{key}/max"] = float(t.max().item())
+#             continue
+
+#         # Last resort: skip or stringify
+#         # out[key] = str(v)  # uncomment if we want to keep non-numeric values
+
+#     return out
 
 
 def _console_print_metrics(epoch: int, metrics: dict):
@@ -262,7 +412,6 @@ def run(
     # Make the evaluator/metrics infer the correct probability mapping
     cfg["head_logits"] = head_logits               # persist normalized value
     cfg["cls_loss"] = cls_loss                     # persist normalized value
-    # cfg["posprob_mode"] = cfg.get("posprob_mode", "auto")
 
     # build torch.nn.Module via the registry adapter
     model = build_model(cfg).to(device=device, dtype=torch.float32)
@@ -283,7 +432,6 @@ def run(
     cc = cfg.get("class_counts", [1, 1])
     pos_prior = float(cc[pos_idx] / max(1, sum(cc)))
     if head_logits == 1 and bool(cfg.get("init_head_bias_from_prior", True)):
-        # if bool(cfg.get("binary_single_logit", True)) and bool(cfg.get("init_head_bias_from_prior", True)):
         _seed_binary_head_bias_from_prior(model, pos_prior)
 
     if "head_multiplier" in cfg and "head_lr_scale" not in cfg:
@@ -295,32 +443,13 @@ def run(
     cfg.setdefault("param_groups", "auto")
     cfg.setdefault("decay_split", True)
 
-    # use_split = str(cfg.get("param_groups", "single")).lower() == "split"
-    # if use_split and all(hasattr(model, m) for m in ("backbone_parameters", "head_parameters")):
-    #     base_lr = float(cfg.get("base_lr", cfg.get("lr", 1e-3)))
-    #     head_mult = float(cfg.get("head_multiplier", 10.0))
-    #     wd = float(cfg.get("weight_decay", 1e-4))
-    #     bb = list(model.backbone_parameters())
-    #     hd = list(model.head_parameters())
-    #     # If something is wrong with grouping, fall back gracefully
-    #     if len(bb) == 0 or len(hd) == 0:
-    #         print("[WARN] split requested but backbone/head groups are empty; using single group.")
-    #         parameters_for_opt = model.parameters()
-    #     else:
-    #         parameters_for_opt = [
-    #             {"params": bb, "lr": base_lr, "weight_decay": wd},  # backbone
-    #             {"params": hd, "lr": base_lr * head_mult, "weight_decay": wd},  # head
-    #         ]
-    # else:
-    #     parameters_for_opt = model.parameters()
-
-    # optimizer = get_optimizer(cfg, parameters_for_opt, verbose=True)
-
     optimizer = get_optimizer(cfg, model, verbose=True)
 
-    # flags
+    # Decide task shape
     task = str(cfg.get("task", "multitask")).lower()
-    has_cls, has_seg = get_task_flags(task)
+    has_cls = (str(cfg.get("task", "classification")).lower() == "classification") or bool(cfg.get("has_cls", False))
+    has_seg = (str(cfg.get("task", "classification")).lower() == "segmentation") or bool(cfg.get("has_seg", False))
+    seg_only = has_seg and not has_cls
     health_on = decision_health_active_from_cfg(cfg)
 
     # two prepare_batch functions
@@ -428,6 +557,7 @@ def run(
         seg_num_classes=cfg.get("seg_num_classes"),
         seg_threshold=cfg.get("seg_threshold"),
         seg_ignore_index=cfg.get("seg_ignore_index"),
+        seg_prefix=("" if seg_only else "seg/"),
         enable_threshold_search=True,
         calibration_method=str(cfg.get("calibration_method", "bal_acc")),
         enable_pos_score_debug_once=bool(cfg.get("debug_pos_once", False) or cfg.get("debug", False)),
@@ -438,7 +568,9 @@ def run(
     # scheduler/watch setup
     two_pass_enabled = bool(cfg.get("two_pass_val", False))
     # default_watch = "auc" if has_cls else "dice"
-    default_watch = "multi" if has_seg else "auc"
+    # default_watch = "val/dice" if (has_seg and not has_cls) else "val/auc"
+    # default_watch = "dice" if (has_seg and not has_cls) else "auc"
+    default_watch = "dice" if seg_only else "auc"
     watch_metric = cfg.get("watch_metric", default_watch)
 
     # single source for warmup/log toggles
@@ -469,21 +601,18 @@ def run(
     def _validate_and_log(engine):
         ep = int(engine.state.epoch)
 
-        # Optional calibration / two-pass
-        seg_metrics_from_tp = {}
-        cls_metrics_from_tp = {}
+        # two-pass (optional)
+        seg_metrics_from_tp: dict = {}
+        cls_metrics_from_tp: dict = {}
         t_proposed = None
         if two_pass is not None:
             t, cls_metrics_from_tp, seg_metrics_from_tp = two_pass.validate(
                 epoch=ep, model=model, val_loader=val_loader, base_rate=None
             )
-            # if t is not None and ep >= cal_warmup:
-            #     std_evaluator.state.threshold = float(t)
-            # proposed threshold from two-pass
             t_proposed = t
             # guarded adoption of calibrator threshold
             if t_proposed is not None and ep >= cal_warmup and ep >= thr_warmup:
-                cand = float(min(max(t_proposed, thr_min), thr_max))
+                cand = float(min(max(float(t_proposed), thr_min), thr_max))
                 pr = cls_metrics_from_tp.get("pos_rate", None)
                 auc = cls_metrics_from_tp.get("auc", None)
                 cm = cls_metrics_from_tp.get("cls_confmat", cls_metrics_from_tp.get("confmat", None))
@@ -499,103 +628,51 @@ def run(
 
                 if pos_ok and auc_ok and tn_tp_ok:
                     std_evaluator.state.threshold = cand
-                    # (optional) expose what we actually accepted:
                     cls_metrics_from_tp["threshold"] = cand
-                else:
-                    # keep previous threshold (do nothing)
-                    pass
 
-        # Single standard evaluation (classification metrics + any seg metrics attached to std_evaluator)
+        # run the evaluator (attach_val_stack already attached seg/cls metrics)
         std_evaluator.run(val_loader)
 
-        # Build payload from the standard evaluator first
+        # collect metrics and flatten them for W&B
         metrics = std_evaluator.state.metrics or {}
+
         payload = {"trainer/epoch": ep}
-        payload.update(_flatten_metrics_for_wandb(metrics))  # -> val/...
+        payload.update(_flatten_metrics_for_wandb(metrics, prefix="val/"))
 
-        # Merge segmentation metrics returned by two-pass (if any)
-        if has_seg and seg_metrics_from_tp:
-            # payload.update(_flatten_metrics_for_wandb(seg_metrics_from_tp, prefix="val/seg/"))
-            payload.update(_flatten_metrics_for_wandb(seg_metrics_from_tp, prefix="val/"))
+        # (optional) also mirror a single watch metric into engine.state.metrics
+        # so schedulers/checkpoints can read it reliably
+        # If we use attach_val_stack (seg is namespaced), pick a default like "seg/dice"
+        default_watch = "seg/dice" if (has_seg and not has_cls) else "auc"
+        watch_key = str(cfg.get("watch_metric", default_watch))
+        # make it discoverable by Plateau / checkpoint logic which may look for "val/…"
+        if watch_key in metrics:
+            v = metrics[watch_key]
+            if isinstance(v, torch.Tensor):
+                v = float(v.detach().mean().item()) if v.numel() > 1 else float(v.item())
+            else:
+                try:
+                    v = float(v)
+                except Exception:
+                    v = None
+            if v is not None:
+                engine.state.metrics[f"val/{watch_key}"] = v
+                # also put a short alias if we prefer (e.g., for "seg/dice")
+                if watch_key == "seg/dice":
+                    engine.state.metrics["val/dice"] = v  # convenient alias
 
-            # Mirror a couple of useful seg values into engine.state.metrics for schedulers/checkpoints
-            # Prefer 'dice' if present; otherwise try common alternatives.
-            seg_score = None
-            for k in ("dice", "mean_dice", "iou", "jaccard"):
-                if k in seg_metrics_from_tp:
-                    v = seg_metrics_from_tp[k]
-                    if torch.is_tensor(v) and v.numel() == 1:
-                        v = float(v.item())
-                    seg_score = float(v)
-                    # Also expose namespaced copy (optional)
-                    engine.state.metrics[f"val/{k}"] = seg_score
-                    break
-
-            # Construct a combined multi-objective score if configured to do so
-            if seg_score is not None:
-                # Use AUC if available, else fall back to accuracy (or 0.0)
-                cls_score = metrics.get("auc", metrics.get("acc", 0.0))
-                if torch.is_tensor(cls_score) and cls_score.numel() == 1:
-                    cls_score = float(cls_score.item())
-                cls_score = float(cls_score)
-
-                w = float(cfg.get("multi_weight", 0.5))
-                multi = w * seg_score + (1.0 - w) * cls_score
-                payload["val/multi"] = multi
-                engine.state.metrics["val/multi"] = multi
-                # make multi and seg metrics visible to checkpoint watch that reads evaluator metrics
-                for k, v in seg_metrics_from_tp.items():
-                    std_evaluator.state.metrics[f"seg/{k}"] = v
-                    std_evaluator.state.metrics["multi"] = multi
-
-        # If two-pass is OFF but seg metrics were attached to std_evaluator (step 1), also provide val/multi
-        elif has_seg:
-            # Try to synthesize multi from metrics that were attached to std_evaluator
-            seg_score = None
-            for k in ("seg/dice", "seg/mean_dice", "seg/iou", "seg/jaccard"):
-                if k in metrics:
-                    v = metrics[k]
-                    if torch.is_tensor(v) and v.numel() == 1:
-                        v = float(v.item())
-                    seg_score = float(v)
-                    break
-            if seg_score is not None:
-                cls_score = metrics.get("auc", metrics.get("acc", 0.0))
-                if torch.is_tensor(cls_score) and cls_score.numel() == 1:
-                    cls_score = float(cls_score.item())
-                cls_score = float(cls_score)
-                w = float(cfg.get("multi_weight", 0.5))
-                multi = w * seg_score + (1.0 - w) * cls_score
-                payload["val/multi"] = multi
-                engine.state.metrics["val/multi"] = multi
-                std_evaluator.state.metrics["multi"] = multi
-
-        # Threshold bookkeeping
-        thr_search = metrics.get("threshold", None)
-        if thr_search is not None:
-            payload["val/search_threshold"] = float(thr_search)
-        payload["val/threshold"] = float(getattr(std_evaluator.state, "threshold", 0.5))
-        if two_pass is not None and ep >= cal_warmup:
-            payload["val/cal_thr"] = payload["val/threshold"]
-
-        # Validation loss + mirror into engine state for plateau
+        # validation loss (if we compute it separately)
         try:
             vloss = float(_compute_loss(model, val_loader, loss_fn, prepare_batch_std, device))
             payload["val/loss"] = vloss
-            engine.state.metrics = engine.state.metrics or {}
             engine.state.metrics["val/loss"] = vloss
-            # Mirror AUC into engine state if present (optional convenience)
-            if "auc" in metrics:
-                val_auc = metrics["auc"]
-                if torch.is_tensor(val_auc) and val_auc.numel() == 1:
-                    val_auc = float(val_auc.item())
-                engine.state.metrics["val/auc"] = val_auc
         except Exception:
             pass
 
+        # console logging (if we have a pretty-printer)
         if console_log:
             _console_print_metrics(ep, metrics)
 
+        # push to W&B
         import wandb
         wandb.log(payload)
 
@@ -743,13 +820,27 @@ if __name__ == "__main__":
         cfg["device"] = device
 
         # derive class_counts from TRAIN set (not val)
-        C = int(cfg.get("num_classes", 2))
+        C = int(cfg.get("num_classes", cfg.get("out_channels", 2)))
         train_ds = getattr(train_loader, "dataset", None)
         import torch
-        agg = torch.zeros(C, dtype=torch.long)
-        for batch in train_loader:
-            y = get_label_indices_from_batch(batch, num_classes=C)
-            agg += torch.bincount(y, minlength=C)
+        agg = torch.zeros(C, dtype=torch.long)  # keep on CPU
+        with torch.no_grad():
+            for batch in train_loader:
+                y = get_label_indices_from_batch(batch, num_classes=C)  # [B] or [B,*spatial]
+
+                # If a one-hot seg mask slipped through, collapse channel dim
+                if isinstance(y, torch.Tensor) and y.ndim >= 4 and y.size(1) == C:
+                    y = y.argmax(dim=1)
+                # Ensure 1-D, integer, valid IDs
+                y = torch.as_tensor(y, dtype=torch.long).reshape(-1).cpu()  # 1-D for bincount
+                ignore_idx = cfg.get("ignore_index", None)
+                if ignore_idx is not None:
+                    y = y[y != int(ignore_idx)]
+                y = y[(y >= 0) & (y < C)]
+
+                if y.numel():
+                    agg += torch.bincount(y, minlength=C)
+
         counts = agg.tolist()
         print(f"[INFO] computed train class_counts={counts}")
         cfg["class_counts"] = counts

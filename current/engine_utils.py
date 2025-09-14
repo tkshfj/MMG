@@ -238,27 +238,6 @@ def _pick_logits_from_output(out: Any) -> Optional[torch.Tensor]:
         return None
 
 
-# def decision_from_logits(
-#     logits: torch.Tensor,
-#     threshold: float,
-#     *,
-#     positive_index: int = 1,
-#     to_pos_prob: Callable[[torch.Tensor], torch.Tensor] | None = None,
-# ) -> torch.Tensor:
-#     """
-#     Return int64 predictions computed as (p_pos >= threshold), never on raw logits.
-#     Prefer passing to_pos_prob = evaluator.state.to_pos_prob for single SoT.
-#     """
-#     if to_pos_prob is None:
-#         # Better fallback: treat 2-logit binary as BCE2; ≥3 as CE; scalar/1-col as BCE1.
-#         last = (logits.ndim > 0 and logits.shape[-1]) or 1
-#         scheme = "bce1" if last == 1 else ("bce2" if last == 2 else "ce")
-#         probs = PosProbCfg(positive_index=int(positive_index), scheme=scheme).logits_to_pos_prob(logits)
-#     else:
-#         probs = to_pos_prob(logits)
-#     return (probs.reshape(-1) >= float(threshold)).long()
-
-
 def build_trainer(
     device,
     max_epochs,
@@ -517,7 +496,12 @@ def build_evaluator(
         if y is not None:
             label_dict["label"] = out_map.get("y", torch.as_tensor(y, device=dev).long().view(-1))
         if include_seg and (m is not None):
-            label_dict["mask"] = torch.as_tensor(m, device=dev).long()
+            # label_dict["mask"] = torch.as_tensor(m, device=dev).long()
+            m_t = torch.as_tensor(m, device=dev).long()
+            # expose mask at top level so seg metrics can find it
+            out_map["mask"] = m_t
+            # keep nested copy for any code that looks under "label"
+            label_dict["mask"] = m_t
         if label_dict:
             out_map["label"] = label_dict
 
@@ -633,12 +617,35 @@ class Task(str, Enum):
 
 def get_label_indices_from_batch(batch: Mapping[str, Any], *, num_classes: int | None = None) -> torch.Tensor:
     """
-    Return labels as a 1D LongTensor of class indices [B].
-    Accepts keys: 'label', 'labels', or 'y'. Handles one-hot and [B,1].
+    Return labels as class indices.
+      - Classification: [B]
+      - Segmentation:   [B, H, W] or [B, D, H, W]
+    Accepts keys:
+      - classification: 'label', 'labels', 'y'
+      - segmentation:   'mask'
     """
     if not isinstance(batch, Mapping):
         raise TypeError(f"Expected dict-like batch, got {type(batch)}")
 
+    # Segmentation path (mask)
+    if "mask" in batch and batch["mask"] is not None:
+        y = batch["mask"]
+        if hasattr(y, "as_tensor"):
+            y = y.as_tensor()
+        y = torch.as_tensor(y)
+
+        # One-hot mask -> indices along channel dim
+        if y.ndim >= 4 and y.size(1) > 1:
+            y = y.argmax(dim=1)
+
+        y = y.long()  # keep spatial dims
+        if num_classes is not None:
+            if (y < 0).any() or (y >= num_classes).any():
+                mn, mx = int(y.min()), int(y.max())
+                raise ValueError(f"Label indices out of range 0..{num_classes-1} (min={mn}, max={mx})")
+        return y
+
+    # Classification path (unchanged)
     if "label" in batch and batch["label"] is not None:
         y = batch["label"]
     elif "labels" in batch and batch["labels"] is not None:
@@ -652,7 +659,6 @@ def get_label_indices_from_batch(batch: Mapping[str, Any], *, num_classes: int |
         y = y.as_tensor()
     y = torch.as_tensor(y)
 
-    # Normalize to indices [B]
     if y.ndim >= 2 and y.shape[-1] > 1:
         y = y.argmax(dim=-1)
     if y.ndim >= 2 and y.shape[-1] == 1:
@@ -919,49 +925,6 @@ def attach_lr_scheduling(
     @trainer.on(Events.EPOCH_COMPLETED)
     def _step_epoch(_):
         scheduler.step()
-
-
-# def _best_threshold_from_probs(p: torch.Tensor, y_true: torch.Tensor, mode: str = "bal_acc") -> tuple[float, dict]:
-#     """
-#     p: (N,) positive-class probabilities in [0,1]
-#     y_true: (N,) {0,1}
-#     Returns (threshold, stats_dict)
-#     """
-#     with torch.no_grad():
-#         p = p.detach().float().clamp_(0.0, 1.0).view(-1)     # keep device, in-place clamp
-#         y = y_true.detach().long().view(-1).to(p.device)
-#         # candidate thresholds: unique preds + endpoints
-#         # stay on the same device; quantile works on CUDA too
-#         cand = torch.quantile(p, torch.linspace(0, 1, 101, device=p.device)).unique()
-
-#         best_thr, best_score, best_stats = 0.5, -1.0, {}
-#         for thr in cand:
-#             y_hat = (p >= thr).long()
-#             tp = int(((y_hat == 1) & (y == 1)).sum())
-#             tn = int(((y_hat == 0) & (y == 0)).sum())
-#             fp = int(((y_hat == 1) & (y == 0)).sum())
-#             fn = int(((y_hat == 0) & (y == 1)).sum())
-
-#             prec = tp / max(tp + fp, 1)
-#             rec1 = tp / max(tp + fn, 1)   # recall for class 1
-#             rec0 = tn / max(tn + fp, 1)   # recall for class 0
-#             bal_acc = 0.5 * (rec0 + rec1)
-#             f1 = 2 * prec * rec1 / max(prec + rec1, 1e-8)
-#             pos_rate = (tp + fp) / max(len(y), 1)
-
-#             score = bal_acc if mode == "bal_acc" else f1
-#             if score > best_score:
-#                 best_score = float(score)
-#                 best_thr = float(thr)
-#                 best_stats = dict(
-#                     tp=tp, tn=tn, fp=fp, fn=fn,
-#                     prec=float(prec), rec=float(rec1),
-#                     rec_0=float(rec0), rec_1=float(rec1),
-#                     bal_acc=float(bal_acc), f1=float(f1),
-#                     pos_rate=float(pos_rate),
-#                 )
-
-#         return best_thr, best_stats
 
 
 # threshold calibration helpers (logits-aware)
@@ -1232,13 +1195,12 @@ def attach_val_threshold_search(
             ema_beta=getattr(engine.state, "cal_ema_beta", 0.3),
             thr_hysteresis=getattr(engine.state, "thr_hysteresis", 0.02),
         )
-        # calcfg = CalCfg(**cfg_obj.__dict__)
         import inspect
-        # 1) Only pass fields CalCfg actually accepts
+        # Only pass fields CalCfg actually accepts
         _allowed = set(inspect.signature(CalCfg).parameters.keys())
         _d = dict(cfg_obj.__dict__)  # shallow copy
-        # 2) Backward-compat: map legacy keys -> current field names
-        #    Adjust this mapping to whatever CalCfg expects in codebase.
+        # Backward-compat: map legacy keys -> current field names
+        # Adjust this mapping to whatever CalCfg expects in codebase.
         legacy_map = {
             "cal_rate_tolerance": "rate_tolerance",   # or "rate_tol" if that's current name
             "rate_tol_override": "rate_tolerance",     # let explicit override win
@@ -1247,7 +1209,7 @@ def attach_val_threshold_search(
         for src, dst in legacy_map.items():
             if src in _d and dst not in _d:
                 _d[dst] = _d[src]
-        # 3) Drop any keys CalCfg doesn't take
+        # Drop any keys CalCfg doesn't take
         _d = {k: v for k, v in _d.items() if k in _allowed}
         calcfg = CalCfg(**_d)
 
@@ -1266,7 +1228,6 @@ def attach_val_threshold_search(
         )
 
         # summaries
-        # probs_final = to_pos_prob(torch.from_numpy(logits_np)).numpy()  # for consistent metrics dump
         probs_final = to_pos_prob(logits).cpu().numpy()
         y_hat = (probs_final >= new_thr).astype(np.int64)
         tp = int(((labels.numpy() == 1) & (y_hat == 1)).sum())
@@ -1289,11 +1250,6 @@ def attach_val_threshold_search(
         m["search_pos_rate"] = float(pos_rate)
         if "auc" in s:
             m["search_auc"] = float(s["auc"])
-
-        # evaluator.state.threshold = float(new_thr)
-        # try:
-        #     if hasattr(evaluator, "trainer"):
-        #         evaluator.trainer.state.threshold = float(new_thr)
         engine.state.threshold = float(new_thr)
         try:
             if hasattr(engine, "trainer"):
@@ -1351,6 +1307,30 @@ def attach_pos_score_debug_once(
         except Exception:
             pass
 
+    def _safe_quantiles(x: torch.Tensor, qs=(0.10, 0.50, 0.90), *, max_elems: int = 2_000_000):
+        """
+        Robust quantiles for huge tensors:
+        - flatten
+        - drop NaN/Inf
+        - move to CPU
+        - downsample by striding to <= max_elems
+        Returns: list[float] with same length as qs
+        """
+        with torch.no_grad():
+            t = torch.as_tensor(x).reshape(-1)
+            t = t[torch.isfinite(t)]
+            if t.numel() == 0:
+                return [float("nan")] * len(qs)
+            if t.device.type != "cpu":
+                t = t.cpu()
+            t = t.float()
+            if t.numel() > max_elems:
+                step = (t.numel() + max_elems - 1) // max_elems
+                t = t[::step]
+            q = torch.tensor(qs, dtype=torch.float32)
+            out = torch.quantile(t, q)
+            return [float(v.item()) for v in out]
+
     @evaluator.on(Events.COMPLETED)
     def _summarize(engine: Engine):
         if not buf["scores"]:
@@ -1362,10 +1342,15 @@ def attach_pos_score_debug_once(
         mn = float(scores.min().item())
         mx = float(scores.max().item())
         med = float(scores.median().item())
-        q10 = float(scores.quantile(0.10).item())
-        q90 = float(scores.quantile(0.90).item())
+        # q10 = float(scores.quantile(0.10).item())
+        # q90 = float(scores.quantile(0.90).item())
         pos50 = float((scores >= 0.5).float().mean().item())
         hist = torch.histc(scores, bins=int(max(1, bins)), min=0.0, max=1.0).tolist()
+
+        # Replace any direct scores.quantile(...) usage with:
+        cfg_local = getattr(engine.state, "cfg", {}) or {}
+        MAX_ELEMS = int(cfg_local.get("quantile_max_elems", 2_000_000))
+        q10, q50, q90 = _safe_quantiles(scores, (0.10, 0.50, 0.90), max_elems=MAX_ELEMS)
 
         # Print once (easy to see in logs)
         try:
@@ -1430,6 +1415,7 @@ def attach_val_stack(
     pos_debug_bins: int = 20,
     pos_debug_tag: str = "debug_pos",
     device: Optional[torch.device] = None,
+    seg_prefix: str = "seg/",
 ) -> Dict[str, Any]:
     """
     Compose the 'val stack' on a single evaluator:
@@ -1473,9 +1459,14 @@ def attach_val_stack(
                 ignore_index=seg_ignore_index,
             )
             # namespace seg/* to avoid key collisions
+            ns = str(seg_prefix) if seg_prefix is not None else ""
             for k, m in seg_metrics.items():
-                m.attach(evaluator, f"seg/{k}")
-            attached.update({f"seg/{k}": v for k, v in seg_metrics.items()})
+                name = f"{ns}{k}" if ns else k
+                m.attach(evaluator, name)
+            attached.update({(f"{ns}{k}" if ns else k): v for k, v in seg_metrics.items()})
+            # for k, m in seg_metrics.items():
+            #     m.attach(evaluator, f"seg/{k}")
+            # attached.update({f"seg/{k}": v for k, v in seg_metrics.items()})
         except Exception:
             pass
 
@@ -1618,7 +1609,6 @@ __all__ = [
     "attach_best_checkpoint",
     "build_trainer",
     "build_evaluator",
-    # "decision_from_logits",
     "get_label_indices_from_batch",
     "make_prepare_batch",
     "make_warmup_safe_score_fn",
