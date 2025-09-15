@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, Dict, Literal, Optional, Sequence, Tuple, Union, Mapping
 from ignite.handlers import EarlyStopping, Checkpoint, DiskSaver
 from ignite.engine import Events, Engine
-from ignite.metrics import ConfusionMatrix, DiceCoefficient, JaccardIndex
+from ignite.metrics import ConfusionMatrix  # DiceCoefficient, JaccardIndex
 from utils.safe import to_float_scalar, is_finite_float, to_tensor
 from utils.posprob import PosProbCfg
 from utils.losses import make_seg_loss
@@ -23,7 +23,6 @@ from metrics_utils import (
     make_cls_val_metrics,
     make_seg_val_metrics,
     coerce_loss_dict,
-    make_seg_output_transform,
 )
 
 
@@ -282,14 +281,33 @@ def build_trainer(
         x, targets = prepare_batch(batch, dev, nb)
         optimizer.zero_grad(set_to_none=True)
         preds = network(x)
-
+        # segmentation pos-score debug on early iterations
+        try:
+            it = int(getattr(engine.state, "iteration", 0) or 0)
+            dbg_logit_until = int(getattr(engine.state, "logit_debug_steps", _logit_dbg_steps_default))
+            if it <= dbg_logit_until:
+                seg_logits = extract_seg_logits_from_any(preds)
+                if torch.is_tensor(seg_logits):
+                    with torch.no_grad():
+                        if seg_logits.shape[1] == 2:
+                            prob_lesion = seg_logits.softmax(dim=1)[:, 0]  # lesion=0
+                        else:
+                            prob_lesion = seg_logits.sigmoid().squeeze(1)  # single-logit
+                        flat = prob_lesion.flatten()
+                        q = torch.tensor([0.1, 0.5, 0.9], device=flat.device)
+                        q10, med, q90 = torch.quantile(flat, q)
+                        pos_at_05 = (flat >= 0.5).float().mean()
+                        print(f"[pos-score][seg/train] n={flat.numel()} "
+                              f"min={flat.min():.4f} q10={q10:.4f} med={med:.4f} "
+                              f"q90={q90:.4f} max={flat.max():.4f} pos@0.5={pos_at_05:.4f}")
+        except Exception:
+            pass
         # Ensure a single source-of-truth mapping is available on this engine
         ppcfg: PosProbCfg = getattr(engine.state, "ppcfg", None)
         if ppcfg is None:
             # fall back to whatever config the caller stashed on state; empty {} is safe
             ppcfg = PosProbCfg.from_cfg(getattr(engine.state, "cfg", {}))
             ppcfg.attach_to_engine_state(engine)
-
         # early logits-spread probe to catch constant scores
         try:
             it = int(getattr(engine.state, "iteration", 0) or 0)
@@ -306,7 +324,6 @@ def build_trainer(
                         engine.state._last_logit_probe = (lmin, lmed, lmax, lstd)
         except Exception:
             pass
-
         # Normalize any loss return to a dict with a 'loss' tensor
         if auto_loss and isinstance(targets, dict) and ("mask" in targets):
             # Default seg loss: CE(weighted) + Dice(weighted) on indices mask
@@ -522,6 +539,18 @@ def build_evaluator(
             m_t = torch.as_tensor(m, device=dev).long()
             # expose mask at top level so seg metrics can find it
             out_map["mask"] = m_t
+
+            # one-time: warn if an epoch's batch mask is all background
+            try:
+                if not getattr(engine.state, "_warned_all_bg_once", False):
+                    u = torch.unique(m_t)
+                    bg = int(getattr(engine.state, "seg_ignore_index", 1))
+                    if (u.numel() == 1) and (int(u.item()) == bg):
+                        print("[WARN] validation batch has only background labels; consider oversampling lesions.")
+                        engine.state._warned_all_bg_once = True
+            except Exception:
+                pass
+
             # keep nested copy for any code that looks under "label"
             label_dict["mask"] = m_t
         if label_dict:
@@ -576,14 +605,18 @@ def attach_engine_metrics(
         # Reuse evaluator's if present (SoT), otherwise derive from cfg on state.
         ppcfg = getattr(getattr(evaluator, "state", object()), "ppcfg", None) or PosProbCfg.from_cfg(getattr(getattr(evaluator, "state", object()), "cfg", {}) or {})  # noqa F841
 
+    dev = getattr(trainer.state, "device", None) or getattr(evaluator.state, "device", None) or torch.device("cpu")
+
     # training metrics (keep light; classification-only by default)
     train_metrics = make_metrics(
         tasks=task_set,
         num_classes=num_classes,
         cls_decision=cls_decision,
         cls_threshold=cls_threshold,
+        seg_num_classes=2,
         positive_index=positive_index,
         ppcfg=ppcfg,
+        device=dev,
     )
     if not getattr(trainer.state, "_train_metrics_attached", False):
         for k, m in train_metrics.items():
@@ -593,8 +626,6 @@ def attach_engine_metrics(
     # Seed the evaluator with an initial threshold (single SoT)
     if getattr(evaluator.state, "threshold", None) is None:
         evaluator.state.threshold = float(cls_threshold)
-
-    dev = getattr(trainer.state, "device", None) or getattr(evaluator.state, "device", None) or torch.device("cpu")
 
     # validation metrics: start with classification
     val_metrics = make_cls_val_metrics(
@@ -609,26 +640,98 @@ def attach_engine_metrics(
     # segmentation validation metrics
     if "segmentation" in task_set:
         seg_nc = int(seg_num_classes) if seg_num_classes is not None else int(num_classes)
-        # Seed a dedicated seg threshold on the evaluator (independent of cls threshold)
+        bg_idx = int(seg_ignore_index) if seg_ignore_index is not None else 1  # background=1, lesion=0
+        setattr(evaluator.state, "seg_ignore_index", bg_idx)
+
+        # Seed a dedicated seg threshold on the evaluator (used only for single-logit case when converting to labels)
         if getattr(evaluator.state, "seg_threshold", None) is None:
             evaluator.state.seg_threshold = float(seg_threshold) if seg_threshold is not None else 0.5
-        # Build the segmentation output transforms once, with dynamic threshold support.
-        seg_ots = make_seg_output_transform(
-            threshold=lambda: float(getattr(evaluator.state, "seg_threshold", 0.5))
-        )
-        # ConfusionMatrix expects scores ([B,K,H,W]) for multi-class or 2-col one-hot for binary.
-        seg_cm = ConfusionMatrix(
-            num_classes=seg_nc,
-            output_transform=seg_ots.cm,
-            device=dev,
-        )
-        seg_dice = DiceCoefficient(seg_cm)
-        seg_iou = JaccardIndex(seg_cm)
-        # Attach with the same keys your logs expect
+
+        # ConfusionMatrix expects either per-class scores [B,C,H,W] or label maps.
+        # We always provide scores with 2 channels:
+        #   - 2-ch logits -> softmax(logits)
+        #   - 1-ch logit  -> stack([1-p, p]) with p=sigmoid(logit)
+        def _seg_cm_output_transform(out: Mapping[str, Any]):
+            if not isinstance(out, Mapping):
+                return None  # ignite will skip
+            logits = out.get("seg_logits", None)
+            y_true = out.get("mask", None)
+            if logits is None or y_true is None:
+                return None
+            # ensure tensors on correct device
+            _logits = torch.as_tensor(logits).to(device=dev, dtype=torch.float32)
+            _y = torch.as_tensor(y_true).to(device=dev).long()
+            # _logits = torch.as_tensor(logits, device=dev, dtype=torch.float32)
+            # _y = torch.as_tensor(y_true, device=dev).long()  # [B,H,W]
+            if _logits.ndim != 4:
+                # expect [B,C,H,W] or [B,1,H,W]
+                return None
+
+            C = _logits.shape[1]
+            if C == 2:
+                scores = torch.softmax(_logits, dim=1)  # [B,2,H,W]
+            else:
+                # single-logit → [B,1,H,W] → build 2-ch scores
+                p = torch.sigmoid(_logits).squeeze(1)    # [B,H,W]
+                scores = torch.stack([1.0 - p, p], dim=1)  # [B,2,H,W]
+
+            # ConfusionMatrix will argmax(scores) internally
+            return scores, _y
+
+        seg_cm = ConfusionMatrix(num_classes=seg_nc, output_transform=_seg_cm_output_transform, device=dev)
+
+        # Lesion-only metrics derived from CM (robust on all Ignite versions)
+        from ignite.metrics import MetricsLambda
+
+        def _dice_lesion(cm_mat: torch.Tensor):
+            TP = cm_mat[1, 1].to(torch.float32)
+            FP = cm_mat[0, 1].to(torch.float32)
+            FN = cm_mat[1, 0].to(torch.float32)
+            return (2 * TP) / (2 * TP + FP + FN + 1e-8)
+
+        def _iou_lesion(cm_mat: torch.Tensor):
+            TP = cm_mat[1, 1].to(torch.float32)
+            FP = cm_mat[0, 1].to(torch.float32)
+            FN = cm_mat[1, 0].to(torch.float32)
+            return TP / (TP + FP + FN + 1e-8)
+
+        dice_lesion = MetricsLambda(_dice_lesion, seg_cm)
+        iou_lesion = MetricsLambda(_iou_lesion, seg_cm)
+
+        # Attach (keep legacy aliases so YAMLs using val/dice still work)
         seg_cm.attach(evaluator, "seg_confmat")
-        seg_dice.attach(evaluator, "dice")
-        seg_iou.attach(evaluator, "iou")
-        val_metrics.update({"seg_confmat": seg_cm, "dice": seg_dice, "iou": seg_iou})
+        dice_lesion.attach(evaluator, "dice_lesion")
+        iou_lesion.attach(evaluator, "iou_lesion")
+        dice_lesion.attach(evaluator, "dice")  # alias for backward-compat
+        iou_lesion.attach(evaluator, "iou")
+
+        val_metrics.update({
+            "seg_confmat": seg_cm,
+            "dice_lesion": dice_lesion,
+            "iou_lesion": iou_lesion,
+            "dice": dice_lesion,
+            "iou": iou_lesion,
+        })
+
+        # # Dice/IoU from the same CM; ignore background channel = 1
+        # try:
+        #     seg_dice = DiceCoefficient(seg_cm, ignore_index=bg_idx, average=True)
+        #     seg_iou = JaccardIndex(seg_cm, ignore_index=bg_idx, average=True)
+        # except TypeError:
+        #     # Fallback for older Ignite: no ignore_index/average in ctor
+        #     seg_dice = DiceCoefficient(seg_cm)
+        #     seg_iou = JaccardIndex(seg_cm)
+
+        # # seg_dice = DiceCoefficient(seg_cm, ignore_index=bg_idx, average=True)
+        # # seg_iou = JaccardIndex(seg_cm, ignore_index=bg_idx, average=True)
+
+        # # Attach with your existing keys
+        # seg_cm.attach(evaluator, "seg_confmat")
+        # seg_dice.attach(evaluator, "dice")
+        # seg_iou.attach(evaluator, "iou")
+
+        # val_metrics.update({"seg_confmat": seg_cm, "dice": seg_dice, "iou": seg_iou})
+
     if not getattr(evaluator.state, "_val_metrics_attached", False):
         for k, m in val_metrics.items():
             m.attach(evaluator, k)
@@ -1329,18 +1432,26 @@ def attach_pos_score_debug_once(
     @evaluator.on(Events.ITERATION_COMPLETED)
     def _collect(engine: Engine):
         out = engine.state.output
+        # First try the standard (classification) path
         logits = _pick_logits_from_output(out)
-        if logits is None:
-            return
-        # Single SoT: evaluator.state.to_pos_prob
         to_pos_prob = getattr(engine.state, "to_pos_prob", None)
-        if to_pos_prob is None:
-            return
-        try:
-            s = to_pos_prob(logits).detach().reshape(-1).cpu()
-            buf["scores"].append(s)
-        except Exception:
-            pass
+        if logits is not None and to_pos_prob is not None:
+            try:
+                s = to_pos_prob(logits).detach().reshape(-1).cpu()
+                buf["scores"].append(s)
+                return
+            except Exception:
+                pass
+        # segmentation fallback (lesion probability)
+        if isinstance(out, dict):
+            seg_logits = out.get("seg_logits", None)
+            if torch.is_tensor(seg_logits):
+                with torch.no_grad():
+                    if seg_logits.shape[1] == 2:
+                        prob_lesion = seg_logits.softmax(dim=1)[:, 0]    # lesion=0
+                    else:
+                        prob_lesion = seg_logits.sigmoid().squeeze(1)     # single-logit
+                    buf["scores"].append(prob_lesion.detach().reshape(-1).cpu())
 
     def _safe_quantiles(x: torch.Tensor, qs=(0.10, 0.50, 0.90), *, max_elems: int = 2_000_000):
         """
@@ -1371,23 +1482,17 @@ def attach_pos_score_debug_once(
         if not buf["scores"]:
             return
         import torch
-
         scores = torch.cat(buf["scores"], dim=0).clamp(0.0, 1.0)
         n = int(scores.numel())
         mn = float(scores.min().item())
         mx = float(scores.max().item())
         med = float(scores.median().item())
-        # q10 = float(scores.quantile(0.10).item())
-        # q90 = float(scores.quantile(0.90).item())
         pos50 = float((scores >= 0.5).float().mean().item())
         hist = torch.histc(scores, bins=int(max(1, bins)), min=0.0, max=1.0).tolist()
-
         # Replace any direct scores.quantile(...) usage with:
         cfg_local = getattr(engine.state, "cfg", {}) or {}
         MAX_ELEMS = int(cfg_local.get("quantile_max_elems", 2_000_000))
         q10, q50, q90 = _safe_quantiles(scores, (0.10, 0.50, 0.90), max_elems=MAX_ELEMS)
-
-        # Print once (easy to see in logs)
         try:
             print_fn(
                 f"[pos-score] n={n} min={mn:.4f} q10={q10:.4f} med={med:.4f} "
@@ -1395,7 +1500,6 @@ def attach_pos_score_debug_once(
             )
         except Exception:
             pass
-
         # Expose in metrics (logger will prefix with 'val/' in validation context)
         m = engine.state.metrics
         m[f"{tag}_min"] = mn
@@ -1405,7 +1509,6 @@ def attach_pos_score_debug_once(
         m[f"{tag}_max"] = mx
         m[f"{tag}_rate@0.5"] = pos50
         m[f"{tag}_hist"] = hist
-
         # Detach handlers so this runs only once
         try:
             evaluator.remove_event_handler(_reset, Events.EPOCH_STARTED)
@@ -1646,3 +1749,25 @@ __all__ = [
     "make_warmup_safe_score_fn",
     "maybe_update_best",
 ]
+
+# if "segmentation" in task_set:
+#     seg_nc = int(seg_num_classes) if seg_num_classes is not None else int(num_classes)
+#     # Seed a dedicated seg threshold on the evaluator (independent of cls threshold)
+#     if getattr(evaluator.state, "seg_threshold", None) is None:
+#         evaluator.state.seg_threshold = float(seg_threshold) if seg_threshold is not None else 0.5
+#     # Build the segmentation output transforms once, with dynamic threshold support.
+#     seg_ots = make_seg_output_transform(
+#         threshold=lambda: float(getattr(evaluator.state, "seg_threshold", 0.5))
+#     )
+#     # ConfusionMatrix expects scores ([B,K,H,W]) for multi-class or 2-col one-hot for binary.
+#     seg_cm = ConfusionMatrix(
+#         num_classes=seg_nc,
+#         output_transform=seg_ots.cm,
+#         device=dev,
+#     )
+#     seg_dice = DiceCoefficient(seg_cm)
+#     seg_iou = JaccardIndex(seg_cm)
+#     seg_cm.attach(evaluator, "seg_confmat")
+#     seg_dice.attach(evaluator, "dice")
+#     seg_iou.attach(evaluator, "iou")
+#     val_metrics.update({"seg_confmat": seg_cm, "dice": seg_dice, "iou": seg_iou})

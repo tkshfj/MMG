@@ -500,7 +500,7 @@ def run(
         optimizer=optimizer,
         loss_function=loss_fn,
         prepare_batch=prepare_batch_std,
-        class_counts=class_counts,
+        # class_counts=class_counts,
     )
     # backbone warm-freeze hook
     if cfg.get("freeze_backbone_warmup", False):
@@ -918,10 +918,23 @@ if __name__ == "__main__":
                 setattr(ds, "class_counts", class_counts)
             except Exception:
                 pass
+
+        if hasattr(train_loader, "dataset"):
+            # ensure it's a plain list of ints/floats, length == num_classes
+            train_loader.dataset.class_counts = [int(x) for x in class_counts]
+
         # logger.info(f"class_counts={class_counts}")
+        # Run a single-batch probe when debugging
+        if cfg.get("debug", False) or cfg.get("sanity_check_loaders", True):
+            from data_utils import one_shot_loader_sanity
+            one_shot_loader_sanity(train_loader, val_loader, test_loader, strict=True)
 
         if cfg.get("print_dataset_sizes", True):
             print(f"[INFO] Train: {len(train_loader.dataset)} | Val: {len(val_loader.dataset)} | Test: {len(test_loader.dataset)}")
+
+        import warnings
+        # import re
+        warnings.filterwarnings("ignore", message="Divide by zero (a_min == a_max)")
 
         # Only now touch CUDA/TF32 settings and select device
         enforce_fp32_policy()

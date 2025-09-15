@@ -1,5 +1,8 @@
 # Project Log
 
+# 2025-09-15
+- Fix metrics/seg: solidify lesion-only Dice/IoU via ConfusionMatrix (Ignite-safe)
+
 # 2025-09-14
 - Unify DenseNet/SwinUNETR/UNet: feature_size, seg labels, class-count fix, safe quantiles, attach_val_stack, scalar & per-class Dice/IoU
 - Fix mtlunet scheduler to use val/multi for ReduceLROnPlateau

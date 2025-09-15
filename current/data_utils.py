@@ -5,7 +5,7 @@ import os
 import ast
 import numpy as np
 import pandas as pd
-from typing import Mapping, Optional, Sequence
+from typing import Optional, Sequence
 import torch
 from monai.data import CacheDataset
 from sklearn.model_selection import train_test_split
@@ -123,18 +123,18 @@ def make_weighted_sampler_multiclass(
     return WeightedRandomSampler(weights=per_sample_w, num_samples=(len(y) if num_samples is None else int(num_samples)), replacement=True)
 
 
-def _sanity_check_batch(batch, task, seg_target: str = "indices"):
-    x = batch["image"]
-    assert x.ndim == 4 and x.shape[1] == 1, f"image must be [N,1,H,W], got {tuple(x.shape)}"
+# def _sanity_check_batch(batch, task, seg_target: str = "indices"):
+#     x = batch["image"]
+#     assert x.ndim == 4 and x.shape[1] == 1, f"image must be [N,1,H,W], got {tuple(x.shape)}"
 
-    if task in ("segmentation", "multitask") and "mask" in batch:
-        m = batch["mask"]
-        if seg_target == "indices":
-            assert m.ndim == 3, f"mask must be [N,H,W] for indices, got {tuple(m.shape)}"
-            assert m.dtype in (torch.int64, torch.long), f"mask dtype must be long, got {m.dtype}"
-        else:
-            assert m.ndim == 4 and m.shape[1] >= 1, f"mask must be [N,C,H,W] for channels, got {tuple(m.shape)}"
-            assert m.dtype.is_floating_point, f"mask should be float for channels, got {m.dtype}"
+#     if task in ("segmentation", "multitask") and "mask" in batch:
+#         m = batch["mask"]
+#         if seg_target == "indices":
+#             assert m.ndim == 3, f"mask must be [N,H,W] for indices, got {tuple(m.shape)}"
+#             assert m.dtype in (torch.int64, torch.long), f"mask dtype must be long, got {m.dtype}"
+#         else:
+#             assert m.ndim == 4 and m.shape[1] >= 1, f"mask must be [N,C,H,W] for channels, got {tuple(m.shape)}"
+#             assert m.dtype.is_floating_point, f"mask should be float for channels, got {m.dtype}"
 
 
 def filter_dataframe(df, require_mask=True, require_image=True, verbose=True):
@@ -233,60 +233,156 @@ def _df_to_items(df: pd.DataFrame, *, task: str) -> list[dict]:
     return items
 
 
-def _extract_mask_from_batch(batch) -> Optional[torch.Tensor]:
-    # dict batch: common MONAI-style
-    if isinstance(batch, Mapping):
-        m = batch.get("mask", None)
+# def _extract_mask_from_batch(batch) -> Optional[torch.Tensor]:
+#     # dict batch: common MONAI-style
+#     if isinstance(batch, Mapping):
+#         m = batch.get("mask", None)
+#         if m is None:
+#             lab = batch.get("label", None)
+#             if isinstance(lab, Mapping):
+#                 m = lab.get("mask", None)
+#         return None if m is None else torch.as_tensor(m)
+
+#     # tuple/list batch: (x, y) or (x, y, m)
+#     if isinstance(batch, (list, tuple)) and len(batch) >= 2:
+#         y = batch[1]
+#         if isinstance(y, Mapping) and "mask" in y:
+#             return torch.as_tensor(y["mask"])
+#         if len(batch) >= 3:
+#             return torch.as_tensor(batch[2])
+
+#     return None
+
+
+# def _to_index_mask(mask: torch.Tensor) -> torch.Tensor:
+#     # accept [B,H,W], [B,1,H,W], or [B,C,H,W] one-hot/logits
+#     m = mask
+#     if m.ndim == 4 and m.size(1) > 1:
+#         m = m.argmax(dim=1)
+#     elif m.ndim == 4 and m.size(1) == 1:
+#         m = m[:, 0]
+#     elif m.ndim == 2:
+#         m = m.unsqueeze(0)  # [1,H,W]
+#     return m.long()
+
+
+def _shape(t):
+    try:
+        return tuple(t.shape)
+    except Exception:
+        return None
+
+
+def _as_tensor(x):
+    # Handle MetaTensor and numpy safely
+    if hasattr(x, "as_tensor"):
+        x = x.as_tensor()
+    return torch.as_tensor(x)
+
+
+def one_shot_loader_sanity(train_loader, val_loader=None, test_loader=None, *, strict=True):
+    """
+    Pull exactly one batch (with num_workers=0) from each provided loader and
+    print shapes/dtypes. Raises if image/mask spatial sizes mismatch when strict=True.
+    """
+    def _peek(loader, name: str):
+        if loader is None:
+            return
+        ds = loader.dataset
+        # Use the same collate_fn if present; disable workers for clear errors
+        tmp = DataLoader(
+            ds,
+            batch_size=next(iter([loader.batch_size])).__int__() if getattr(loader, "batch_size", None) else 1,
+            shuffle=False,
+            num_workers=0,
+            pin_memory=False,
+            collate_fn=getattr(loader, "collate_fn", None),
+        )
+        it = iter(tmp)
+        batch = next(it)
+
+        # Accept dict or (image, target) style
+        if isinstance(batch, (list, tuple)):
+            if len(batch) == 2 and not isinstance(batch[0], dict):
+                batch = {"image": batch[0], "label": batch[1]}
+            elif len(batch) > 0 and isinstance(batch[0], dict):
+                batch = batch[0]  # list of dicts -> first sample
+            else:
+                # leave as is if collate already produced dict
+                pass
+
+        assert isinstance(batch, dict), f"[sanity:{name}] Expected dict batch, got {type(batch)}"
+
+        img = batch.get("image")
+        msk = batch.get("mask")
+        lbl = batch.get("label")
+
+        if img is not None:
+            img = _as_tensor(img)
+        if msk is not None:
+            msk = _as_tensor(msk)
+        if lbl is not None:
+            lbl = _as_tensor(lbl)
+
+        msg = f"[SANITY:{name}] "
+        if img is not None:
+            msg += f"image { _shape(img) } dtype={img.dtype}  "
+        if msk is not None:
+            msg += f"| mask { _shape(msk) } dtype={msk.dtype}  "
+        if lbl is not None:
+            msg += f"| label { _shape(lbl) } dtype={lbl.dtype} "
+        print(msg.strip())
+
+        # If both image and mask exist, ensure spatial sizes match
+        if img is not None and msk is not None:
+            img_sp = _shape(img)[-2:]
+            msk_sp = _shape(msk)[-2:]
+            if img_sp != msk_sp:
+                msg = f"[SANITY:{name}] Image/Mask spatial mismatch: image{img_sp} vs mask{msk_sp}"
+                if strict:
+                    raise RuntimeError(msg)
+                else:
+                    print("WARN:", msg)
+
+    _peek(train_loader, "train")
+    _peek(val_loader, "val")
+    _peek(test_loader, "test")
+
+
+def infer_class_counts(train_loader, num_classes: int, max_batches: int = 16):
+    import torch
+    counts = torch.zeros(num_classes, dtype=torch.long)
+    seen = 0
+
+    # Try to unwrap the base dataset (CacheDataset / Dataset / Subset)
+    ds = getattr(train_loader, "dataset", None)
+    base = getattr(ds, "dataset", ds)  # unwrap 1 level if it's a wrapper
+
+    for idx in range(len(base)):
+        if seen >= max_batches:
+            break
+        sample = base[idx]
+        # Accept several shapes / keys
+        m = sample.get("mask", None)
         if m is None:
-            lab = batch.get("label", None)
-            if isinstance(lab, Mapping):
-                m = lab.get("mask", None)
-        return None if m is None else torch.as_tensor(m)
+            m = sample.get("label", None)
+        if m is None:
+            # skip or raise, depending on policy
+            continue
+        m = torch.as_tensor(m)
+        # Normalize to indices [H,W] or [D,H,W]
+        if m.ndim == 4 and m.shape[1] > 1:
+            m = m.argmax(dim=1)
+        if m.ndim == 3 and m.shape[0] == 1:
+            m = m[0]
+        binc = torch.bincount(m.reshape(-1).clamp(min=0, max=num_classes - 1), minlength=num_classes)
+        counts += binc.to(counts.dtype)
+        seen += 1
 
-    # tuple/list batch: (x, y) or (x, y, m)
-    if isinstance(batch, (list, tuple)) and len(batch) >= 2:
-        y = batch[1]
-        if isinstance(y, Mapping) and "mask" in y:
-            return torch.as_tensor(y["mask"])
-        if len(batch) >= 3:
-            return torch.as_tensor(batch[2])
-
-    return None
-
-
-def _to_index_mask(mask: torch.Tensor) -> torch.Tensor:
-    # accept [B,H,W], [B,1,H,W], or [B,C,H,W] one-hot/logits
-    m = mask
-    if m.ndim == 4 and m.size(1) > 1:
-        m = m.argmax(dim=1)
-    elif m.ndim == 4 and m.size(1) == 1:
-        m = m[:, 0]
-    elif m.ndim == 2:
-        m = m.unsqueeze(0)  # [1,H,W]
-    return m.long()
-
-
-def infer_class_counts(train_loader, *, num_classes: int, max_batches: int | None = None):
-    counts = torch.zeros(int(num_classes), dtype=torch.long)
-    seen_any = False
-    with torch.no_grad():
-        for i, batch in enumerate(train_loader):
-            mask = _extract_mask_from_batch(batch)
-            if mask is None:
-                continue
-            seen_any = True
-            idx = _to_index_mask(mask)  # [B,H,W]
-            # bincount per batch to avoid per-class loops
-            bc = torch.bincount(idx.view(-1), minlength=int(num_classes))
-            counts[: bc.numel()] += bc.to(counts.dtype)
-            if max_batches is not None and (i + 1) >= int(max_batches):
-                break
-    if not seen_any:
-        # safe fallback if dataset has no masks in batches
-        return [1] * int(num_classes)
-    # avoid zeros (stable CE/Dice weights)
-    counts = torch.clamp(counts, min=1)
-    return [int(v) for v in counts.tolist()]
+    if seen == 0:
+        # Safe fallback
+        return [1] * num_classes
+    return counts.tolist()
 
 
 def build_dataloaders(
@@ -455,25 +551,6 @@ def build_dataloaders(
                 generator=g
             )
 
-    # # weighted sampler
-    # train_sampler = None
-    # if sampling.lower() == "weighted" and task in ("classification", "multitask"):
-    #     # y_train = torch.as_tensor([it["label"] for it in train_items], dtype=torch.long)
-    #     lbls = [it["label"] for it in train_items if "label" in it]
-    #     if not lbls:
-    #         logger.warning("sampling='weighted' requested but no labels found in train_items; using shuffle.")
-    #     else:
-    #         y_train = torch.as_tensor(lbls, dtype=torch.long)
-    #         if int(num_classes) == 2:
-    #             n_pos = int((y_train == 1).sum())
-    #             n_neg = int((y_train == 0).sum())
-    #             default_pos_w = (n_neg / max(n_pos, 1)) if n_pos > 0 else 1.0
-    #             pw = float(default_pos_w if pos_weight is None else pos_weight)
-    #             train_sampler = make_weighted_sampler_binary(y_train, pos_weight=pw, neg_weight=float(neg_weight))
-    #         else:
-    #             cw = torch.as_tensor(class_weights, dtype=torch.float) if class_weights is not None else None
-    #             train_sampler = make_weighted_sampler_multiclass(y_train, class_weights=cw, num_classes=int(num_classes))
-
     # construct loaders (default collate is fine now)
     def _make_loader(ds, *, shuffle: bool, drop_last: bool = False, sampler=None):
         kwargs = {**common_kwargs, "shuffle": (shuffle if sampler is None else False), "drop_last": drop_last}
@@ -500,10 +577,10 @@ def build_dataloaders(
     else:
         logging.info("[sampler] no labels detected in train_items; using shuffle.")
 
-    if debug:
-        batch = next(iter(val_loader))
-        _sanity_check_batch(batch, task, seg_target=seg_target)
-        print_batch_debug(batch)
+    # if debug:
+    #     batch = next(iter(val_loader))
+    #     _sanity_check_batch(batch, task, seg_target=seg_target)
+    #     print_batch_debug(batch)
 
     if not logging.getLogger().handlers:
         logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
