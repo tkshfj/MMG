@@ -11,10 +11,11 @@ not_used/
 results/history/
 outputs/
 wandb/
+not_used/
 
-/working/
 /temporary/
 /wip/
+/working/
 
 # DS_Store files
 .DS_Store
