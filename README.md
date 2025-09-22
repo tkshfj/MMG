@@ -2,14 +2,14 @@
 
 ## Timeline
 
-| Date        | Week   | Deliverable                       | Weight                         | Status   |
-|-------------|--------|-----------------------------------|--------------------------------|----------|
+| Date        | Week   | Deliverable                       | Weight                         | Status    |
+|-------------|--------|-----------------------------------|--------------------------------|-----------|
 | 5 May       | 4      | Project Proposal (Video 3–5 mins) | -                              | Submitted |
 | 17 June     | 11     | Preliminary Report (CW1)          | 10%                            | Submitted |
 | 4 Aug       | 18     | Draft Report                      | -                              | Submitted |
-| 1 Sep       | 22–23  | Exam                              | 20%                            | |
-| 15 Sep      | 24     | Final Report (CW2)                | Report/Code: 60%<br>Video: 5%  | |
-| -           | 1–20   | Quizzes                           | 5%                             | Ongoing |
+| 1 Sep       | 22–23  | Exam                              | 20%                            | Done      |
+| 22 Sep      | 24     | Final Report (CW2)                | Report/Code: 60%<br>Video: 5%  | Ongoing   |
+| -           | 1–20   | Quizzes                           | 5%                             | Done.     |
 
 ## Work Plan
 
@@ -61,7 +61,7 @@ gantt
 | 4–5   | Apr 26–May 10 | Data Preprocessing                      | Clean, standardize, and split data                        | Scripted data processing               |
 | 5–7   | May 6–22      | Literature Review                       | Conduct background research                               | Literature review report               |
 | 7–8   | May 23–27     | Project Design                          | Draft project design                                      | Project design report                  |
-| 8–10  | May 30–Jun 15 | Baseline CNN Implementation, Preliminary report | Develop and evaluate baseline CNN classifier              | Acc ≥ 70%, AUC ≥ 0.75, Preliminary report & video |
+| 8–10  | May 30–Jun 15 | Baseline CNN Implementation, Preliminary report | Develop and evaluate baseline CNN classifier      | Acc ≥ 70%, AUC ≥ 0.75, Preliminary report & video |
 | 11–12 | Jun 16–Jun 29 | Enhanced CNN/U-Net Implementation       | Implement and validate U-Net for segmentation             | Dice ≥ 0.75, IoU ≥ 0.65, Acc ≥ 85% |
 | 13–14 | Jun 30–Jul 13 | Multi-task CNN Development              | Develop and test joint classification/segmentation models | Dice ≥ 0.80, IoU ≥ 0.70, Acc ≥ 88%     |
 | 15–16 | Jul 14–27     | Transformer-based Model Implementation  | Implement and test ViT/Swin/TransUNet models              | Acc ≥ 90%, Dice ≥ 0.82, Loc. Acc ≥ 80% |
@@ -72,7 +72,7 @@ gantt
 | —     | Jun 4         | Midterm Webinar (Milestone)             | CM3070 Final Project Mid Term Webinar by Dr Sarah Rauchas | Midterm Webinar                        |
 | —     | Jun 17        | Preliminary Report (Milestone)          | Complete and submit preliminary report                    | Preliminary report                     |
 | —     | Aug 5         | Draft Report (Milestone)                | Complete and submit draft report                          | Draft report                           |
-| —     | Sep 15        | Final Report (Milestone)                | Complete and submit final report                          | Final report                           |
+| —     | Sep 22        | Final Report (Milestone)                | Complete and submit final report                          | Final report                           |
 
 
 ## Project Idea: 3.2 MLNN: Deep Learning Breast Cancer Detection
