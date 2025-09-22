@@ -258,7 +258,7 @@ def run(
     score_kwargs = {
         "binary_single_logit": bool(cfg.get("binary_single_logit", False)),
         "binary_bce_from_two_logits": bool(cfg.get("binary_bce_from_two_logits", False)),
-        # optional: you can force a mode explicitly:
+        # optional: we can force a mode explicitly:
         # "mode": str(cfg.get("score_mode", "auto")),  # one of: auto, bce_single, ce_softmax, bce_two_logit
     }
 
@@ -377,7 +377,7 @@ def run(
                 if ep < int(cfg.get("cal_warmup_epochs", 1)):
                     # no calibration yet; still run evaluator with the initial threshold
                     std_evaluator.run(val_loader)
-                    # inline logging (or call helper if you have one)
+                    # inline logging (or call helper if we have one)
                     payload = {"trainer/epoch": ep}
                     payload.update(_flatten_metrics_for_wandb(std_evaluator.state.metrics))
                     thr_search = std_evaluator.state.metrics.get("threshold", None)

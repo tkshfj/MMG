@@ -713,25 +713,6 @@ def attach_engine_metrics(
             "iou": iou_lesion,
         })
 
-        # # Dice/IoU from the same CM; ignore background channel = 1
-        # try:
-        #     seg_dice = DiceCoefficient(seg_cm, ignore_index=bg_idx, average=True)
-        #     seg_iou = JaccardIndex(seg_cm, ignore_index=bg_idx, average=True)
-        # except TypeError:
-        #     # Fallback for older Ignite: no ignore_index/average in ctor
-        #     seg_dice = DiceCoefficient(seg_cm)
-        #     seg_iou = JaccardIndex(seg_cm)
-
-        # # seg_dice = DiceCoefficient(seg_cm, ignore_index=bg_idx, average=True)
-        # # seg_iou = JaccardIndex(seg_cm, ignore_index=bg_idx, average=True)
-
-        # # Attach with your existing keys
-        # seg_cm.attach(evaluator, "seg_confmat")
-        # seg_dice.attach(evaluator, "dice")
-        # seg_iou.attach(evaluator, "iou")
-
-        # val_metrics.update({"seg_confmat": seg_cm, "dice": seg_dice, "iou": seg_iou})
-
     if not getattr(evaluator.state, "_val_metrics_attached", False):
         for k, m in val_metrics.items():
             m.attach(evaluator, k)
@@ -1749,25 +1730,3 @@ __all__ = [
     "make_warmup_safe_score_fn",
     "maybe_update_best",
 ]
-
-# if "segmentation" in task_set:
-#     seg_nc = int(seg_num_classes) if seg_num_classes is not None else int(num_classes)
-#     # Seed a dedicated seg threshold on the evaluator (independent of cls threshold)
-#     if getattr(evaluator.state, "seg_threshold", None) is None:
-#         evaluator.state.seg_threshold = float(seg_threshold) if seg_threshold is not None else 0.5
-#     # Build the segmentation output transforms once, with dynamic threshold support.
-#     seg_ots = make_seg_output_transform(
-#         threshold=lambda: float(getattr(evaluator.state, "seg_threshold", 0.5))
-#     )
-#     # ConfusionMatrix expects scores ([B,K,H,W]) for multi-class or 2-col one-hot for binary.
-#     seg_cm = ConfusionMatrix(
-#         num_classes=seg_nc,
-#         output_transform=seg_ots.cm,
-#         device=dev,
-#     )
-#     seg_dice = DiceCoefficient(seg_cm)
-#     seg_iou = JaccardIndex(seg_cm)
-#     seg_cm.attach(evaluator, "seg_confmat")
-#     seg_dice.attach(evaluator, "dice")
-#     seg_iou.attach(evaluator, "iou")
-#     val_metrics.update({"seg_confmat": seg_cm, "dice": seg_dice, "iou": seg_iou})

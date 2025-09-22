@@ -100,17 +100,6 @@ def _rate_match_threshold(scores, target_rate):
         return t + eps
 
 
-# def _rate_match_threshold(scores: np.ndarray, target_rate: float) -> float:
-#     """
-#     Monotone projection: choose t so that pos_rate(scores >= t) ~= target_rate.
-#     Using the (1 - target_rate)-quantile achieves that.
-#     """
-#     if scores.size == 0:
-#         return 0.5
-#     q = float(np.clip(1.0 - target_rate, 0.0, 1.0))
-#     return float(np.quantile(scores, q))
-
-
 def _bounded_step(old: float, new: float, *, max_delta: float, lo: float, hi: float) -> float:
     step = np.clip(new - old, -float(max_delta), float(max_delta))
     return float(np.clip(old + step, float(lo), float(hi)))

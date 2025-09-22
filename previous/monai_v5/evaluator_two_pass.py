@@ -644,7 +644,7 @@ def _to_float(v: Any) -> Any:
 def attach_two_pass_validation(
     *,
     trainer: Engine,
-    run_two_pass: TwoPassRunner,             # closure that calls your two_pass.validate(...)
+    run_two_pass: TwoPassRunner,             # closure that calls two_pass.validate(...)
     cal_warmup_epochs: int = 1,
     disable_std_logging: bool = True,        # turn off any existing 1-pass epoch logger
     wandb_prefix: str = "val/",

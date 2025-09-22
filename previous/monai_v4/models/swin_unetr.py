@@ -43,7 +43,7 @@ class SwinUNETRModel(BaseModel):
     def build_model(self, config: Any) -> Any:
         self.config = config
 
-        # 2D by default in this project; pass a 3-tuple if you use 3D
+        # 2D by default in this project; pass a 3-tuple if we use 3D
         img_size = self._cfg_get(config, "img_size", self._cfg_get(config, "input_shape", (256, 256)))
         img_size = self._as_tuple(img_size)
         if len(img_size) not in (2, 3):

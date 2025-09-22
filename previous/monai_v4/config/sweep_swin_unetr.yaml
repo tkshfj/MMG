@@ -18,7 +18,7 @@ parameters:
 
   # --- Data / labels ---
   in_channels:         { value: 1 }
-  # 2D default for this project; switch to [96, 96, 96] if you run 3D volumes
+  # 2D default for this project; switch to [96, 96, 96] if we run 3D volumes
   img_size:            { value: [256, 256] }
   out_channels:        { value: 2 }
   batch_size:
@@ -41,7 +41,7 @@ parameters:
     values: [3.0, 4.0]
   use_checkpoint:
     values: [false, true]
-  # MONAI expects "norm_name"; your model also accepts legacy "norm_layer"
+  # MONAI expects "norm_name"; model also accepts legacy "norm_layer"
   norm_name:
     values: [instance, batch]
 
@@ -58,7 +58,7 @@ parameters:
     max: 0.001
 
   # --- LR setup ---
-  # Keep a single LR group for SwinUNETR unless you implement param splits
+  # Keep a single LR group for SwinUNETR unless we implement param splits
   param_groups: { value: single }
   lr:
     distribution: log_uniform_values

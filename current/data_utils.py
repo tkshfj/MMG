@@ -123,20 +123,6 @@ def make_weighted_sampler_multiclass(
     return WeightedRandomSampler(weights=per_sample_w, num_samples=(len(y) if num_samples is None else int(num_samples)), replacement=True)
 
 
-# def _sanity_check_batch(batch, task, seg_target: str = "indices"):
-#     x = batch["image"]
-#     assert x.ndim == 4 and x.shape[1] == 1, f"image must be [N,1,H,W], got {tuple(x.shape)}"
-
-#     if task in ("segmentation", "multitask") and "mask" in batch:
-#         m = batch["mask"]
-#         if seg_target == "indices":
-#             assert m.ndim == 3, f"mask must be [N,H,W] for indices, got {tuple(m.shape)}"
-#             assert m.dtype in (torch.int64, torch.long), f"mask dtype must be long, got {m.dtype}"
-#         else:
-#             assert m.ndim == 4 and m.shape[1] >= 1, f"mask must be [N,C,H,W] for channels, got {tuple(m.shape)}"
-#             assert m.dtype.is_floating_point, f"mask should be float for channels, got {m.dtype}"
-
-
 def filter_dataframe(df, require_mask=True, require_image=True, verbose=True):
 
     def _check_image_exists(row):

@@ -252,7 +252,7 @@ def get_monai_transforms(task: str = "segmentation", input_shape=(256, 256)):
         ToTensord(keys=img_keys, dtype=torch.float32, allow_missing_keys=True),
         ToTensord(keys=mask_keys, dtype=torch.long, allow_missing_keys=True),
         Lambdad(keys=spatial_keys, func=_ensure_chw, allow_missing_keys=True),
-        # (optional) ScaleIntensityRanged(...) if you need it
+        # (optional) ScaleIntensityRanged(...) if we need it
         RandFlipd(keys=spatial_keys, prob=0.5, spatial_axis=-2, allow_missing_keys=True),
         RandRotate90d(keys=spatial_keys, prob=0.5, spatial_axes=(-2, -1), allow_missing_keys=True),
         Lambdad(keys=mask_keys, func=_squeeze_ch1, allow_missing_keys=True),  # -> [H,W]

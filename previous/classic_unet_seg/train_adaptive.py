@@ -136,17 +136,6 @@ def main():
         ),
     ]
 
-    # callbacks = [
-    #     EarlyStopping(monitor="val_loss", patience=10, restore_best_weights=True),
-    #     # You can keep ModelCheckpoint or replace with WandbModelCheckpoint for artifact tracking
-    #     ModelCheckpoint("unet_best.keras", monitor="val_loss", save_best_only=True),
-    #     WandbMetricsLogger(),
-    #     # Optionally log model checkpoints to wandb artifacts as well:
-    #     # WandbModelCheckpoint(filepath="unet_best.h5", monitor="val_loss", save_best_only=True),
-    #     # Optionally log sample predictions (like log_evaluation/predictions before)
-    #     WandbEvalCallback(val_ds, labels=None, num_examples=16)
-    # ]
-
     # Train
     model.fit(
         train_ds,
@@ -154,15 +143,6 @@ def main():
         epochs=epochs,
         callbacks=callbacks
     )
-
-    # # Plot loss/metrics (log to both W&B and local file)
-    # plot_training_curves(history, save_path="training_curves.png", log_to_wandb=True)
-
-    # # Evaluate and plot predictions
-    # for batch in test_ds.take(1):
-    #     imgs, masks = batch
-    #     preds = model.predict(imgs)
-    #     plot_example_predictions(imgs, masks, preds, max_examples=4, save_path="prediction", log_to_wandb=True)
 
     # Save final model
     model.save("./models/unet_final.keras")

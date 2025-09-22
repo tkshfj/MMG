@@ -15,7 +15,7 @@ def make_image_logger(max_items: int = 8, threshold: float = 0.5, namespace: str
     - payload_like: either an evaluator output dict (preferred: contains predictions)
                     or a batch dict (contains input/gt only).
                     Expected keys (if available): 'image', 'mask', 'seg_logits' / 'pred'
-    - wandb_module: typically the `wandb` module instance returned by your init helper
+    - wandb_module: typically the `wandb` module instance returned by init helper
     - epoch_anchor: int epoch number; will log with {"trainer/epoch": epoch_anchor}
 
     The function logs once per call with:

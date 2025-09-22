@@ -200,17 +200,6 @@ def _make_transforms(
     else:
         t.append(EnsureChannelFirstd(keys=img_keys, channel_dim="no_channel", allow_missing_keys=True))
 
-    # # 2) Channel-first for BOTH (explicit channel_dim so we never depend on meta)
-    # if has_masks:
-    #     t += _ensure_cf_2d(("image", "mask"))
-    # else:
-    #     t.append(EnsureChannelFirstd(keys=img_keys, channel_dim="no_channel", allow_missing_keys=True))
-
-    # After channel-first
-    # t.append(Orientationd(keys=both_keys, axcodes="RAS", allow_missing_keys=True))
-    # QuietOrientationD(keys=both_keys, axcodes_2d="RA", axcodes_3d="RAS", allow_missing_keys=True)
-    # t.append(Spacingd(keys=both_keys, pixdim=(1.0, 1.0), mode=sp_mode, allow_missing_keys=True))
-
     # 3) Keep image/mask spatial shapes in sync BEFORE any crop
     if has_masks:
         # t.append(EnsureSameSpatialD(keys=("image", "mask"), fix="resize_mask_to_image", warn=True))
@@ -229,25 +218,6 @@ def _make_transforms(
             # Re-binarize after resize (safety)
             t.append(AsDiscreted(keys=mask_keys, threshold=0.5, allow_missing_keys=True))
             t.append(AssertSameSpatialD(keys=("image", "mask")))
-
-    # # 4) Train vs Eval spatial path
-    # if augment and has_masks and crop_train:
-    #     # Paired crop
-    #     t.append(RandSpatialCropd(
-    #         keys=both_keys,
-    #         roi_size=tuple(input_shape),
-    #         random_center=True,
-    #         random_size=False
-    #     ))
-    #     # Assert immediately after the paired geometry op
-    #     t.append(AssertSameSpatialD(keys=("image", "mask")))
-    # else:
-    #     # Eval / no-crop: per-key, deterministic resize
-    #     t.append(Resized(keys=["image"], spatial_size=tuple(input_shape), mode="bilinear", anti_aliasing=False, allow_missing_keys=False))
-    #     if has_masks:
-    #         t.append(Resized(keys=["mask"], spatial_size=tuple(input_shape), mode="nearest", anti_aliasing=False, allow_missing_keys=False))
-    #         # Assert immediately after paired resize
-    #         t.append(AssertSameSpatialD(keys=("image", "mask")))
 
     # 5) Intensity — image only
     # If some images are constant (divide-by-zero warnings), NormalizeIntensityd(nonzero=True) will skip zeros.
@@ -333,94 +303,3 @@ def make_val_transforms(
         augment=False,
         crop_train=False,
     )
-
-# # Core builder
-# def _make_transforms(
-#     *,
-#     input_shape: Tuple[int, int],
-#     task: str,
-#     seg_target: str,
-#     num_classes: int,
-#     bin_thresh: float,
-#     augment: bool,
-#     crop_train: bool = False,
-#     lesion_class: int = 1,
-#     pos_ratio: float = 0.5,
-#     num_samples: int = 4,
-# ) -> Compose:
-#     has_masks = task.lower() in {"segmentation", "multitask"}
-#     img_keys = ["image"]
-#     mask_keys = ["mask"] if has_masks else []
-#     both_keys = img_keys + mask_keys
-
-#     t = []
-
-#     # IO / load (top-level functions → picklable)
-#     t.append(Lambdad(keys=img_keys, func=read_dicom, allow_missing_keys=False))
-#     if mask_keys:
-#         t.append(Lambdad(keys=mask_keys, func=read_and_merge_masks, allow_missing_keys=True))
-
-#     # Adds a channel if missing
-#     t.append(Lambdad(keys=both_keys, func=add_channel_if_2d, allow_missing_keys=True))
-
-#     # Size/cropping
-#     if augment and has_masks and crop_train:
-#         # Make mask binary so positive voxels are 1, background 0
-#         # This ensures RandCropByPosNegLabeld treats label>0 as "pos".
-#         t.append(AsDiscreted(keys=mask_keys, threshold=bin_thresh, allow_missing_keys=True))
-
-#         # Convert desired ratio to counts (no pos_ratio arg)
-#         pos_k, neg_k = _pos_neg_from_ratio(pos_ratio, num_samples)
-
-#         # Lesion-aware sampler: picks centers from mask>0 for 'pos_k' and from mask==0 for 'neg_k'
-#         t.append(RandCropByPosNegLabeld(
-#             keys=both_keys,
-#             label_key="mask",
-#             spatial_size=tuple(input_shape),
-#             pos=pos_k,                       # counts, NOT class id
-#             neg=neg_k,                       # counts, NOT class id
-#             num_samples=int(num_samples),
-#             image_key="image",
-#             image_threshold=0.0,
-#         ))
-#         # No resize after cropping; patches are already input_shape [H,W] = input_shape.
-#     else:
-#         # Val/test (or train without crop): global resize
-#         t.append(
-#             ResizeD(
-#                 keys=both_keys,
-#                 spatial_size=input_shape,
-#                 mode=("bilinear", "nearest") if has_masks else "bilinear",
-#                 allow_missing_keys=True,
-#             )
-#         )
-
-#     # Intensity & typing (image only for intensity)
-#     t.append(ScaleIntensityRangePercentilesd(keys=img_keys, lower=2, upper=98, b_min=-1.0, b_max=1.0, clip=True))
-#     t.append(NormalizeIntensityd(keys=img_keys, nonzero=True, channel_wise=True))
-#     t.append(EnsureTyped(keys=both_keys, dtype=torch.float32, allow_missing_keys=True))
-
-#     # Augmentations (train only)
-#     if augment:
-#         t.append(RandFlipd(keys=both_keys, prob=0.5, spatial_axis=-2))
-#         t.append(RandRotate90d(keys=both_keys, prob=0.5, spatial_axes=(-2, -1)))
-
-#     # Mask post-processing (final target formatting for the model & loss)
-#     if mask_keys:
-#         if seg_target == "indices":
-#             if num_classes <= 2:
-#                 # keep binary 0/1; we already discretized earlier for the crop
-#                 t.append(AsDiscreted(keys=mask_keys, threshold=bin_thresh, allow_missing_keys=True))
-#             else:
-#                 t.append(AsDiscreted(keys=mask_keys, argmax=True, allow_missing_keys=True))
-#             # model usually expects [H,W] integer labels for indices
-#             t.append(SqueezeDimd(keys=mask_keys, dim=0, allow_missing_keys=True))
-#             t.append(EnsureTyped(keys=mask_keys, dtype=torch.long, allow_missing_keys=True))
-#         else:
-#             # channels target -> keep float (optionally one-hot for >2 classes)
-#             if num_classes <= 2:
-#                 t.append(AsDiscreted(keys=mask_keys, threshold=bin_thresh, allow_missing_keys=True))
-#             else:
-#                 t.append(AsDiscreted(keys=mask_keys, to_onehot=num_classes, allow_missing_keys=True))
-
-#     return Compose(t)

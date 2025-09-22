@@ -336,40 +336,6 @@ def _console_print_metrics(epoch: int, metrics: dict):
     print(f"[INFO] Epoch[{epoch}] Metrics -- " + " ".join(parts))
 
 
-# def _console_print_metrics(epoch: int, metrics: dict):
-#     def _as_scalar(x):
-#         if torch.is_tensor(x) and x.numel() == 1:
-#             return float(x.item())
-#         return x
-
-#     # format a few scalars nicely
-#     parts = []
-#     # for k in ("acc", "prec", "recall", "auc", "pos_rate", "gt_pos_rate"):
-#     for k in ("acc", "precision_pos", "recall_pos", "auc", "pos_rate", "gt_pos_rate"):
-#         v = metrics.get(k)
-#         if v is not None:
-#             v = _as_scalar(v)
-#             parts.append(f"{k}: {v:.4f}" if isinstance(v, float) else f"{k}: {v}")
-
-#     # confusion matrix (handle both names)
-#     for cm_key in ("cls_confmat", "val/confmat", "seg_confmat"):
-#         cm = metrics.get(cm_key)
-#         if cm is not None:
-#             # MetaTensor → Tensor
-#             if hasattr(cm, "as_tensor"):
-#                 cm = cm.as_tensor()
-#             # Tensor/ndarray → python list of ints
-#             if torch.is_tensor(cm):
-#                 cm_list = cm.detach().cpu().to(torch.int64).tolist()
-#             else:
-#                 cm_list = np.asarray(cm, dtype=np.int64).tolist()
-
-#             parts.append(f"{cm_key}: {cm_list}")
-#             break
-
-#     print(f"[INFO] Epoch[{epoch}] Metrics -- " + " ".join(parts))
-
-
 def is_wandb_sweep() -> bool:
     # WANDB_SWEEP_ID is set for agent processes
     return bool(os.environ.get("WANDB_SWEEP_ID") or os.environ.get("WANDB_AGENT"))

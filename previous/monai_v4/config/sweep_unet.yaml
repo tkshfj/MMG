@@ -23,7 +23,7 @@ parameters:
   batch_size:
     values: [8, 16, 32]
 
-  # (Optional) class weighting for CE part if your centralized loss uses it
+  # (Optional) class weighting for CE part if centralized loss uses it
   # class_weights:
   #   values: [[0.3, 1.7], [0.5, 1.5], [1.0, 1.0]]
 
@@ -54,7 +54,7 @@ parameters:
     max: 0.001
 
   # --- LR setup ---
-  # Keep a single LR group for UNet unless you explicitly implement param splits
+  # Keep a single LR group for UNet unless we explicitly implement param splits
   param_groups: { value: single }
 
   # Learning rate (single group)

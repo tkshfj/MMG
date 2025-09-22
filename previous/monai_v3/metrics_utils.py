@@ -79,7 +79,7 @@ def make_metrics(
                     output_transform=seg_output_transform
                 )
             else:
-                # If both tasks are present but NOT multitask loss, you can expose per-task losses instead:
+                # If both tasks are present but NOT multitask loss, we can expose per-task losses instead:
                 metrics["val_cls_loss"] = Loss(
                     loss_fn=nn.CrossEntropyLoss(), output_transform=cls_output_transform
                 )

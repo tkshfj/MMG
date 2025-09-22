@@ -13,7 +13,7 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-# -------- Defaults --------
+# Defaults
 NAME_COL = "Name"
 DEFAULT_GROUPS = ["architecture", "lr_scheduler", "calibration_method", "dropout_rate"]
 DEFAULT_METRICS = [
@@ -24,7 +24,7 @@ DEFAULT_FACTORS = ["lr_scheduler", "lr", "calibration_method", "dropout_rate"]
 PRIMARY_DEFAULT = "val/auc"
 
 
-# -------- I/O --------
+# I/O
 def _maybe_parse(x):
     if isinstance(x, str):
         s = x.strip()
@@ -109,7 +109,7 @@ def coerce_numeric(df: pd.DataFrame, cols: List[str]) -> pd.DataFrame:
     return df
 
 
-# -------- Aggregations --------
+# Aggregations
 def layered_summary(df: pd.DataFrame, groups: List[str], metrics: List[str]) -> pd.DataFrame:
     groups = [c for c in groups if c in df.columns]
     metrics = [c for c in metrics if c in df.columns]
@@ -149,7 +149,7 @@ def add_effective_lr(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-# -------- Plots --------
+# Plots
 def plot_heatmap(df: pd.DataFrame, score_col: str, outdir: Path):
     if score_col not in df.columns or "architecture" not in df.columns or "lr_scheduler" not in df.columns:
         return
@@ -297,7 +297,7 @@ def plot_core_boxes_by_scheduler(df: pd.DataFrame, outdir: Path):
             plt.close(fig)
 
 
-# -------- Orchestrator --------
+# Orchestrator
 def run(csv: str, outdir: str, score_col: str, groups: List[str], metrics: List[str], factors: List[str], lr_col_cli: str):
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
