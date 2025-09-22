@@ -1,24 +1,22 @@
+# DS_Store files
+.DS_Store
+
 # Project-specific Outputs
 *.h5
 *.keras
 *.pth
+
 data/
 downloads/
 html/
 images/
-logs/fit/
 not_used/
-results/history/
 outputs/
 wandb/
-not_used/
 
 /temporary/
 /wip/
 /working/
-
-# DS_Store files
-.DS_Store
 
 # Quarto files
 /.quarto/
