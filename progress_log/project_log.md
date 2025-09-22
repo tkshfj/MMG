@@ -1,5 +1,10 @@
 # Project Log
 
+# 2025-09-22
+- Submit final report and make repository public
+  - Move previous versions to `previous/`
+- Finalize project report
+
 # 2025-09-15
 - Fix metrics/seg: solidify lesion-only Dice/IoU via ConfusionMatrix (Ignite-safe)
 
