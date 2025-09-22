@@ -9,7 +9,7 @@
 | 4 Aug       | 18     | Draft Report                      | -                              | Submitted |
 | 1 Sep       | 22–23  | Exam                              | 20%                            | Done      |
 | 22 Sep      | 24     | Final Report (CW2)                | Report/Code: 60%<br>Video: 5%  | Ongoing   |
-| -           | 1–20   | Quizzes                           | 5%                             | Done.     |
+| -           | 1–20   | Quizzes                           | 5%                             | Done      |
 
 ## Work Plan
 
